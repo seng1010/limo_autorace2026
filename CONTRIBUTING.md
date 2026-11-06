@@ -14,7 +14,7 @@
 
 | 브랜치 | 노드 | 쓰는 미션 | 담당 |
 |---|---|---|---|
-| `common-stop-line` | `stop_line_node` | M1, M3 | (미정) |
+| `common-stop-line` | `stop_line_node` | M1, M3 | 박세은 |
 | `common-lane-following` | `lane_following_node` | 기본 주행, M2, M6, M7 | (미정) |
 | `common-yolo` | `yolo_detection_node` | M1, M2, M3, M5 | (미정) |
 
