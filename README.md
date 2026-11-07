@@ -5,7 +5,7 @@ Agilex LIMO 위에서 카메라와 LiDAR로 미션 8종을 수행하며 트랙 �
 
 > **기반 코드**: 인하대 미래자동차사업단 여름 학점교류 **2026 미래모빌리티 AI 자율주행 대회 금상** 코드
 > ([jjong102/limo_inha_capstone](https://github.com/jjong102/limo_inha_capstone))를 가져와
-> Autorace 규정에 맞게 수정하는 중입니다. 아래 "노드 구성"은 여름 대회 기준이며, 수정되는 대로 갱신합니다.
+> Autorace 규정에 맞게 수정했습니다. 여름 대회의 imitation learning 주행은 라인 추종 + 이벤트 기반 상태머신 구조로 바꿨습니다.
 
 ## 팀원
 
@@ -40,8 +40,6 @@ Agilex LIMO 위에서 카메라와 LiDAR로 미션 8종을 수행하며 트랙 �
 | M7 | 정적 장애물 회피 (3차선) | 10 | LiDAR | 조성윤 |
 | M8 | 라바콘 회피 | 15 | LiDAR | 조성윤 |
 
-기본 주행은 여름 대회의 imitation learning 조향 대신 **차선 검출 기반 라인 추종**으로 바꿀 예정입니다.
-
 ## 저장소 구조
 
 ```
@@ -50,43 +48,46 @@ src/jetracer_ros2/
 │   └── utils/          # 공용 유틸 (ackermann 변환 등)
 ├── launch/             # launch 파일
 ├── params/             # 파라미터 (params.yaml)
-└── scripts/            # 학습 / 데이터 전처리 / TRT 변환 스크립트 (ROS 노드 아님)
+├── scripts/            # 학습 / 데이터 전처리 / TRT 변환 스크립트 (ROS 노드 아님)
+└── test/               # 단위 테스트 (lane_pipeline)
 ```
 
 ## 노드 구성
 
-이름 규칙: 처음부터 끝까지 켜져 있는 노드는 접두어 없음, `mission_manager_node`가 특정 구간에서만 켜고 끄는 노드는 `mission_` 접두어.
-`/cmd_vel`은 `mission_manager_node`만 발행하고, 주행 노드는 `inference/cmd_vel`로 발행합니다.
+이름 규칙: 처음부터 끝까지 켜져 있는 노드는 접두어 없음, `mission_manager_node`가 특정 미션 구간에서만 켜고 끄는 노드는 `mission_` 접두어.
+`/cmd_vel`은 `mission_manager_node`만 발행합니다.
 
-### 신규 노드
+### 항상 실행 (`all_in_node.launch.py`)
 
-| 노드 | 역할 | 담당 미션 |
+| 노드 | 역할 | 쓰는 미션 |
 |---|---|---|
-| `lane_following_node` | 차선 검출 → 조향, `inference/cmd_vel` 발행. 모드: 중앙 / 왼쪽선 / 오른쪽선 / 헤딩 유지 | 기본 주행, M2, M6, M7 차선 변경 |
-| `stop_line_node` | 카메라 하단 정지선(가로선) 검출, 남은 거리 발행 | M1, M3 |
-| `yolo_detection_node` | YOLO 하나로 신호등 색, A/B, 보행자, 서행, 주차 표지판 인식 | M1, M2, M3, M4, M5 |
-| `mission_obstacle_avoid_node` | LiDAR로 정차 LIMO 감지, 차선 변경 방향 결정 | M7 |
-| `mission_cone_avoid_node` | LiDAR로 라바콘 사이 경로 생성 (차선 무시) | M8 |
+| `mission_manager_node` | 전체 상태머신. 미션 순서 진행, 주행 명령 선택, 속도·정지 제어, `/cmd_vel` 단독 발행 | 전체 |
+| `lane_following_node` | 차선 검출(`lane_pipeline.py`) → 조향. 모드: `center` / `left` / `right` / `heading_hold`, 지그재그 구간 자동 감지 | 기본 주행, M2, M5, M6, M7 |
+| `stop_line_node` | 카메라 하단 흰 가로선 검출, 정지선까지 거리 추정 | M1, M3 |
+| `yolo_detection_node` | YOLO 하나로 신호등 색, A/B, 보행자, 서행, 주차 표지판 인식. 광고 모니터 영역 제외 | M1, M2, M3, M4, M5 |
 
-### 기존 노드 (여름 대회 코드)
+### 미션 구간에서만 실행 (manager가 켜고 끔)
 
-| 노드 | 여름 대회 역할 | 처리 |
+| 노드 | 역할 | 미션 |
 |---|---|---|
-| `mission_manager_node` | 전체 상태머신, `/cmd_vel` 단일 발행 | 유지. 단계를 M5→M6→M3→M7→M2→M8→M1→M4, 이벤트 기반으로 재작성 |
-| `mission_traffic_light_node` | HSV 적/녹 신호등 인식 | 유지. YOLO 결과 + 정지선 기반으로 수정 (황색 추가, 광고 모니터 배제) |
-| `mission_parking_node` | 벽 추종 + 평행주차 | 이름 유지, M4 T자 주차로 재작성 |
-| `data_collection_node`, `scripts/*` | 데이터 수집·학습·TRT 변환 | 유지. YOLO 데이터 수집 / TRT 변환에 사용 |
-| `debug_*_node` | 판정 결과 RViz 시각화 | 유지. 신규 노드에도 같은 방식으로 추가 |
-| `mission_track_following_node` | LiDAR 좌측 트럭 거리 유지 | M7 작성 시 참고 후 삭제 |
-| `inference_node`, `inference_go_stop_node`, `mission_inference_node` | IL 조향 추론 | 삭제 (`lane_following_node`로 대체) |
-| `mission_tunnel_node`, `mission_people_estop_node` | 터널 감지, LiDAR 보행자 정지 | 삭제 |
+| `mission_obstacle_avoid_node` | LiDAR로 앞의 정차 LIMO 감지, 차선 변경 방향 결정 | M7 |
+| `mission_cone_avoid_node` | LiDAR로 양쪽 라바콘 사이 경로 추종 (차선 무시) | M8 |
+| `mission_traffic_light_node` | YOLO 신호등 결과 + 정지선 거리로 신호 상태 확정 | M1 |
+| `mission_parking_node` | LiDAR로 빈칸 탐색 → 전진 → 회전 후진 → 직진 후진 (odom 기준 T자 주차) | M4 |
 
 ### 별도 노드 없이 `mission_manager_node`에서 처리
 
-- **M2 갈림길**: YOLO의 A/B 결과로 `lane_following_node` 모드를 왼쪽선 / 오른쪽선으로 전환
-- **M3 보행자**: YOLO 결과 + 정지선으로 정지 후 3초 대기
-- **M5 서행**: 속도만 절반 (≤0.2 m/s)
-- **M6 지그재그**: `lane_following_node`를 헤딩 유지 모드로 전환
+- **M2 갈림길**: YOLO `sign_a` / `sign_b` → `lane_following_node` 모드를 `left` / `right`로 전환
+- **M3 보행자**: YOLO `pedestrian` → 정지 후 대기 (`pedestrian_hold_sec`)
+- **M5 서행**: YOLO `slow_sign` → `slow_speed`로 감속
+
+### 개발·디버그용
+
+| 노드 / 파일 | 역할 |
+|---|---|
+| `debug_autorace_node` | 미션 상태와 인식 결과를 RViz 마커(`/autorace/debug_markers`)로 표시 |
+| `lane_debug.launch.py` | `lane_following_node`만 단독 실행 (차선 검출 튜닝용) |
+| `data_collection_node`, `scripts/*` | 이미지 수집, 학습, TRT 변환 (YOLO 데이터용으로 활용) |
 
 ## 토픽 인터페이스
 
@@ -94,51 +95,77 @@ src/jetracer_ros2/
 
 규칙:
 
-- 메시지는 커스텀 msg 없이 기본 타입(`std_msgs`, `geometry_msgs`, `sensor_msgs`)만 사용
-- 항상 켜진 인식 노드 출력은 `perception/...`, 미션 노드 상태는 `mission/...`
-- 주행 명령은 각 노드가 `<출처>/cmd_vel`로 보내고, `mission_manager_node`가 단계에 맞는 것 하나만 골라 `/cmd_vel`로 내보냄
+- 메시지는 커스텀 msg 없이 기본 타입(`std_msgs`, `geometry_msgs`, `sensor_msgs`, `nav_msgs`)만 사용
+- 미션 관련 토픽은 `mission/...`, 미션별 토픽은 `mission/<미션>/...` (예: `mission/parking/cmd_vel`)
+- 예외: `inference/cmd_vel`(여름 코드와 manager 인터페이스 호환), `perception/detections`(YOLO 원본 출력)
+- 디버그 화면용 토픽은 `/<노드>/debug/...`
 
 ### 센서·하드웨어 (wego_ws 드라이버)
 
 | 토픽 | 타입 | 비고 |
 |---|---|---|
 | `/camera/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | 카메라 |
+| `/camera/color/camera_info` | `sensor_msgs/CameraInfo` | 카메라 내부 파라미터 (`lane_following_node`) |
 | `/scan` | `sensor_msgs/LaserScan` | LiDAR |
-| `/odom` | `nav_msgs/Odometry` | 주행 거리·헤딩 (M6 헤딩 유지용, 차량에서 토픽 이름 확인 필요) |
+| `/odom` | `nav_msgs/Odometry` | 주행 거리·헤딩 (`mission_parking_node`) |
 | `/cmd_vel` | `geometry_msgs/Twist` | 실제 구동 명령. **`mission_manager_node`만 발행** |
 
 ### 인식
 
 | 토픽 | 타입 | 발행 | 구독 | 내용 |
 |---|---|---|---|---|
-| `perception/detections` | `std_msgs/String` (JSON) | `yolo_detection_node` | manager, traffic_light, parking | 아래 형식 참고 |
-| `perception/stop_line_distance` | `std_msgs/Float32` | `stop_line_node` | manager, traffic_light | 정지선까지 거리 [m], 안 보이면 `-1.0` |
+| `mission/yolo_event` | `std_msgs/String` | `yolo_detection_node` | manager, traffic_light | 여러 프레임 연속으로 확인된 객체 하나 (아래 값) |
+| `perception/detections` | `std_msgs/String` (JSON) | `yolo_detection_node` | (없음, 디버그용) | 한 프레임에 보인 객체 전부 |
+| `mission/stop_line_distance` | `std_msgs/Float32` | `stop_line_node` | manager, traffic_light | 정지선까지 거리 [m], 안 보이면 `-1.0` |
+| `mission/stop_line_detected` | `std_msgs/Bool` | `stop_line_node` | (없음) | 정지선 보임 여부 |
 
-`perception/detections` 형식 (한 프레임에 보인 객체 전부):
+`mission/yolo_event` 값: `traffic_red`, `traffic_yellow`, `traffic_green`, `sign_a`, `sign_b`, `pedestrian`, `slow_sign`, `parking_sign`
+
+YOLO 학습 클래스 이름은 위 값 그대로 쓰는 것을 권장합니다. (`red`, `a`, `slow`, `parking` 등 일부 별칭도 자동 변환됨)
+
+`perception/detections` 형식:
 
 ```json
-[{"label": "sign_A", "conf": 0.91, "x": 320, "y": 180, "w": 40, "h": 40}]
+{"stamp_ns": 1730000000000000000, "detections": [{"label": "sign_a", "confidence": 0.91, "bbox": [300, 160, 340, 200]}]}
 ```
 
-YOLO 클래스 이름 (`label`): `traffic_red`, `traffic_yellow`, `traffic_green`, `sign_A`, `sign_B`, `pedestrian`, `slow`, `parking`
-
-### 주행 명령 (→ `mission_manager_node`가 선택)
+### 주행 명령 (→ `mission_manager_node`가 하나 선택)
 
 | 토픽 | 타입 | 발행 | 사용 구간 |
 |---|---|---|---|
-| `inference/cmd_vel` | `geometry_msgs/Twist` | `lane_following_node` | 기본 주행, M2, M5, M6, M7 |
-| `cone_avoid/cmd_vel` | `geometry_msgs/Twist` | `mission_cone_avoid_node` | M8 |
-| `parking/cmd_vel` | `geometry_msgs/Twist` | `mission_parking_node` | M4 |
+| `inference/cmd_vel` | `geometry_msgs/Twist` | `lane_following_node` | M8, M4 이외 전부 |
+| `mission/cone/cmd_vel` | `geometry_msgs/Twist` | `mission_cone_avoid_node` | M8 |
+| `mission/parking/cmd_vel` | `geometry_msgs/Twist` | `mission_parking_node` | M4 |
 
 ### 상태·모드
 
 | 토픽 | 타입 | 발행 | 구독 | 값 |
 |---|---|---|---|---|
-| `mission/lane_mode` | `std_msgs/String` | manager | `lane_following_node` | `center` / `left` / `right` / `heading` |
+| `mission/active` | `std_msgs/String` | manager | debug | 현재 미션 (`M5` … `M4`) |
+| `mission/lane_mode` | `std_msgs/String` | manager | `lane_following_node` | `center` / `left` / `right` / `heading_hold` |
 | `mission/traffic_light_state` | `std_msgs/String` | `mission_traffic_light_node` | manager | `red` / `yellow` / `green` |
-| `mission/obstacle_avoid_state` | `std_msgs/String` | `mission_obstacle_avoid_node` | manager | `left` / `right` (피할 방향) / `clear` |
-| `mission/cone_avoid_state` | `std_msgs/String` | `mission_cone_avoid_node` | manager | `running` / `done` |
-| `mission/parking_state` | `std_msgs/String` | `mission_parking_node` | manager | `running` / `done` |
+| `mission/obstacle_avoid/state` | `std_msgs/String` | `mission_obstacle_avoid_node` | manager | `change_left` / `change_right` / `stop` / `clear` |
+| `mission/cone/state` | `std_msgs/String` | `mission_cone_avoid_node` | manager | `tracking` / `lost` / `emergency_stop` |
+| `mission/parking/start` | `std_msgs/Bool` | manager | `mission_parking_node` | `true`면 주차 시작 |
+| `mission/parking/state` | `std_msgs/String` | `mission_parking_node` | manager | `waiting` / `searching` / `advance` / `reverse_turn` / `reverse_straight` / `complete` |
+
+### 수동 명령 (테스트용)
+
+`mission/event` (`std_msgs/String`)로 manager에 직접 명령을 보낼 수 있습니다.
+
+| 값 | 동작 |
+|---|---|
+| `NEXT`, `M번호_DONE` (예: `M5_DONE`) | 다음 미션으로 넘어감 |
+| `LANE_CENTER` / `LANE_LEFT` / `LANE_RIGHT` / `HEADING_HOLD` | 라인 추종 모드 변경 |
+| `ESTOP` / `ESTOP_CLEAR` | 비상 정지 / 해제 |
+
+```bash
+ros2 topic pub --once mission/event std_msgs/String "data: 'NEXT'"
+```
+
+### 디버그 (RViz / rqt_image_view)
+
+`/lane/debug/compressed`, `/stop_line/debug/compressed`, `/yolo/debug/compressed`, `/autorace/debug_markers`, `/lane/model`, `/lane/mode_state`, `/lane/zigzag`
 
 ## 빌드 및 실행
 
@@ -152,4 +179,9 @@ ros2 launch jetracer_ros2 jetracer_teleop.launch.py
 
 # 터미널 2: 미션 파이프라인
 ros2 launch jetracer_ros2 all_in_node.launch.py
+
+# 차선 검출만 따로 테스트할 때
+ros2 launch jetracer_ros2 lane_debug.launch.py
 ```
+
+모든 파라미터(속도, 정지 거리, ROI 등)는 `params/params.yaml`에 있습니다. 실차 보정은 이 파일에서 합니다.

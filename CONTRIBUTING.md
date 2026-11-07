@@ -8,23 +8,25 @@
 
 ## 브랜치
 
-### 공용 노드 (미리 생성됨)
-
-여러 미션이 같이 쓰는 노드입니다. 담당자만 이 브랜치에서 작업하고, 나머지는 main에 merge된 뒤 토픽만 가져다 씁니다.
-
-| 브랜치 | 노드 | 쓰는 미션 | 담당 |
-|---|---|---|---|
-| `common-stop-line` | `stop_line_node` | M1, M3 | 박세은 |
-| `common-lane-following` | `lane_following_node` | 기본 주행, M2, M6, M7 | (미정) |
-| `common-yolo` | `yolo_detection_node` | M1, M2, M3, M5 | (미정) |
-
-### 미션 / 기타 (각자 생성)
+브랜치는 각자 필요할 때 최신 main에서 만듭니다.
 
 | 종류 | 이름 형식 | 예시 |
 |---|---|---|
 | 미션 | `m번호-이름` | `m3-pedestrian`, `m7-obstacle` |
+| 공용 노드 | `common-노드` | `common-yolo`, `common-stop-line` |
 | 버그 수정 | `fix-내용` | `fix-m7-speed` |
 | 문서 (토픽 표 변경 등 팀 합의가 필요한 경우) | `docs-내용` | `docs-topic-table` |
+
+## 공용 노드
+
+여러 미션이 같이 쓰는 노드입니다. 다른 사람의 미션에도 영향을 주므로, 담당자가 관리하고 다른 사람이 고칠 때는 담당자를 PR 리뷰어로 지정합니다.
+
+| 노드 | 쓰는 미션 | 담당 |
+|---|---|---|
+| `mission_manager_node` | 전체 | (미정) |
+| `lane_following_node` | 기본 주행, M2, M5, M6, M7 | (미정) |
+| `stop_line_node` | M1, M3 | 박세은 |
+| `yolo_detection_node` | M1, M2, M3, M4, M5 | (미정) |
 
 ## 작업 흐름
 
@@ -44,20 +46,14 @@ git push -u origin m3-pedestrian
 4. 리뷰어가 확인하면 **Merge** → 브랜치 삭제
 5. 다음 작업은 다시 1번부터 시작
 
-공용 노드 브랜치(`common-*`)는 이미 있으므로 1번 대신 아래처럼 시작합니다.
+## 다른 노드 없이 테스트하기
+
+필요한 토픽을 직접 발행하면 YOLO나 정지선 노드 없이도 미션 로직을 테스트할 수 있습니다.
 
 ```bash
-git checkout common-yolo
-git merge main        # 최신 main 반영
-```
-
-## 공용 노드가 아직 없을 때 테스트
-
-필요한 토픽을 직접 발행해서 테스트합니다.
-
-```bash
-ros2 topic pub perception/detections std_msgs/String "data: '[{\"label\": \"pedestrian\", \"conf\": 0.9}]'"
-ros2 topic pub perception/stop_line_distance std_msgs/Float32 "data: 0.3"
+ros2 topic pub mission/yolo_event std_msgs/String "data: 'pedestrian'"
+ros2 topic pub mission/stop_line_distance std_msgs/Float32 "data: 0.3"
+ros2 topic pub --once mission/event std_msgs/String "data: 'NEXT'"   # 다음 미션으로 넘기기
 ```
 
 ## 충돌이 나기 쉬운 파일
