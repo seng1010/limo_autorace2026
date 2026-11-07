@@ -1,154 +1,146 @@
 data_collector_node:
   ros__parameters:
-    # 지금 수집 중인 구간 번호 (1-5). 실행마다 바꿔가며 여러 코스를 나눠서 모을 수 있다.
     section_id: 1
-
-    # 이미지/라벨을 저장할 위치. section_id별로 save_dir/section_N/ 폴더가 생긴다.
     save_dir: '/home/wego/third_impact/src/jetracer_ros2/jetracer_dataset'
-
-    # 조이스틱 축/버튼. 이 Yahboom 패드(DragonRise 계열 컨트롤러)에서 실측 확인된 값:
-    # axes[0]이 왼쪽 스틱 좌우 (양수=왼쪽 — 일반적인 조이스틱 관례와 반대), X버튼=buttons[3].
-    joy_steering_axis: 0    # axes[0] → 조향
-    deadman_button: 3       # buttons[3] (X) — 누르고 있는 동안만 주행+저장
-
-    # 주행 파라미터. limo_base는 Ackermann 모드에서 r = linear.x / angular.z 로
-    # 실제 조향각을 역산하기 때문에, 여기 angular.z는 조향각 그 자체가 아니다.
-    # (변환 로직은 ackermann_utils.inner_angle_to_omega 참고)
-    max_steer_angle: 0.42   # LIMO 실제 최대 조향(안쪽 바퀴) 각도 [rad]
-    # 실측 결과 좌회전이 우회전보다 약하게 꺾이는 하드웨어 비대칭이 확인됨.
-    # 필요하면 1.0보다 크게 올려서 왼쪽 조향을 보정한다 (지금은 보정 없이 1.0).
+    joy_steering_axis: 0
+    deadman_button: 3
+    max_steer_angle: 0.42
     left_steer_boost: 1.0
-    linear_x: 1.0           # X버튼 눌렀을 때 고정 주행 속도 [m/s]
-
-    # 이미지 저장 최대 주기. X버튼을 누르고 있을 때만 실제로 저장되고,
-    # 안 누르고 있으면 타이머는 돌아도 아무것도 저장하지 않는다.
+    linear_x: 0.25
     save_rate_hz: 10.0
-
-    # 640×480 원본에서 위쪽 몇 %를 버릴지 (0.4 = 위 40% 제거, 0.0 = 크롭 없음).
-    # inference_node의 crop_ratio와 반드시 같은 값을 써야 한다 (수집/추론 전처리 일치).
     crop_ratio: 0.0
 
-
-inference_node:
+lane_following_node:
   ros__parameters:
-    # section_N.engine (TensorRT) 또는 section_N.pth (PyTorch 대체용)가 들어있는 폴더
-    engine_dir: '/home/wego/third_impact/src/jetracer_ros2/jetracer_engines'
+    image_topic: '/camera/color/image_raw/compressed'
+    camera_info_topic: '/camera/color/camera_info'
+    output_topic: 'inference/cmd_vel'
+    mode_topic: 'mission/lane_mode'
+    use_camera_info: true
+    publish_debug: true
+    command_timeout_sec: 0.30
+    minimum_confidence: 0.48
+    normal_speed: 0.25
+    zigzag_speed: 0.12
+    lateral_gain: 0.95
+    heading_gain: 0.70
+    max_steer_angle: 0.42
+    heading_hold_decay: 0.98
+    zigzag_enter_frames: 3
+    zigzag_exit_frames: 5
+    image_width: 640
+    image_height: 480
+    bev_src: [0.30, 0.52, 0.70, 0.52, 0.94, 0.92, 0.06, 0.92]
+    bev_dst: [0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00]
+    white_lightness_min: 170
+    white_saturation_max: 100
+    gradient_min: 35
+    morphology_kernel: 3
+    windows: 10
+    window_margin: 55
+    recenter_min_pixels: 35
+    fit_min_points: 120
+    polynomial_degree: 3
+    ransac_iterations: 60
+    ransac_residual_px: 7.0
+    lane_width_px: 360.0
+    lane_width_tolerance: 0.35
+    max_lane_width_change_px: 70.0
+    max_fit_jump_px: 90.0
+    lookahead_y_ratio: 0.62
+    smoothing_alpha: 0.35
+    zigzag_min_step_px: 8.0
+    zigzag_min_span_px: 55.0
+    zigzag_min_direction_changes: 1
 
-    # 전체 구간 개수 (구간마다 모델 파일이 하나씩 있어야 함)
-    num_sections: 5
-
-    # 주행 파라미터. 데이터 수집 때와 반드시 같은 값을 써야 한다.
-    linear_x: 1.0           # 고정 주행 속도 [m/s]
-    max_steer_angle: 0.42   # 모델 출력 ±1.0 → 실제 조향각 ±max_steer_angle [rad]
-    # 여기엔 left_steer_boost가 없다 — 수집 단계에서 라벨에 이미 보정값을
-    # 반영했기 때문에, 학습된 모델 가중치 안에 보정이 이미 녹아들어 있다.
-
-    # data_collector_node의 crop_ratio와 반드시 같은 값을 써야 한다 (수집/추론 전처리 일치).
-    crop_ratio: 0.0
-
-
-inference_go_stop_node:
+stop_line_node:
   ros__parameters:
-    # section 모델 없이 go_stop.engine 하나로 조향+정지판단을 동시에 처리하는
-    # 독립 노드 전용 설정. inference_node와 별개로 완전히 분리되어 있다.
-    engine_dir: '/home/wego/third_impact/src/jetracer_ros2/jetracer_engines'
-    linear_x: 1.0           # 고정 주행 속도 [m/s]
-    max_steer_angle: 0.42   # 모델 출력 ±1.0 → 실제 조향각 ±max_steer_angle [rad]
-    crop_ratio: 0.0         # data_collector_node와 반드시 같은 값을 써야 함
+    image_topic: '/camera/color/image_raw/compressed'
+    roi_top_ratio: 0.58
+    white_lightness_min: 180
+    white_saturation_max: 90
+    horizontal_kernel_ratio: 0.12
+    minimum_width_ratio: 0.42
+    minimum_area_ratio: 0.018
+    distance_scale_m: 1.6
+    publish_debug: true
 
-    # 비워두면(기본값) engine_dir/go_stop.(engine|pth)를 자동으로 찾는다 —
-    # 다른 경로를 쓰려면 stop_engine_path를 직접 지정.
-    stop_engine_path: ''
-    stop_thresh: 0.3        # sigmoid 확률이 이 이상이어야 stop 후보로 침
-    stop_consec: 2           # 연속 이 프레임 수만큼 후보여야 확정
-    stop_min_time: 3.0       # 노드 시작 후 이 시간(초) 전에는 무시
-    stop_dry_run: false      # true면 실제로 안 멈추고 로그만 (재무장돼서 계속 관찰 가능)
-    parking_start_topic: '/parking_start'
-
+yolo_detection_node:
+  ros__parameters:
+    image_topic: '/camera/color/image_raw/compressed'
+    model_path: ''  # e.g. /home/wego/models/autorace.engine
+    confidence: 0.45
+    iou: 0.5
+    image_size: 640
+    max_rate_hz: 10.0
+    confirm_frames: 3
+    publish_debug: true
+    traffic_roi: [0.0, 0.0, 1.0, 0.65]
+    advertisement_exclusion_roi: [0.0, 0.65, 1.0, 1.0]
 
 mission_manager_node:
   ros__parameters:
-    # 전체 미션(신호등 → 사람 e-stop → 터널/트럭 추종 → 주차)을 순서대로 진행시키는
-    # 상태머신. 각 단계에 필요한 센서/판단 노드(traffic_light, people_estop, tunnel,
-    # track_following)를 단계 전환 시점마다 직접 켜고 끈다. 자세한 흐름은
-    # mission_manager_node.py 상단 docstring 참고.
-    input_topic: 'inference/cmd_vel'
+    lane_command_topic: 'inference/cmd_vel'
+    cone_command_topic: 'mission/cone/cmd_vel'
+    parking_command_topic: 'mission/parking/cmd_vel'
     output_topic: '/cmd_vel'
-    traffic_light_topic: 'mission/traffic_light_state'
-    people_estop_topic: 'mission/people_estop_state'
-    tunnel_topic: 'mission/tunnel_brightness'
-    track_following_topic: 'mission/track_following_state'
-    parking_start_topic: '/parking_start'
-
-    cruise_speed: 1.0                 # 기본 순항 속도 [m/s]
-    # 선제 감속 시점은 여기 없다 — mission_people_estop_node의 obstacle_min_time초
-    # 뒤 'active' 발행 시점을 그대로 신뢰해서 감속하므로 (오차 없는 동기화, 아래
-    # mission_people_estop_node: obstacle_min_time 참고).
-    people_estop_slow_speed: 0.2      # 선제 감속 목표 속도 [m/s]
-    tunnel_brightness_threshold: 75.0 # 이 이하로 떨어지면 터널 진입으로 판단
-    tunnel_slow_delay_sec: 1.7        # 조도 감지 후 감속 시작까지 대기 시간 [sec]
-    tunnel_slow_speed: 0.3            # 터널/트럭 추종 구간 속도 [m/s]
-    tunnel_slow_duration_sec: 18.0    # 감속 시작 후 track_following 유지 시간 [sec]
-    track_resume_delay_sec: 1.0       # 트럭 회피 해제(clear) 후 재출발까지 대기 시간 [sec]
-
+    mission_event_topic: 'mission/event'
+    active_mission_topic: 'mission/active'
+    lane_mode_topic: 'mission/lane_mode'
+    normal_speed: 0.25
+    slow_speed: 0.12
+    command_timeout_sec: 0.40
+    stop_line_distance_m: 0.35
+    pedestrian_hold_sec: 1.0
+    auto_start_mission_nodes: true
 
 mission_traffic_light_node:
   ros__parameters:
-    # 카메라 이미지에서 신호등(핸드폰 화면)을 찾을 ROI. 기본값: 좌측 하단.
-    roi_x_start_ratio: 0.0
-    roi_x_end_ratio: 0.3
-    roi_y_start_ratio: 0.35
-    roi_y_end_ratio: 0.65
+    yolo_event_topic: 'mission/yolo_event'
+    stop_line_topic: 'mission/stop_line_distance'
+    output_topic: 'mission/traffic_light_state'
+    stop_distance_m: 0.35
+    require_stop_line: true
+    confirm_events: 2
 
-    # HSV 색 범위 (OpenCV 기준: H 0~179, S/V 0~255).
-    # 빨강은 색상환 양 끝(0 근처 / 180 근처)에 걸쳐 있어서 두 구간이 필요하다.
-    # S/V 하한을 100→60으로 낮춤: 핸드폰 화면이 카메라 노출/각도 때문에
-    # 순수 채도만큼 안 나와서 100 기준으로는 원(circle) 대부분이 안 잡혔음.
-    red_low1:  [0, 60, 60]
-    red_high1: [10, 255, 255]
-    red_low2:  [170, 60, 60]
-    red_high2: [180, 255, 255]
-    green_low:  [40, 60, 60]
-    green_high: [90, 255, 255]
-    # 실측해보니 원이 ROI 전체에서 차지하는 비율이 2% 안팎이라, 기존 0.15(15%)는
-    # 너무 높아서 절대 안 넘어갔음. 실측치보다 여유 있게 낮춤.
-    min_pixel_ratio: 0.005 # ROI 내 이 비율 이상이어야 후보로 인정
-    hold_sec: 0.3           # 이 시간 연속 같은 색이 우세해야 확정 판정 (깜빡임 방지)
-
-
-mission_tunnel_node:
+mission_obstacle_avoid_node:
   ros__parameters:
-    print_rate_hz: 2.0  # 터미널에 밝기 출력하는 주기 [Hz], 카메라 프레임 속도와 무관
+    scan_topic: '/scan'
+    front_angle_deg: 24.0
+    side_angle_min_deg: 20.0
+    side_angle_max_deg: 75.0
+    obstacle_distance_m: 1.15
+    clearance_distance_m: 1.4
+    minimum_points: 4
+    confirm_scans: 3
 
-
-mission_people_estop_node:
+mission_cone_avoid_node:
   ros__parameters:
-    # /cmd_vel이 처음 0이 아니게 되는 순간(=실제 출발) 이후 obstacle_min_time초 동안은
-    # 라이다를 무시한다. 그 이후 check_rate_hz 주기마다 전방을 0도로 뒀을 때 [min, max]
-    # 범위(음수=오른쪽, 양수=왼쪽, LaserScan 각도 관례) 안에서 obstacle_distance_m보다
-    # 가까운 포인트가 obstacle_min_points개 이상이면 장애물로 판단해
-    # mission/people_estop_state에 'stop'을 발행한다.
-    # 장애물이 있었다가 사라지면 'clear'를 발행하고 노드가 종료된다.
-    obstacle_angle_deg_range: [-5.0, 15.0]  # 전방 기준 검사 각도 범위 [deg] 왼쪽이 +
-    obstacle_distance_m: 1.0    # 이 거리보다 가까우면 장애물 후보로 카운트 [m]
-    obstacle_min_points: 1      # 위 조건을 만족하는 포인트 최소 개수
-    obstacle_min_time: 7.0    # 출발(cmd_vel nonzero) 후 이 시간(초) 전에는 라이다 무시
-    check_rate_hz: 1.0          # 장애물 판단 주기 [Hz]
+    scan_topic: '/scan'
+    output_topic: 'mission/cone/cmd_vel'
+    speed: 0.10
+    max_steer_angle: 0.42
+    lookahead_m: 1.0
+    field_of_view_deg: 80.0
+    maximum_cone_range_m: 2.5
+    minimum_points_each_side: 2
+    steering_gain: 1.3
+    emergency_distance_m: 0.25
 
-    # debug_mission_people_estop_node 전용 (기본 노드는 안 씀)
-    laser_frame: 'laser_link'   # FOV marker를 그릴 좌표계
-
-
-mission_track_following_node:
+mission_parking_node:
   ros__parameters:
-    # 전방을 0도로 뒀을 때 [min, max] 범위(왼쪽이 +) 안에서 track_recognize_distance_m
-    # 이내에 track_min_points개 이상 점이 잡히면 "인지"로 보고, 그중 track_distance_m보다
-    # 가까운 점이 track_min_points개 이상이면 mission/track_following_state에 'stop'을,
-    # 아니면(인지는 됐지만 그만큼 가깝지 않거나 아예 인지 안 됨) 'clear'를 매 스캔마다 발행한다.
-    track_angle_deg_range: [-30.0, 65.0]  # 좌측 검사 각도 범위 [deg]
-    track_recognize_distance_m: 1.0  # 이 거리 이내부터 트럭으로 인지 [m]
-    track_distance_m: 0.5    # 인지된 트럭이 이 거리보다 가까우면 정지 [m]
-    track_min_points: 3      # 위 조건들을 만족하는 포인트 최소 개수
+    output_topic: 'mission/parking/cmd_vel'
+    search_speed: 0.08
+    reverse_speed: -0.07
+    max_steer_angle: 0.40
+    opening_distance_m: 1.0
+    opening_confirm_scans: 4
+    advance_distance_m: 0.42
+    reverse_turn_yaw_deg: 72.0
+    reverse_straight_distance_m: 0.48
+    rear_stop_distance_m: 0.22
+    right_sector_deg: [-100.0, -55.0]
 
-    # debug_mission_track_following_node 전용 (기본 노드는 안 씀)
-    laser_frame: 'laser_link'   # FOV 부채꼴 마커를 그릴 좌표계
+debug_autorace_node:
+  ros__parameters:
+    frame_id: 'base_link'
