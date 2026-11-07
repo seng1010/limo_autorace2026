@@ -84,3 +84,22 @@ def test_reset_recovers_after_lane_shift_while_lost():
     assert not pipeline.process(shifted).valid
     pipeline.reset()
     assert pipeline.process(shifted).valid
+
+
+def test_detects_yellow_lanes_when_enabled():
+    """노란 차선은 흰색 검출만으로는 못 찾고, detect_yellow를 켜면 찾아야 한다."""
+    image = _synthetic_lane()
+    yellow = image.copy()
+    yellow[np.all(image == 255, axis=2)] = (0, 220, 255)   # BGR 노란색
+
+    white_only = _identity_config()
+    white_only.gradient_min = 255     # 경계선 검출 영향 제거
+    assert not LanePipeline(white_only).process(yellow).valid
+
+    yellow_config = _identity_config()
+    yellow_config.gradient_min = 255
+    yellow_config.detect_white = False
+    yellow_config.detect_yellow = True
+    result = LanePipeline(yellow_config).process(yellow)
+    assert result.valid
+    assert abs(result.lateral_error) < 0.25

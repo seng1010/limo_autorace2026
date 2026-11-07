@@ -23,8 +23,14 @@ class LanePipelineConfig:
     dst_points: Tuple[float, ...] = (
         0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00,
     )
+    detect_white: bool = True
     white_lightness_min: int = 170
     white_saturation_max: int = 100
+    detect_yellow: bool = False
+    yellow_hue_min: int = 15          # OpenCV HLS hue (0~180), 노란색 약 15~35
+    yellow_hue_max: int = 35
+    yellow_saturation_min: int = 80
+    yellow_lightness_min: int = 60
     gradient_min: int = 35
     morphology_kernel: int = 3
     windows: int = 10
@@ -94,13 +100,23 @@ class LanePipeline:
 
     def _binary_mask(self, bird_image: np.ndarray) -> np.ndarray:
         hls = cv2.cvtColor(bird_image, cv2.COLOR_BGR2HLS)
+        hue = hls[:, :, 0]
         lightness = hls[:, :, 1]
         saturation = hls[:, :, 2]
 
-        white = (
-            (lightness >= self.config.white_lightness_min)
-            & (saturation <= self.config.white_saturation_max)
-        )
+        color = np.zeros(lightness.shape, dtype=bool)
+        if self.config.detect_white:
+            color |= (
+                (lightness >= self.config.white_lightness_min)
+                & (saturation <= self.config.white_saturation_max)
+            )
+        if self.config.detect_yellow:
+            color |= (
+                (hue >= self.config.yellow_hue_min)
+                & (hue <= self.config.yellow_hue_max)
+                & (saturation >= self.config.yellow_saturation_min)
+                & (lightness >= self.config.yellow_lightness_min)
+            )
 
         sobel = cv2.Sobel(lightness, cv2.CV_32F, 1, 0, ksize=3)
         absolute = np.abs(sobel)
@@ -110,7 +126,7 @@ class LanePipeline:
             scaled = np.uint8(np.clip(absolute * 255.0 / maximum, 0, 255))
         gradient = (scaled >= self.config.gradient_min) & (lightness >= 100)
 
-        binary = np.uint8(white | gradient) * 255
+        binary = np.uint8(color | gradient) * 255
         kernel_size = max(1, int(self.config.morphology_kernel))
         kernel = np.ones((kernel_size, kernel_size), np.uint8)
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)

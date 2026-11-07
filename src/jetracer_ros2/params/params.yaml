@@ -34,8 +34,14 @@ lane_following_node:
     image_height: 480
     bev_src: [0.30, 0.52, 0.70, 0.52, 0.94, 0.92, 0.06, 0.92]
     bev_dst: [0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00]
+    detect_white: false               # 트랙 차선이 노란색이라 흰색 검출 끔
     white_lightness_min: 170
     white_saturation_max: 100
+    detect_yellow: true               # 노란 차선 검출
+    yellow_hue_min: 15                # HLS hue (0~180)
+    yellow_hue_max: 35
+    yellow_saturation_min: 80
+    yellow_lightness_min: 60
     gradient_min: 35
     morphology_kernel: 3
     windows: 10
