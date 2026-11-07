@@ -72,3 +72,15 @@ def test_detects_zigzag_for_slow_driving():
     assert result.zigzag
     assert result.direction_changes >= 1
     assert result.zigzag_score > 0.5
+
+
+def test_reset_recovers_after_lane_shift_while_lost():
+    """차선을 놓친 사이 차가 밀리면 급변 검사에 계속 걸린다. reset()으로 복구돼야 한다."""
+    pipeline = LanePipeline(_identity_config())
+    assert pipeline.process(_synthetic_lane()).valid
+    for _ in range(5):
+        pipeline.process(np.zeros((480, 640, 3), dtype=np.uint8))
+    shifted = _synthetic_lane(offset=-110)
+    assert not pipeline.process(shifted).valid
+    pipeline.reset()
+    assert pipeline.process(shifted).valid

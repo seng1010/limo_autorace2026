@@ -26,6 +26,8 @@ lane_following_node:
     heading_gain: 0.70
     max_steer_angle: 0.42
     heading_hold_decay: 0.98
+    invalid_hold_sec: 0.25            # 차선 놓쳤을 때 마지막 명령 유지 시간 [s]
+    reset_after_invalid_frames: 5     # 연속 N프레임 실패 시 이전 차선 기준 초기화
     zigzag_enter_frames: 3
     zigzag_exit_frames: 5
     image_width: 640
