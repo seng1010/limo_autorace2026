@@ -39,6 +39,9 @@ class LaneFollowingNode(Node):
         self._zigzag_active = False
         self._mode = 'center'
         self._held_steering = 0.0
+        self._invalid_frames = 0
+        self._last_valid_cmd: Optional[Twist] = None
+        self._last_valid_ns = 0
 
         self.cmd_pub = self.create_publisher(
             Twist, self.get_parameter('output_topic').value, 10)
@@ -79,14 +82,22 @@ class LaneFollowingNode(Node):
             'heading_gain': 0.70,
             'max_steer_angle': 0.42,
             'heading_hold_decay': 0.98,
+            'invalid_hold_sec': 0.25,
+            'reset_after_invalid_frames': 5,
             'zigzag_enter_frames': 3,
             'zigzag_exit_frames': 5,
             'image_width': 640,
             'image_height': 480,
             'bev_src': [0.30, 0.52, 0.70, 0.52, 0.94, 0.92, 0.06, 0.92],
             'bev_dst': [0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00],
+            'detect_white': True,
             'white_lightness_min': 170,
             'white_saturation_max': 100,
+            'detect_yellow': False,
+            'yellow_hue_min': 15,
+            'yellow_hue_max': 35,
+            'yellow_saturation_min': 80,
+            'yellow_lightness_min': 60,
             'gradient_min': 35,
             'morphology_kernel': 3,
             'windows': 10,
@@ -114,8 +125,13 @@ class LaneFollowingNode(Node):
         return LanePipelineConfig(
             width=p('image_width'), height=p('image_height'),
             src_points=tuple(p('bev_src')), dst_points=tuple(p('bev_dst')),
+            detect_white=p('detect_white'),
             white_lightness_min=p('white_lightness_min'),
             white_saturation_max=p('white_saturation_max'),
+            detect_yellow=p('detect_yellow'),
+            yellow_hue_min=p('yellow_hue_min'), yellow_hue_max=p('yellow_hue_max'),
+            yellow_saturation_min=p('yellow_saturation_min'),
+            yellow_lightness_min=p('yellow_lightness_min'),
             gradient_min=p('gradient_min'), morphology_kernel=p('morphology_kernel'),
             windows=p('windows'), window_margin=p('window_margin'),
             recenter_min_pixels=p('recenter_min_pixels'), fit_min_points=p('fit_min_points'),
@@ -159,8 +175,21 @@ class LaneFollowingNode(Node):
             return
 
         self._update_zigzag(result.valid and result.zigzag)
+        now_ns = self.get_clock().now().nanoseconds
+        usable = result.valid and result.confidence >= self.get_parameter('minimum_confidence').value
+        if usable:
+            self._invalid_frames = 0
+        else:
+            self._invalid_frames += 1
+            reset_after = int(self.get_parameter('reset_after_invalid_frames').value)
+            if reset_after > 0 and self._invalid_frames % reset_after == 0:
+                # 이전 차선 기준이 오래되면 급변 검사(max_fit_jump_px)에 계속 걸려
+                # 영영 복구하지 못하므로, 연속 실패 시 기준을 초기화한다.
+                self.pipeline.reset()
+                self._warn(f'lane lost for {self._invalid_frames} frames, pipeline reset')
+
         cmd = Twist()
-        if result.valid and result.confidence >= self.get_parameter('minimum_confidence').value:
+        if usable:
             error = self._mode_error(result)
             steering = float(np.clip(-error, -1.0, 1.0))
             self._held_steering = steering
@@ -169,12 +198,18 @@ class LaneFollowingNode(Node):
             cmd.linear.x = speed
             cmd.angular.z = inner_angle_to_omega(
                 steering * self.get_parameter('max_steer_angle').value, speed)
+            self._last_valid_cmd = cmd
+            self._last_valid_ns = now_ns
         elif self._mode == 'heading_hold' and abs(self._held_steering) > 1e-3:
             self._held_steering *= self.get_parameter('heading_hold_decay').value
             cmd.linear.x = self.get_parameter('zigzag_speed').value
             cmd.angular.z = inner_angle_to_omega(
                 self._held_steering * self.get_parameter('max_steer_angle').value,
                 cmd.linear.x)
+        elif (self._last_valid_cmd is not None
+              and (now_ns - self._last_valid_ns) / 1e9 <= self.get_parameter('invalid_hold_sec').value):
+            # 반사·그림자 등으로 잠깐 놓친 프레임은 마지막 명령을 유지해 덜컥거림을 막는다.
+            cmd = self._last_valid_cmd
         else:
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
         self.cmd_pub.publish(cmd)
