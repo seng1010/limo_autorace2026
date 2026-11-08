@@ -6,6 +6,7 @@ This node never publishes ``/cmd_vel``.  It publishes a proposed command on
 
 import os
 import sys
+from dataclasses import fields
 from typing import Optional
 
 import cv2
@@ -16,13 +17,18 @@ from geometry_msgs.msg import Twist, Vector3Stamped
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, CompressedImage
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32, String
 
 from jetracer_ros2.lane_pipeline_ks import LanePipeline, LanePipelineConfig
+from jetracer_ros2.m6_zigzag import M6Config, M6ZigzagGuide
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 
 
 VALID_MODES = {'center', 'left', 'right', 'heading_hold'}
+
+# M6Config 중 노드의 다른 파라미터에서 가져오는 값 (m6_ 파라미터로 따로 만들지 않음)
+M6_SHARED = {'image_width', 'image_height', 'lane_width_px', 'lookahead_y_ratio',
+             'lateral_gain', 'heading_gain'}
 
 
 class LaneFollowingNode(Node):
@@ -42,6 +48,10 @@ class LaneFollowingNode(Node):
         self._invalid_frames = 0
         self._last_valid_cmd: Optional[Twist] = None
         self._last_valid_ns = 0
+        # ---- M6 서행 유도선(지그재그) ----
+        self.m6 = M6ZigzagGuide(self._m6_config())
+        self._stop_line_distance: Optional[float] = None
+        self._stop_line_ns = 0
 
         self.cmd_pub = self.create_publisher(
             Twist, self.get_parameter('output_topic').value, 10)
@@ -51,6 +61,18 @@ class LaneFollowingNode(Node):
             CompressedImage, '/lane/debug/compressed', 2)
         self.zigzag_pub = self.create_publisher(Bool, '/lane/zigzag', 10)
         self.mode_state_pub = self.create_publisher(String, '/lane/mode_state', 10)
+        self.m6_state_pub = self.create_publisher(String, '/lane/m6_state', 10)
+        self.event_pub = self.create_publisher(
+            String, self.get_parameter('m6_event_topic').value, 10)
+        self.stop_line_sub = self.create_subscription(
+            Float32, self.get_parameter('m6_stop_line_topic').value,
+            self._stop_line_callback, 10)
+        if self.get_parameter('m6_require_mission').value:
+            # 매니저가 'M6' 를 알려줄 때만 M6 모드를 허용한다
+            self.m6.set_enabled(False)
+            self.mission_sub = self.create_subscription(
+                String, self.get_parameter('m6_mission_topic').value,
+                self._mission_callback, 10)
         self.mode_sub = self.create_subscription(
             String, self.get_parameter('mode_topic').value,
             self._mode_callback, 10)
@@ -116,7 +138,18 @@ class LaneFollowingNode(Node):
             'zigzag_min_step_px': 8.0,
             'zigzag_min_span_px': 55.0,
             'zigzag_min_direction_changes': 1,
+            # ---- M6 서행 유도선 (자세한 설명은 m6_zigzag.py 의 M6Config) ----
+            'm6_enable': True,
+            'm6_require_mission': False,      # True: 매니저가 M6 차례라고 알려줄 때만 동작
+            'm6_mission_topic': 'mission/active',
+            'm6_event_topic': 'mission/event',
+            'm6_stop_line_topic': 'mission/stop_line_distance',
+            'm6_publish_done': True,          # 끝나면 mission/event 로 'M6_DONE' 발행
+            'm6_speed': 0.15,                 # M6 구간 속도 [m/s] (규정: 서행 구간 0.2 이하)
         }
+        for item in fields(M6Config):
+            if item.name not in M6_SHARED:
+                values['m6_' + item.name] = item.default
         for name, default in values.items():
             self.declare_parameter(name, default)
 
@@ -143,6 +176,55 @@ class LaneFollowingNode(Node):
             smoothing_alpha=p('smoothing_alpha'), zigzag_min_step_px=p('zigzag_min_step_px'),
             zigzag_min_span_px=p('zigzag_min_span_px'),
             zigzag_min_direction_changes=p('zigzag_min_direction_changes'))
+
+    def _m6_config(self):
+        p = lambda name: self.get_parameter(name).value
+        config = M6Config(
+            image_width=p('image_width'), image_height=p('image_height'),
+            lane_width_px=p('lane_width_px'), lookahead_y_ratio=p('lookahead_y_ratio'),
+            lateral_gain=p('lateral_gain'), heading_gain=p('heading_gain'))
+        for item in fields(M6Config):
+            if item.name not in M6_SHARED:
+                setattr(config, item.name, type(item.default)(p('m6_' + item.name)))
+        return config
+
+    def _stop_line_callback(self, msg: Float32):
+        self._stop_line_distance = float(msg.data)
+        self._stop_line_ns = self.get_clock().now().nanoseconds
+
+    def _mission_callback(self, msg: String):
+        enabled = msg.data.strip().upper() == 'M6'
+        self.m6.set_enabled(enabled)
+        self.get_logger().info(f'mission {msg.data} -> M6 mode {"allowed" if enabled else "off"}')
+
+    def _recent_stop_line(self, now_ns):
+        if self._stop_line_distance is None or now_ns - self._stop_line_ns > 500_000_000:
+            return None
+        return self._stop_line_distance
+
+    def _update_m6(self, result, now_ns):
+        """M6 판단. M6 전용 조향이면 그 결과를, 아니면 None 을 돌려준다."""
+        if not self.get_parameter('m6_enable').value or result.binary_image is None:
+            return None
+        seeds = (result.left_fit, result.right_fit) if result.valid else (None, None)
+        try:
+            out = self.m6.update(result.binary_image, now_ns / 1e9, seeds,
+                                 self._held_steering, self._recent_stop_line(now_ns))
+        except (cv2.error, ValueError, TypeError, np.linalg.LinAlgError) as error:
+            self._warn(f'M6 processing failed: {error}')
+            return None
+        if out.just_entered:
+            self.get_logger().info('M6 zigzag: ACTIVE (slow straight guidance)')
+        if out.send_done:
+            self.get_logger().info(f'M6 done: {out.reason}')
+            if self.get_parameter('m6_publish_done').value:
+                self.event_pub.publish(String(data='M6_DONE'))
+        if out.just_exited:
+            self.get_logger().info(f'M6 zigzag: mode off ({out.reason})')
+            # M6 동안 쌓인 차선 기준은 지그재그 기준이라 일반 주행에 맞지 않는다
+            self.pipeline.reset()
+        self.m6_state_pub.publish(String(data=out.state))
+        return out
 
     def _camera_info_callback(self, msg: CameraInfo):
         if len(msg.k) == 9 and msg.k[0] > 0.0:
@@ -174,8 +256,23 @@ class LaneFollowingNode(Node):
             self._safe_stop(f'lane processing failed: {error}')
             return
 
-        self._update_zigzag(result.valid and result.zigzag)
         now_ns = self.get_clock().now().nanoseconds
+        m6 = self._update_m6(result, now_ns)
+        self._update_zigzag(result.valid and result.zigzag, m6 is not None and m6.active)
+        if m6 is not None and m6.active:
+            # M6: 지그재그 선마다 직선을 맞춘 결과로 천천히, 부드럽게 직진
+            cmd = Twist()
+            cmd.linear.x = self.get_parameter('m6_speed').value
+            cmd.angular.z = inner_angle_to_omega(
+                m6.steering * self.get_parameter('max_steer_angle').value, cmd.linear.x)
+            self._held_steering = m6.steering
+            self._last_valid_cmd = cmd
+            self._last_valid_ns = now_ns
+            self._invalid_frames = 0
+            self.cmd_pub.publish(cmd)
+            self._publish_result(msg, result, m6)
+            return
+
         usable = result.valid and result.confidence >= self.get_parameter('minimum_confidence').value
         if usable:
             self._invalid_frames = 0
@@ -213,7 +310,7 @@ class LaneFollowingNode(Node):
         else:
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
         self.cmd_pub.publish(cmd)
-        self._publish_result(msg, result)
+        self._publish_result(msg, result, m6)
 
     def _mode_error(self, result):
         lateral = result.lateral_error
@@ -228,7 +325,7 @@ class LaneFollowingNode(Node):
         return (self.get_parameter('lateral_gain').value * lateral
                 + self.get_parameter('heading_gain').value * result.heading_error)
 
-    def _update_zigzag(self, detected):
+    def _update_zigzag(self, detected, m6_active=False):
         if detected:
             self._zigzag_hits += 1
             self._zigzag_clears = 0
@@ -239,9 +336,9 @@ class LaneFollowingNode(Node):
             self._zigzag_hits = 0
             if self._zigzag_clears >= self.get_parameter('zigzag_exit_frames').value:
                 self._zigzag_active = False
-        self.zigzag_pub.publish(Bool(data=self._zigzag_active))
+        self.zigzag_pub.publish(Bool(data=self._zigzag_active or m6_active))
 
-    def _publish_result(self, source, result):
+    def _publish_result(self, source, result, m6=None):
         model = Vector3Stamped()
         model.header = source.header
         model.header.frame_id = 'lane_model' if result.valid else 'lane_invalid'
@@ -249,9 +346,16 @@ class LaneFollowingNode(Node):
         model.vector.y = result.heading_error
         model.vector.z = result.confidence
         self.model_pub.publish(model)
-        if not self.get_parameter('publish_debug').value or result.debug_image is None:
+        if not self.get_parameter('publish_debug').value:
             return
-        ok, encoded = cv2.imencode('.jpg', result.debug_image)
+        image = result.debug_image
+        if image is None and result.binary_image is not None:
+            image = result.binary_image
+        if image is None:
+            return
+        if m6 is not None:
+            image = self.m6.draw(image, m6)
+        ok, encoded = cv2.imencode('.jpg', image)
         if ok:
             debug = CompressedImage(header=source.header, format='jpeg', data=encoded.tobytes())
             self.debug_pub.publish(debug)
