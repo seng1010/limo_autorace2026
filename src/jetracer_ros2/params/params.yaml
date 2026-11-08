@@ -1,0 +1,170 @@
+data_collector_node:
+  ros__parameters:
+    section_id: 1
+    save_dir: '/home/wego/third_impact/src/jetracer_ros2/jetracer_dataset'
+    joy_steering_axis: 0
+    deadman_button: 3
+    max_steer_angle: 0.42
+    left_steer_boost: 1.0
+    linear_x: 0.25
+    save_rate_hz: 10.0
+    crop_ratio: 0.0
+
+lane_following_node:
+  ros__parameters:
+    image_topic: '/camera/color/image_raw/compressed'
+    camera_info_topic: '/camera/color/camera_info'
+    output_topic: 'inference/cmd_vel'
+    mode_topic: 'mission/lane_mode'
+    use_camera_info: true
+    publish_debug: true
+    command_timeout_sec: 0.30
+    minimum_confidence: 0.48
+    normal_speed: 0.25
+    zigzag_speed: 0.12
+    lateral_gain: 0.95
+    heading_gain: 0.70
+    max_steer_angle: 0.42
+    heading_hold_decay: 0.98
+    invalid_hold_sec: 0.25            # 차선 놓쳤을 때 마지막 명령 유지 시간 [s]
+    reset_after_invalid_frames: 5     # 연속 N프레임 실패 시 이전 차선 기준 초기화
+    zigzag_enter_frames: 3
+    zigzag_exit_frames: 5
+    image_width: 640
+    image_height: 480
+    bev_src: [0.30, 0.52, 0.70, 0.52, 0.94, 0.92, 0.06, 0.92]
+    bev_dst: [0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00]
+    detect_white: false               # 트랙 차선이 노란색이라 흰색 검출 끔
+    white_lightness_min: 170
+    white_saturation_max: 100
+    detect_yellow: true               # 노란 차선 검출
+    yellow_hue_min: 15                # HLS hue (0~180)
+    yellow_hue_max: 35
+    yellow_saturation_min: 80
+    yellow_lightness_min: 60
+    gradient_min: 35
+    morphology_kernel: 3
+    windows: 10
+    window_margin: 55
+    recenter_min_pixels: 35
+    fit_min_points: 120
+    polynomial_degree: 3
+    ransac_iterations: 60
+    ransac_residual_px: 7.0
+    lane_width_px: 360.0
+    lane_width_tolerance: 0.35
+    max_lane_width_change_px: 70.0
+    max_fit_jump_px: 90.0
+    lookahead_y_ratio: 0.62
+    smoothing_alpha: 0.35
+    zigzag_min_step_px: 8.0
+    zigzag_min_span_px: 55.0
+    zigzag_min_direction_changes: 1
+    # ---- M6 서행 유도선(지그재그) : lane_following_node_ks 전용 (원래 노드는 무시) ----
+    # 숫자 형식 주의: 소수 값은 반드시 소수점 포함(0.15, 1.0), 정수 값은 정수(3)로 쓸 것
+    m6_enable: true
+    m6_require_mission: false         # true: 매니저가 mission/active 로 'M6' 을 알려줄 때만 동작
+    m6_speed: 0.15                    # M6 구간 속도 [m/s] (규정: 서행 구간 0.2 이하)
+    m6_enter_frames: 3                # 지그재그 연속 N프레임 → M6 모드 시작
+    m6_exit_frames: 5                 # 선은 보이는데 지그재그 아님 연속 N프레임 → 끝
+    m6_min_active_sec: 1.0            # 시작 후 이 시간 동안은 끝내지 않음
+    m6_max_active_sec: 20.0           # 안전장치: 이보다 길면 강제 종료
+    m6_use_stop_line: true            # 정지선이 가까우면 M6_DONE 을 미리 보냄 (조향은 계속 M6)
+    m6_exit_stop_line_m: 0.8          # 그 거리 [m]
+    m6_steer_gain: 1.0                # M6 조향 세기 배율
+    m6_max_steer: 0.45                # M6 최대 조향 (-1~1)
+    m6_max_steer_rate: 0.06           # 프레임당 조향 변화 한계
+    m6_min_amplitude_ratio: 0.03      # 톱니 최소 진폭 / lane_width_px (지그재그를 못 잡으면 낮추기)
+    m6_ignore_center_ratio: 0.5       # 차선 가운데 무시 폭 / lane_width_px (마름모·글자)
+
+stop_line_node:
+  ros__parameters:
+    image_topic: '/camera/color/image_raw/compressed'
+    roi_top_ratio: 0.58
+    white_lightness_min: 180
+    white_saturation_max: 90
+    horizontal_kernel_ratio: 0.12
+    minimum_width_ratio: 0.42
+    minimum_area_ratio: 0.018
+    distance_scale_m: 1.6
+    publish_debug: true
+
+yolo_detection_node:
+  ros__parameters:
+    image_topic: '/camera/color/image_raw/compressed'
+    model_path: ''  # e.g. /home/wego/models/autorace.engine
+    confidence: 0.45
+    iou: 0.5
+    image_size: 640
+    max_rate_hz: 10.0
+    confirm_frames: 3
+    publish_debug: true
+    traffic_roi: [0.0, 0.0, 1.0, 0.65]
+    advertisement_exclusion_roi: [0.0, 0.65, 1.0, 1.0]
+
+mission_manager_node:
+  ros__parameters:
+    lane_command_topic: 'inference/cmd_vel'
+    cone_command_topic: 'mission/cone/cmd_vel'
+    parking_command_topic: 'mission/parking/cmd_vel'
+    output_topic: '/cmd_vel'
+    mission_event_topic: 'mission/event'
+    active_mission_topic: 'mission/active'
+    lane_mode_topic: 'mission/lane_mode'
+    normal_speed: 0.25
+    slow_speed: 0.12
+    command_timeout_sec: 0.40
+    stop_line_distance_m: 0.35
+    pedestrian_hold_sec: 1.0
+    auto_start_mission_nodes: true
+
+mission_traffic_light_node:
+  ros__parameters:
+    yolo_event_topic: 'mission/yolo_event'
+    stop_line_topic: 'mission/stop_line_distance'
+    output_topic: 'mission/traffic_light_state'
+    stop_distance_m: 0.35
+    require_stop_line: true
+    confirm_events: 2
+
+mission_obstacle_avoid_node:
+  ros__parameters:
+    scan_topic: '/scan'
+    front_angle_deg: 24.0
+    side_angle_min_deg: 20.0
+    side_angle_max_deg: 75.0
+    obstacle_distance_m: 1.15
+    clearance_distance_m: 1.4
+    minimum_points: 4
+    confirm_scans: 3
+
+mission_cone_avoid_node:
+  ros__parameters:
+    scan_topic: '/scan'
+    output_topic: 'mission/cone/cmd_vel'
+    speed: 0.10
+    max_steer_angle: 0.42
+    lookahead_m: 1.0
+    field_of_view_deg: 80.0
+    maximum_cone_range_m: 2.5
+    minimum_points_each_side: 2
+    steering_gain: 1.3
+    emergency_distance_m: 0.25
+
+mission_parking_node:
+  ros__parameters:
+    output_topic: 'mission/parking/cmd_vel'
+    search_speed: 0.08
+    reverse_speed: -0.07
+    max_steer_angle: 0.40
+    opening_distance_m: 1.0
+    opening_confirm_scans: 4
+    advance_distance_m: 0.42
+    reverse_turn_yaw_deg: 72.0
+    reverse_straight_distance_m: 0.48
+    rear_stop_distance_m: 0.22
+    right_sector_deg: [-100.0, -55.0]
+
+debug_autorace_node:
+  ros__parameters:
+    frame_id: 'base_link'
