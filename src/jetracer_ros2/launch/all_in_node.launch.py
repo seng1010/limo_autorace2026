@@ -17,7 +17,7 @@ def generate_launch_description():
         ),
         Node(
             package='jetracer_ros2',
-            executable='lane_following_node',
+            executable='lane_following_node_ks',
             output='screen',
         ),
         Node(
