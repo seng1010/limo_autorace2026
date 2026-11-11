@@ -72,3 +72,34 @@ def test_detects_zigzag_for_slow_driving():
     assert result.zigzag
     assert result.direction_changes >= 1
     assert result.zigzag_score > 0.5
+
+
+def test_reset_recovers_after_lane_shift_while_lost():
+    """차선을 놓친 사이 차가 밀리면 급변 검사에 계속 걸린다. reset()으로 복구돼야 한다."""
+    pipeline = LanePipeline(_identity_config())
+    assert pipeline.process(_synthetic_lane()).valid
+    for _ in range(5):
+        pipeline.process(np.zeros((480, 640, 3), dtype=np.uint8))
+    shifted = _synthetic_lane(offset=-110)
+    assert not pipeline.process(shifted).valid
+    pipeline.reset()
+    assert pipeline.process(shifted).valid
+
+
+def test_detects_yellow_lanes_when_enabled():
+    """노란 차선은 흰색 검출만으로는 못 찾고, detect_yellow를 켜면 찾아야 한다."""
+    image = _synthetic_lane()
+    yellow = image.copy()
+    yellow[np.all(image == 255, axis=2)] = (0, 220, 255)   # BGR 노란색
+
+    white_only = _identity_config()
+    white_only.gradient_min = 255     # 경계선 검출 영향 제거
+    assert not LanePipeline(white_only).process(yellow).valid
+
+    yellow_config = _identity_config()
+    yellow_config.gradient_min = 255
+    yellow_config.detect_white = False
+    yellow_config.detect_yellow = True
+    result = LanePipeline(yellow_config).process(yellow)
+    assert result.valid
+    assert abs(result.lateral_error) < 0.25
