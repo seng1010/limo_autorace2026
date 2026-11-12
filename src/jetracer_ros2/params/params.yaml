@@ -23,8 +23,10 @@ lane_following_node:
     live_debug_fps: 5.0            # 화면 전달만 제한; 차선 계산 주기는 변경하지 않음
     command_timeout_sec: 0.30
     minimum_confidence: 0.48
-    normal_speed: 0.25
-    zigzag_speed: 0.12
+    normal_speed: 0.70            # 유효 직선 차선에서만 적용
+    curve_speed: 0.30             # 곡선 검출 시; 유실 시 curve_recovery_speed
+    curve_steering_speed_threshold: 0.35  # 조향 해제 중에는 곡선 속도 유지
+    zigzag_speed: 0.18            # 노란 지그재그 우선 서행
     lateral_gain: 0.95
     heading_gain: 0.70
     steering_gain: 1.20              # 확인된 곡선에서만 점진 적용. 직선 배율은 1.0
@@ -46,10 +48,11 @@ lane_following_node:
     heading_hold_decay: 0.98
     invalid_hold_sec: 0.25            # 차선 놓쳤을 때 마지막 명령 유지 시간 [s]
     curve_recovery_sec: 0.50         # 신뢰도 0.70 이상 확인된 곡선 유실만 연결, 최대 0.8초
-    curve_recovery_speed: 0.10       # 마지막 조향 유지, 최대 0.12 m/s
+    curve_recovery_speed: 0.12       # 곡선 유실 시 마지막 조향 유지, 최대 0.12 m/s
     reset_after_invalid_frames: 5     # 연속 N프레임 실패 시 이전 차선 기준 초기화
-    zigzag_enter_frames: 3
-    zigzag_exit_frames: 5
+    zigzag_confirm_sec: 2.0          # 이 시간 이상 누적 검출되면 확정 구간
+    zigzag_gap_sec: 0.35             # 짧은 미검출은 같은 구간으로 간주
+    zigzag_hold_sec: 1.5            # 확정 구간 종료 뒤 추가 서행
     image_width: 640
     image_height: 480
     bev_src: [0.3605, 0.46, 0.6395, 0.46, 1.00, 0.82, 0.00, 0.82]
@@ -137,8 +140,8 @@ mission_manager_node:
     mission_event_topic: 'mission/event'
     active_mission_topic: 'mission/active'
     lane_mode_topic: 'mission/lane_mode'
-    normal_speed: 0.25
-    slow_speed: 0.12
+    normal_speed: 0.70              # lane 노드 직선 속도를 상위에서 제한하지 않음
+    slow_speed: 0.18                # 서행 표지 등 미션 속도 상한
     command_timeout_sec: 0.40
     stop_line_distance_m: 0.35
     pedestrian_hold_sec: 1.0

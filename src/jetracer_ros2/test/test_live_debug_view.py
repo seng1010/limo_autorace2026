@@ -9,6 +9,7 @@ import numpy as np
 
 from jetracer_ros2.live_debug_view import LiveViewer, render_view, render_grid, path_layers, VIEW_NAMES
 from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
+from jetracer_ros2.driving_profile import ZigzagTracker
 
 
 def sample_packet(valid=True):
@@ -126,6 +127,7 @@ def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
     definition = ast.ClassDef(name='TestNode', bases=[ast.Name(id='FakeNode', ctx=ast.Load())],
                               keywords=[], body=methods, decorator_list=[])
     scope = dict(FakeNode=FakeNode, np=np, LanePipeline=LanePipeline, LanePipelineConfig=LanePipelineConfig,
+                 ZigzagTracker=ZigzagTracker,
                  Twist=object, Vector3Stamped=object, CompressedImage=object, CameraInfo=object,
                  Bool=object, String=object, qos_profile_sensor_data=object())
     exec(compile(ast.fix_missing_locations(ast.Module(body=[definition], type_ignores=[])), str(path), 'exec'), scope)

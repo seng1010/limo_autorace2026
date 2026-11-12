@@ -27,6 +27,9 @@ from jetracer_ros2.lane_steering import (
 )
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 from jetracer_ros2.live_debug_view import LiveViewer
+from jetracer_ros2.driving_profile import (
+    ZigzagTracker, select_speed, yellow_zigzag_evidence,
+)
 
 
 VALID_MODES = {'center', 'left', 'right', 'heading_hold'}
@@ -42,8 +45,7 @@ class LaneFollowingNode(Node):
         self._last_image_ns = 0
         self._last_warning_ns = 0
         self._last_status_ns = 0
-        self._zigzag_hits = 0
-        self._zigzag_clears = 0
+        self._zigzag_tracker = ZigzagTracker()
         self._zigzag_active = False
         self._mode = 'center'
         self._held_steering = 0.0
@@ -107,8 +109,10 @@ class LaneFollowingNode(Node):
             'live_debug_fps': 5.0,
             'command_timeout_sec': 0.30,
             'minimum_confidence': 0.48,
-            'normal_speed': 0.25,
-            'zigzag_speed': 0.12,
+            'normal_speed': 0.70,
+            'curve_speed': 0.30,
+            'curve_steering_speed_threshold': 0.35,
+            'zigzag_speed': 0.18,
             'lateral_gain': 0.95,
             'heading_gain': 0.70,
             'steering_gain': 1.20,
@@ -130,10 +134,11 @@ class LaneFollowingNode(Node):
             'heading_hold_decay': 0.98,
             'invalid_hold_sec': 0.25,
             'curve_recovery_sec': 0.50,
-            'curve_recovery_speed': 0.10,
+            'curve_recovery_speed': 0.12,
             'reset_after_invalid_frames': 5,
-            'zigzag_enter_frames': 3,
-            'zigzag_exit_frames': 5,
+            'zigzag_confirm_sec': 2.0,
+            'zigzag_gap_sec': 0.35,
+            'zigzag_hold_sec': 1.5,
             'image_width': 640,
             'image_height': 480,
             'bev_src': [0.3605, 0.46, 0.6395, 0.46, 1.00, 0.82, 0.00, 0.82],
@@ -262,8 +267,8 @@ class LaneFollowingNode(Node):
             self._safe_stop(f'lane processing failed: {error}')
             return
 
-        self._update_zigzag(result.valid and result.zigzag)
         now_ns = self.get_clock().now().nanoseconds
+        self._update_zigzag(yellow_zigzag_evidence(result), now_ns)
         usable = result.valid and result.confidence >= self.get_parameter('minimum_confidence').value
         if usable:
             self._invalid_frames = 0
@@ -291,14 +296,22 @@ class LaneFollowingNode(Node):
                     self.get_parameter('steering_gain').value - 1.0))
             steering = self._rate_limit_steering(target_steering, now_ns)
             self._held_steering = steering
-            speed = (self.get_parameter('zigzag_speed').value
-                     if self._zigzag_active else self.get_parameter('normal_speed').value)
+            curve_detected = (
+                self._curve_active
+                or result.curve_heading_span >= self.get_parameter('curve_shape_min_span').value
+                # Continue at curve speed while steering is still being released.
+                or abs(steering) >= self.get_parameter('curve_steering_speed_threshold').value)
+            speed = select_speed(
+                self._zigzag_active, curve_detected,
+                self.get_parameter('normal_speed').value,
+                self.get_parameter('curve_speed').value,
+                self.get_parameter('zigzag_speed').value)
             cmd.linear.x = speed
             cmd.angular.z = inner_angle_to_omega(
                 steering * self.get_parameter('max_steer_angle').value, speed)
             self._last_valid_cmd = cmd
             self._last_valid_ns = now_ns
-            self._last_valid_curve = self._curve_active and result.confidence >= 0.70
+            self._last_valid_curve = curve_detected and result.confidence >= 0.70
         elif (self._last_valid_cmd is not None and self._last_valid_curve
               and 0 <= (now_ns - self._last_valid_ns) / 1e9 <= min(
                   0.8, max(0.0, self.get_parameter('curve_recovery_sec').value))):
@@ -319,7 +332,11 @@ class LaneFollowingNode(Node):
         elif (self._last_valid_cmd is not None
               and (now_ns - self._last_valid_ns) / 1e9 <= self.get_parameter('invalid_hold_sec').value):
             # 반사·그림자 등으로 잠깐 놓친 프레임은 마지막 명령을 유지해 덜컥거림을 막는다.
-            cmd = self._last_valid_cmd
+            # Even a brief blind interval must not retain the 0.70 m/s cruise.
+            cmd.linear.x = min(0.12, self._last_valid_cmd.linear.x)
+            cmd.angular.z = inner_angle_to_omega(
+                self._held_steering * self.get_parameter('max_steer_angle').value,
+                cmd.linear.x)
         else:
             self._reset_steering()
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
@@ -339,7 +356,7 @@ class LaneFollowingNode(Node):
                 f'shape_span={result.curve_heading_span:.3f} curve_weight={self._curve_weight:.2f} '
                 f'reference={reference_side(result)} '
                 f'lookahead={result.lookahead_description} light_gain={result.illumination_gain:.2f} '
-                f'curve_control={self._curve_active} '
+                f'curve_control={self._curve_active} zigzag_slow={self._zigzag_active} '
                 f'{steering_status}'
                 f'v={cmd.linear.x:.3f} omega={cmd.angular.z:.3f} '
                 f'reason={result.reason}')
@@ -474,17 +491,12 @@ class LaneFollowingNode(Node):
         self._last_valid_cmd = None
         self._last_valid_ns = 0
 
-    def _update_zigzag(self, detected):
-        if detected:
-            self._zigzag_hits += 1
-            self._zigzag_clears = 0
-            if self._zigzag_hits >= self.get_parameter('zigzag_enter_frames').value:
-                self._zigzag_active = True
-        else:
-            self._zigzag_clears += 1
-            self._zigzag_hits = 0
-            if self._zigzag_clears >= self.get_parameter('zigzag_exit_frames').value:
-                self._zigzag_active = False
+    def _update_zigzag(self, detected, now_ns):
+        self._zigzag_active = self._zigzag_tracker.update(
+            detected, now_ns / 1e9,
+            self.get_parameter('zigzag_confirm_sec').value,
+            self.get_parameter('zigzag_gap_sec').value,
+            self.get_parameter('zigzag_hold_sec').value)
         self.zigzag_pub.publish(Bool(data=self._zigzag_active))
 
     def _publish_result(self, source, result):
