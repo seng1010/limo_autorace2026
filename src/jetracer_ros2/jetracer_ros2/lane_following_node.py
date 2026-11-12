@@ -50,6 +50,8 @@ class LaneFollowingNode(Node):
         self._curve_direction = 0.0
         self._curve_candidate_direction = 0.0
         self._curve_hits = 0
+        self._geometry_hits = 0
+        self._curve_weight = 0.0
         self._invalid_frames = 0
         self._last_valid_cmd: Optional[Twist] = None
         self._last_valid_ns = 0
@@ -100,6 +102,9 @@ class LaneFollowingNode(Node):
             'curve_enter_error': 0.55,
             'curve_exit_error': 0.25,
             'curve_enter_frames': 2,
+            'curve_shape_min_span': 0.20,
+            'curve_shape_full_span': 0.40,
+            'curve_shape_confirm_frames': 2,
             'curve_max_steering_ratio': 1.0,
             'steering_attack_rate': 4.0,
             'steering_release_rate': 1.2,
@@ -241,8 +246,11 @@ class LaneFollowingNode(Node):
         usable = result.valid and result.confidence >= self.get_parameter('minimum_confidence').value
         if usable:
             self._invalid_frames = 0
+            self._update_curve_geometry(result)
         else:
             self._invalid_frames += 1
+            self._geometry_hits = 0
+            self._curve_weight = 0.0
             self._curve_hits = 0
             self._curve_candidate_direction = 0.0
             reset_after = int(self.get_parameter('reset_after_invalid_frames').value)
@@ -258,7 +266,8 @@ class LaneFollowingNode(Node):
             raw_steering = float(np.clip(-error, -1.0, 1.0))
             target_steering = self._curve_steering_target(raw_steering)
             target_steering = scale_steering(
-                target_steering, self.get_parameter('steering_gain').value)
+                target_steering, 1.0 + self._curve_weight * (
+                    self.get_parameter('steering_gain').value - 1.0))
             steering = self._rate_limit_steering(target_steering, now_ns)
             self._held_steering = steering
             speed = (self.get_parameter('zigzag_speed').value
@@ -295,6 +304,8 @@ class LaneFollowingNode(Node):
             self.get_logger().info(
                 f'lane type(est): L={result.left_type} R={result.right_type} '
                 f'confidence={result.confidence:.2f} usable={usable} '
+                f'lateral={result.lateral_error:+.3f} heading={result.heading_error:+.3f} '
+                f'shape_span={result.curve_heading_span:.3f} curve_weight={self._curve_weight:.2f} '
                 f'reference={reference_side(result)} '
                 f'lookahead={result.lookahead_description} light_gain={result.illumination_gain:.2f} '
                 f'curve_control={self._curve_active} '
@@ -303,12 +314,34 @@ class LaneFollowingNode(Node):
                 f'reason={result.reason}')
         self._publish_result(msg, result)
 
+    def _update_curve_geometry(self, result):
+        """Require measured bending on consecutive valid images before boosting."""
+        minimum = max(0.0, float(self.get_parameter('curve_shape_min_span').value))
+        full = max(minimum + 1e-6, float(self.get_parameter('curve_shape_full_span').value))
+        span = result.curve_heading_span
+        if not np.isfinite(span) or span <= minimum:
+            self._geometry_hits = 0
+            self._curve_weight = 0.0
+            return
+        self._geometry_hits += 1
+        frames = max(1, int(self.get_parameter('curve_shape_confirm_frames').value))
+        if self._geometry_hits < frames:
+            self._curve_weight = 0.0
+            return
+        t = float(np.clip((span - minimum) / (full - minimum), 0.0, 1.0))
+        self._curve_weight = t * t * (3.0 - 2.0 * t)
+
     def _curve_steering_target(self, raw_steering):
         """곡선 진입은 크게 조향하고 오차 감소에 따라 목표 조향을 푼다.
 
         한 프레임의 노이즈로 최대 조향이 걸리지 않도록 연속 프레임을 확인하고,
         진입/탈출 임계값을 다르게 둬 곡선 경계에서 상태가 흔들리지 않게 한다.
         """
+        if self._curve_weight <= 0.0:
+            self._curve_active = False
+            self._curve_hits = 0
+            self._curve_direction = self._curve_candidate_direction = 0.0
+            return raw_steering
         magnitude = abs(raw_steering)
         direction = float(np.sign(raw_steering))
         enter = self.get_parameter('curve_enter_error').value
@@ -334,8 +367,9 @@ class LaneFollowingNode(Node):
 
         if self._curve_active:
             ratio = self.get_parameter('curve_max_steering_ratio').value
-            return self._curve_direction * curve_release_target(
+            peak_target = self._curve_direction * curve_release_target(
                 magnitude, enter, exit_error, float(np.clip(ratio, 0.0, 1.0)))
+            return raw_steering + self._curve_weight * (peak_target - raw_steering)
         return raw_steering
 
     def _rate_limit_steering(self, target, now_ns):
@@ -361,9 +395,11 @@ class LaneFollowingNode(Node):
             self.get_parameter('heading_gain').value,
             self.get_parameter('left_reference_gain').value,
             self.get_parameter('right_reference_gain').value,
-            self.get_parameter('preview_heading_gain').value)
+            self.get_parameter('preview_heading_gain').value, self._curve_weight)
 
     def _reset_steering(self):
+        self._geometry_hits = 0
+        self._curve_weight = 0.0
         self._curve_active = False
         self._curve_direction = 0.0
         self._curve_candidate_direction = 0.0

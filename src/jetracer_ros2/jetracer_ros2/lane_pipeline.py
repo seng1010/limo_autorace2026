@@ -12,7 +12,7 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-from jetracer_ros2.lane_attributes import classify_lane
+from jetracer_ros2.lane_attributes import classify_lane, measured_heading_span
 from jetracer_ros2.lane_vision import compensate_light, GroundLookahead
 
 
@@ -97,6 +97,7 @@ class LaneResult:
     preview_heading_error: float = 0.0
     lookahead_description: str = 'uncalibrated'
     illumination_gain: float = 1.0
+    curve_heading_span: float = 0.0  # Measured boundaries only; radians, not 1/metres.
 
 
 class LanePipeline:
@@ -927,6 +928,9 @@ class LanePipeline:
                 debug[-120:, -160:] = cv2.resize(roi_view, (160, 120))
         return LaneResult(
             valid=True,
+            curve_heading_span=max(
+                measured_heading_span(measured_left_fit, left_y, self.config.height),
+                measured_heading_span(measured_right_fit, right_y, self.config.height)),
             preview_heading_error=preview_heading,
             lookahead_description=lookahead_description,
             illumination_gain=illumination_gain,

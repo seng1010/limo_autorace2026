@@ -77,7 +77,7 @@ def test_metric_requires_calibration_and_visible_target():
 def test_preview_boost_only_for_same_direction_tightening():
     result = SimpleNamespace(lateral_error=.1, heading_error=.2,
                              preview_heading_error=.6, recovered_side='left')
-    base = tracking_error(result, .95, .7, 1.35, 1., 0.)
-    assert tracking_error(result, .95, .7, 1.35, 1., .25) > base
+    base = tracking_error(result, .95, .7, 1.35, 1., 0., 1.0)
+    assert tracking_error(result, .95, .7, 1.35, 1., .25, 1.0) > base
     result.preview_heading_error = -.6
-    assert tracking_error(result, .95, .7, 1.35, 1., .25) == base
+    assert tracking_error(result, .95, .7, 1.35, 1., .25, 1.0) == base

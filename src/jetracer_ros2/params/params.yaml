@@ -24,15 +24,18 @@ lane_following_node:
     zigzag_speed: 0.12
     lateral_gain: 0.95
     heading_gain: 0.70
-    steering_gain: 1.20              # 최종 목표 조향 배율. 1.0=기존, 1.2=20% 증가(최대각 유지)
-    left_reference_gain: 1.35        # 왼쪽 기준 강화(기존 1.15). 최대각 제한 유지
-    preview_heading_gain: 0.25      # 더 먼 곳에서 같은 방향으로 급해지는 곡선 선제 보정
+    steering_gain: 1.20              # 확인된 곡선에서만 점진 적용. 직선 배율은 1.0
+    left_reference_gain: 1.35        # 확인된 곡선의 왼쪽 기준 추가 배율. 직선은 1.0
+    preview_heading_gain: 0.25      # 확인된 곡선에서만 전방 방향 변화 보정
     right_reference_gain: 1.0        # 실제 오른쪽 선 하나로 복원한 중심경로 오차 보정
     status_log_interval_sec: 1.0     # 선 종류 추정/confidence/명령 로그 주기. 0=끄기
     max_steer_angle: 0.42
     curve_enter_error: 0.55          # 이 오차가 연속되면 곡선 모드 진입
     curve_exit_error: 0.25           # 이 오차 아래에서 곡선 모드 해제
     curve_enter_frames: 2
+    curve_shape_min_span: 0.20       # 관측선 접선 방향 변화(rad). 위치/기울기 오차와 별개
+    curve_shape_full_span: 0.40      # 이 변화 이상에서 곡선 추가 배율 100% 적용
+    curve_shape_confirm_frames: 2   # 유효 프레임 연속 확인. 미달 시 기본 조향만
     curve_max_steering_ratio: 1.0    # 곡선 모드 목표 조향(1.0 = max_steer_angle)
     steering_attack_rate: 4.0        # 초당 조향 증가량(약 0.25초에 0→최대)
     steering_release_rate: 1.2       # 초당 같은 방향 조향 해제량(약 0.83초에 최대→0)

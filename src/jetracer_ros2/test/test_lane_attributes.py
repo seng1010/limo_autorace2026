@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from jetracer_ros2.lane_attributes import classify_lane, scale_steering
+from jetracer_ros2.lane_attributes import classify_lane, scale_steering, measured_heading_span
 from jetracer_ros2.lane_pipeline import LanePipelineConfig
 
 
@@ -46,3 +46,12 @@ def test_steering_gain_preserves_sign_and_limit():
     assert scale_steering(-0.9, 1.2) == -1.0
     assert scale_steering(0.0, 1.2) == 0.0
     assert scale_steering(0.5, float('nan')) == 0.5
+
+
+def test_shifted_or_tilted_straight_line_is_not_curve_evidence():
+    ys = np.arange(30, 450)
+    for intercept in (50, 300, 550):
+        for slope in (-1.0, 0.0, 1.0):
+            assert measured_heading_span(np.array([slope, intercept]), ys, 480) == 0.0
+    assert measured_heading_span(np.array([.001, -.48, 200]), ys, 480) > .40
+    assert measured_heading_span(np.array([.001, -.48, 200]), [], 480) == 0.0

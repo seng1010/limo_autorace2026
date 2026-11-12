@@ -7,18 +7,20 @@ def reference_side(result):
     return result.recovered_side if result.recovered_side in ('left', 'right') else 'both'
 
 
-def tracking_error(result, lateral_gain, heading_gain, left_gain, right_gain, preview_gain=0.0):
+def tracking_error(result, lateral_gain, heading_gain, left_gain, right_gain,
+                   preview_gain=0.0, curve_weight=0.0):
     # The pipeline already offsets the observed boundary along its normal to
     # reconstruct a center path. Do not replace it with a horizontal half-width.
     error = lateral_gain * result.lateral_error + heading_gain * result.heading_error
+    weight = min(1.0, max(0.0, curve_weight))
     preview = getattr(result, 'preview_heading_error', result.heading_error)
     # Anticipate a tightening turn only if the farther tangent agrees in sign.
     if preview * result.heading_error >= 0 and abs(preview) > abs(result.heading_error):
-        error += preview_gain * (preview - result.heading_error)
+        error += weight * preview_gain * (preview - result.heading_error)
     side = reference_side(result)
     gain = left_gain if side == 'left' else right_gain if side == 'right' else 1.0
     gain = gain if math.isfinite(gain) and gain > 0.0 else 1.0
-    return error * gain
+    return error * (1.0 + weight * (gain - 1.0))
 
 
 def curve_release_target(magnitude, enter, exit_error, peak):

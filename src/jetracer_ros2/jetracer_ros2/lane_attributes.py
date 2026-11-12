@@ -4,6 +4,18 @@ import cv2
 import numpy as np
 
 
+def measured_heading_span(fit, observed_y, height):
+    """Change of tangent angle on observed paint, not absolute line tilt."""
+    if fit is None or len(observed_y) == 0:
+        return 0.0
+    lo, hi = float(np.min(observed_y)), float(np.max(observed_y))
+    if hi - lo < height * 0.30:
+        return 0.0
+    slopes = np.polyval(np.polyder(fit), np.linspace(lo, hi, 24))
+    span = float(np.ptp(np.arctan(slopes)))
+    return span if np.isfinite(span) else 0.0
+
+
 def classify_lane(bird, fit, observed_y, config, zigzag=False):
     """Classify only a measured boundary; never label a reconstructed boundary.
 
@@ -51,8 +63,7 @@ def classify_lane(bird, fit, observed_y, config, zigzag=False):
                 pattern = 'solid'
             else:
                 pattern = 'unknown'
-    slopes = np.polyval(np.polyder(fit), np.linspace(lo, hi, 24))
-    heading_span = float(np.ptp(np.arctan(slopes)))
+    heading_span = measured_heading_span(fit, observed_y, bird.shape[0])
     shape = 'zigzag' if zigzag else ('curve' if heading_span >= 0.20 else 'straight')
     return f'{color}/{pattern}/{shape}'
 
