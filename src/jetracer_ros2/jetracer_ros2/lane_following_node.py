@@ -193,6 +193,7 @@ class LaneFollowingNode(Node):
             'bev_ground_points_m': [0.0] * 8,
             'metric_max_near_clamp_m': 0.25,
             'metric_edge_margin_m': 0.02,
+            'target_roi_margin_px': 20.0,
         }
         for name, default in values.items():
             self.declare_parameter(name, default)
@@ -209,6 +210,7 @@ class LaneFollowingNode(Node):
             bev_ground_points_m=tuple(p('bev_ground_points_m')),
             metric_max_near_clamp_m=p('metric_max_near_clamp_m'),
             metric_edge_margin_m=p('metric_edge_margin_m'),
+            target_roi_margin_px=p('target_roi_margin_px'),
             width=p('image_width'), height=p('image_height'),
             src_points=tuple(p('bev_src')), dst_points=tuple(p('bev_dst')),
             detect_white=p('detect_white'),

@@ -44,6 +44,14 @@ def test_roi_reaches_pixel_edges():
     assert np.allclose(projected, pipeline._normalized_points(pipeline.config.dst_points), atol=1e-3)
 
 
+def test_target_must_stay_within_measured_bev_even_with_high_confidence():
+    pipeline = LanePipeline(LanePipelineConfig())
+    assert pipeline._target_within_bev(320, 440)
+    assert pipeline._target_within_bev(130, 440)  # 20-pixel tolerance at edge.
+    assert not pipeline._target_within_bev(80, 440)  # Recorded fork failure.
+    assert not pipeline._target_within_bev(550, 440)
+
+
 def ground(distance=0.4, offset=0.1):
     return GroundLookahead(
         [[0, 0], [639, 0], [639, 479], [0, 479]],

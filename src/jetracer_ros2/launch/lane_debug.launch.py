@@ -8,7 +8,9 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     """Manual-drive inspection: GUI + real lane pipeline, NO driving publisher."""
     return LaunchDescription([
-        DeclareLaunchArgument('metric_ackermann', default_value='false'),
+        # Inspection now defaults to the measured rear-axle target. This launch
+        # never creates a driving publisher, so it is safe to compare on screen.
+        DeclareLaunchArgument('metric_ackermann', default_value='true'),
         Node(
             package='jetracer_ros2',
             executable='lane_following_node',

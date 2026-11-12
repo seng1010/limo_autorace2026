@@ -37,4 +37,4 @@ def test_offscreen_reconstructed_center_is_rejected(monkeypatch):
     cv2.line(image, (550,0), (550,479), (255,255,255), 10)
     result = pipeline.process(image)
     assert not result.valid
-    assert result.reason == 'center target outside observable image'
+    assert result.reason == 'center target outside measured BEV road area'

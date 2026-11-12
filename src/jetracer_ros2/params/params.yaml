@@ -104,6 +104,7 @@ lane_following_node:
     # 사용자 실측: 뒤 차축 기준 앞 1.51/0.605m, 좌우 0.24/0.22m; 전방에서 0.184m 차감.
     metric_max_near_clamp_m: 0.25     # 요청 거리보다 가까운 목표가 안 보일 때 허용하는 최대 부족분
     metric_edge_margin_m: 0.02        # 마지막 관측 픽셀 자체 대신 2cm 안쪽의 목표 사용
+    target_roi_margin_px: 20.0       # 목표점이 실측 BEV 영역을 크게 벗어나면 주행 불가
     smoothing_alpha: 0.35
     zigzag_min_step_px: 8.0
     zigzag_min_span_px: 55.0

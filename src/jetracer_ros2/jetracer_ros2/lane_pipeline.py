@@ -75,6 +75,7 @@ class LanePipelineConfig:
     bev_ground_points_m: Tuple[float, ...] = (0.0,) * 8
     metric_max_near_clamp_m: float = 0.25
     metric_edge_margin_m: float = 0.02
+    target_roi_margin_px: float = 20.0
 
 
 @dataclass
@@ -141,6 +142,18 @@ class LanePipeline:
             cv2.getPerspectiveTransform(src, dst),
             cv2.getPerspectiveTransform(dst, src),
         )
+
+    def _target_within_bev(self, x: float, y: float) -> bool:
+        """Reject a driving target outside the four calibrated BEV corners."""
+        dst = self._normalized_points(self.config.dst_points)
+        near_y, far_y = float(dst[3, 1]), float(dst[0, 1])
+        if not np.isfinite([x, y]).all() or abs(near_y - far_y) < 1e-6:
+            return False
+        fraction = float(np.clip((y - far_y) / (near_y - far_y), 0.0, 1.0))
+        left_edge = float(dst[0, 0] + fraction * (dst[3, 0] - dst[0, 0]))
+        right_edge = float(dst[1, 0] + fraction * (dst[2, 0] - dst[1, 0]))
+        margin = max(0.0, float(self.config.target_roi_margin_px))
+        return left_edge - margin <= x <= right_edge + margin
 
     def _binary_masks(
         self, bird_image: np.ndarray,
@@ -870,13 +883,12 @@ class LanePipeline:
 
         y_eval = self.config.height * self.config.lookahead_y_ratio
         center_x = 0.5 * (np.polyval(left_fit, y_eval) + np.polyval(right_fit, y_eval))
-        if not np.isfinite(center_x) or not 0 <= center_x < self.config.width:
+        if not np.isfinite(center_x):
             self.reset()
             return LaneResult(valid=False, debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
-                              reason='center target outside observable image',
-                              tracking_mode=tracking_mode)
+                              reason='center target is not finite', tracking_mode=tracking_mode)
         lateral_error = float(np.clip(
             (center_x - self.config.width * 0.5) / (self.config.width * 0.5), -1.5, 1.5,
         ))
@@ -903,6 +915,17 @@ class LanePipeline:
             lookahead_description = (
                 f'{self.config.lookahead_distance_m:.2f}m requested, '
                 f'{target_forward_m:.2f}m used from rear axle y={y_eval:.0f}px')
+
+        # A polynomial can have many inliers yet extrapolate the driving
+        # target outside the measured BEV road area (seen at the fork in the
+        # manual recording). Confidence alone must not make it driveable.
+        if not self._target_within_bev(center_x, y_eval):
+            self.reset()
+            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+                              binary_image=binary, color_binary_image=color_binary,
+                              gradient_binary_image=gradient_binary,
+                              reason='center target outside measured BEV road area',
+                              tracking_mode=tracking_mode)
 
         if recovered:
             # 한쪽 선만 보이는 곡선에서는 관측하지 않은 반대쪽 선 때문에 점수를
