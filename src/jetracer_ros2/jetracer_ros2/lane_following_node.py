@@ -27,6 +27,7 @@ from jetracer_ros2.lane_steering import (
 )
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 from jetracer_ros2.live_debug_view import LiveViewer
+from jetracer_ros2.lane_ackermann import target_to_inner_angle
 from jetracer_ros2.driving_profile import (
     ZigzagTracker, select_speed, yellow_zigzag_evidence,
 )
@@ -94,7 +95,8 @@ class LaneFollowingNode(Node):
         self.watchdog = self.create_timer(0.05, self._watchdog_callback)
         self.get_logger().info(
             f"lane follower ready: {self.get_parameter('image_topic').value} -> "
-            f"{self.get_parameter('output_topic').value}; command output={self.commands_enabled}")
+            f"{self.get_parameter('output_topic').value}; command output={self.commands_enabled}; "
+            f"metric Ackermann={self.get_parameter('metric_lookahead_enabled').value}")
 
     def _declare_parameters(self):
         values = {
@@ -121,6 +123,8 @@ class LaneFollowingNode(Node):
             'right_reference_gain': 1.0,
             'status_log_interval_sec': 1.0,
             'max_steer_angle': 0.42,
+            'ackermann_wheelbase_m': 0.20,
+            'ackermann_track_m': 0.172,
             'curve_enter_error': 0.55,
             'curve_exit_error': 0.25,
             'curve_enter_frames': 2,
@@ -184,7 +188,7 @@ class LaneFollowingNode(Node):
             'preview_y_ratio': 0.76,
             'metric_lookahead_enabled': False,
             'lookahead_distance_m': 0.40,
-            'camera_forward_offset_m': 0.0,
+            'camera_forward_offset_m': 0.184,
             'metric_lateral_scale_m': 0.30,
             'bev_ground_points_m': [0.0] * 8,
         }
@@ -289,11 +293,21 @@ class LaneFollowingNode(Node):
         cmd = Twist()
         if usable:
             error = self._mode_error(result)
-            raw_steering = float(np.clip(-error, -1.0, 1.0))
-            target_steering = self._curve_steering_target(raw_steering)
-            target_steering = scale_steering(
-                target_steering, 1.0 + self._curve_weight * (
-                    self.get_parameter('steering_gain').value - 1.0))
+            max_angle = float(self.get_parameter('max_steer_angle').value)
+            if result.target_lateral_m is not None:
+                # Ground calibration enabled: steer from the rear axle to a
+                # measured metric target, without adding image-space gains.
+                target_steering = target_to_inner_angle(
+                    result.target_lateral_m, result.target_forward_m,
+                    self.get_parameter('ackermann_wheelbase_m').value,
+                    self.get_parameter('ackermann_track_m').value,
+                    max_angle) / max_angle
+            else:
+                raw_steering = float(np.clip(-error, -1.0, 1.0))
+                target_steering = self._curve_steering_target(raw_steering)
+                target_steering = scale_steering(
+                    target_steering, 1.0 + self._curve_weight * (
+                        self.get_parameter('steering_gain').value - 1.0))
             steering = self._rate_limit_steering(target_steering, now_ns)
             self._held_steering = steering
             curve_detected = (
@@ -307,8 +321,7 @@ class LaneFollowingNode(Node):
                 self.get_parameter('curve_speed').value,
                 self.get_parameter('zigzag_speed').value)
             cmd.linear.x = speed
-            cmd.angular.z = inner_angle_to_omega(
-                steering * self.get_parameter('max_steer_angle').value, speed)
+            cmd.angular.z = self._omega(steering, speed)
             self._last_valid_cmd = cmd
             self._last_valid_ns = now_ns
             self._last_valid_curve = curve_detected and result.confidence >= 0.70
@@ -319,24 +332,19 @@ class LaneFollowingNode(Node):
             speed = max(0.0, min(0.12, self._last_valid_cmd.linear.x,
                                 self.get_parameter('curve_recovery_speed').value))
             cmd.linear.x = speed
-            cmd.angular.z = inner_angle_to_omega(
-                self._held_steering * self.get_parameter('max_steer_angle').value, speed)
+            cmd.angular.z = self._omega(self._held_steering, speed)
         elif self._mode == 'heading_hold' and abs(self._held_steering) > 1e-3:
             self._held_steering *= self.get_parameter('heading_hold_decay').value
             self._applied_steering = self._held_steering
             self._last_steering_ns = now_ns
             cmd.linear.x = self.get_parameter('zigzag_speed').value
-            cmd.angular.z = inner_angle_to_omega(
-                self._held_steering * self.get_parameter('max_steer_angle').value,
-                cmd.linear.x)
+            cmd.angular.z = self._omega(self._held_steering, cmd.linear.x)
         elif (self._last_valid_cmd is not None
               and (now_ns - self._last_valid_ns) / 1e9 <= self.get_parameter('invalid_hold_sec').value):
             # 반사·그림자 등으로 잠깐 놓친 프레임은 마지막 명령을 유지해 덜컥거림을 막는다.
             # Even a brief blind interval must not retain the 0.70 m/s cruise.
             cmd.linear.x = min(0.12, self._last_valid_cmd.linear.x)
-            cmd.angular.z = inner_angle_to_omega(
-                self._held_steering * self.get_parameter('max_steer_angle').value,
-                cmd.linear.x)
+            cmd.angular.z = self._omega(self._held_steering, cmd.linear.x)
         else:
             self._reset_steering()
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
@@ -386,6 +394,12 @@ class LaneFollowingNode(Node):
     def _publish_command(self, command):
         if self.cmd_pub is not None:
             self.cmd_pub.publish(command)
+
+    def _omega(self, normalized_steering, speed):
+        return inner_angle_to_omega(
+            normalized_steering * self.get_parameter('max_steer_angle').value,
+            speed, self.get_parameter('ackermann_wheelbase_m').value,
+            self.get_parameter('ackermann_track_m').value)
 
     def _actual_cmd_callback(self, msg):
         self._actual_cmd = dict(v=round(float(msg.linear.x), 3), omega=round(float(msg.angular.z), 3))

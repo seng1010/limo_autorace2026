@@ -58,6 +58,24 @@ def test_metric_lookahead_30_to_50_cm_and_camera_offset():
     assert rows[0] > rows[1] > rows[2]
     # Moving the camera forward means the same rear-axle target is nearer to it.
     assert ground(offset=0.2).evaluate(np.array([0, 319.5]), 0, 479)[2] > rows[1]
+    x, heading, y = ground(distance=.4, offset=.184).evaluate_target(
+        np.array([0, 319.5]), 0, 479)
+    assert abs(x) < 1e-5 and abs(heading) < 1e-5 and 0 <= y <= 479
+
+
+def test_metric_pipeline_exposes_rear_axle_target_only_when_calibrated():
+    image = np.zeros((480, 640, 3), np.uint8)
+    for x in (140, 500):
+        cv2.line(image, (x, 0), (x, 479), (0, 255, 255), 8)
+    raw = LanePipeline(config()).process(image)
+    assert raw.valid and raw.target_lateral_m is None
+    calibrated = config()
+    calibrated.metric_lookahead_enabled = True
+    calibrated.camera_forward_offset_m = .184
+    calibrated.bev_ground_points_m = (-.32, .8, .32, .8, .32, .1, -.32, .1)
+    result = LanePipeline(calibrated).process(image)
+    assert result.valid and result.target_forward_m == .4
+    assert abs(result.target_lateral_m) < .01
 
 
 def test_metric_requires_calibration_and_visible_target():

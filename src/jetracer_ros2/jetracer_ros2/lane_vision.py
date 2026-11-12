@@ -35,6 +35,11 @@ class GroundLookahead:
         self.offset, self.distance, self.scale = offset, distance, lateral_scale
 
     def evaluate(self, fit, lo, hi):
+        x, heading, y = self.evaluate_target(fit, lo, hi)
+        return float(np.clip(x / self.scale, -1.5, 1.5)), heading, y
+
+    def evaluate_target(self, fit, lo, hi):
+        """Return metric lateral target from the rear axle, heading and BEV row."""
         ys = np.linspace(lo, hi, 200)
         points = np.column_stack((np.polyval(fit, ys), ys)).astype(np.float32)
         world = cv2.perspectiveTransform(points[None], self.matrix)[0]
@@ -47,4 +52,4 @@ class GroundLookahead:
         x = float(np.interp(self.distance, forward, lateral))
         slope = float(np.interp(self.distance, forward, np.gradient(lateral, forward)))
         y = float(np.interp(self.distance, forward, ys[::-1]))
-        return float(np.clip(x / self.scale, -1.5, 1.5)), float(np.arctan(slope)), y
+        return x, float(np.arctan(slope)), y

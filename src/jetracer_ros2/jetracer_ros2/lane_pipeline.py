@@ -101,6 +101,8 @@ class LaneResult:
     lookahead_description: str = 'uncalibrated'
     illumination_gain: float = 1.0
     curve_heading_span: float = 0.0  # Measured boundaries only; radians, not 1/metres.
+    target_lateral_m: Optional[float] = None
+    target_forward_m: Optional[float] = None
 
 
 class LanePipeline:
@@ -883,12 +885,17 @@ class LanePipeline:
                                  observed_ys.min(), observed_ys.max()))
         preview_heading = float(np.arctan(-np.polyval(np.polyder(center_fit), preview_y)))
         lookahead_description = f'uncalibrated y={y_eval:.0f}px'
+        target_lateral_m = None
+        target_forward_m = None
         if self.ground is not None:
             try:
-                lateral_error, heading_error, y_eval = self.ground.evaluate(
+                target_lateral_m, heading_error, y_eval = self.ground.evaluate_target(
                     center_fit, observed_ys.min(), observed_ys.max())
             except ValueError as error:
                 return LaneResult(valid=False, debug_image=debug, bev_image=bird, reason=str(error))
+            target_forward_m = self.config.lookahead_distance_m
+            lateral_error = float(np.clip(
+                target_lateral_m / self.config.metric_lateral_scale_m, -1.5, 1.5))
             center_x = float(np.polyval(center_fit, y_eval))
             preview_heading = heading_error  # Do not mix image and metric angles.
             lookahead_description = f'{self.config.lookahead_distance_m:.2f}m rear-axle y={y_eval:.0f}px'
@@ -969,6 +976,8 @@ class LanePipeline:
                 measured_heading_span(measured_right_fit, right_y, self.config.height)),
             preview_heading_error=preview_heading,
             lookahead_description=lookahead_description,
+            target_lateral_m=target_lateral_m,
+            target_forward_m=target_forward_m,
             illumination_gain=illumination_gain,
             left_type=left_type,
             right_type=right_type,

@@ -14,7 +14,8 @@ TRACK = 0.172     # 좌우 바퀴 거리 [m]
 HARDWARE_MAX_INNER_ANGLE = 0.48869
 
 
-def inner_angle_to_omega(inner_angle: float, linear_speed: float) -> float:
+def inner_angle_to_omega(inner_angle: float, linear_speed: float,
+                         wheelbase: float = WHEELBASE, track: float = TRACK) -> float:
     """원하는 앞바퀴 조향각(inner_angle, rad)을, limo_base의
     r = linear.x / angular.z 공식을 통과했을 때 그 조향각이 그대로
     나오게 만드는 angular.z(omega) 값으로 변환한다.
@@ -24,8 +25,10 @@ def inner_angle_to_omega(inner_angle: float, linear_speed: float) -> float:
     """
     if abs(inner_angle) < 1e-4 or linear_speed == 0.0:
         return 0.0
-    r = WHEELBASE / math.tan(abs(inner_angle)) + TRACK / 2.0
-    central_angle = math.atan(WHEELBASE / r)
+    if wheelbase <= 0.0 or track < 0.0:
+        raise ValueError('invalid Ackermann wheelbase or track')
+    r = wheelbase / math.tan(abs(inner_angle)) + track / 2.0
+    central_angle = math.atan(wheelbase / r)
     if inner_angle < 0:
         central_angle = -central_angle
-    return linear_speed * math.tan(central_angle) / WHEELBASE
+    return linear_speed * math.tan(central_angle) / wheelbase
