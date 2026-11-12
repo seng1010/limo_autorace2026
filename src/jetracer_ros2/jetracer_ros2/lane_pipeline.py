@@ -147,19 +147,38 @@ class LanePipeline:
         local_contrast = lightness.astype(float) - cv2.GaussianBlur(lightness, (31, 31), 0)
 
         color = np.zeros(lightness.shape, dtype=bool)
+        white = np.zeros_like(color)
+        yellow = np.zeros_like(color)
         if self.config.detect_white:
-            color |= (
+            white = (
                 (lightness >= self.config.white_lightness_min)
                 & (saturation <= self.config.white_saturation_max)
                 & ((local_contrast >= 8) | (lightness >= 230))
             )
         if self.config.detect_yellow:
-            color |= (
+            yellow = (
                 (hue >= self.config.yellow_hue_min)
                 & (hue <= self.config.yellow_hue_max)
                 & (saturation >= self.config.yellow_saturation_min)
                 & (lightness >= self.config.yellow_lightness_min)
             )
+
+        # Yellow outside boundaries delimit the road. Preserve white paint
+        # inside them (parking / multi-lane markings), reject outer mat trim.
+        # Require longitudinal support so a small yellow sign cannot gate white.
+        xs = np.arange(lightness.shape[1])
+        mid = lightness.shape[1] / 2
+        for left in (True, False):
+            side = yellow & ((xs < mid) if left else (xs >= mid))[None, :]
+            supported = side.sum(axis=1) >= 2
+            if np.count_nonzero(supported) < lightness.shape[0] * .30:
+                continue
+            edge = (np.max(np.where(side, xs, -1), axis=1) if left
+                    else np.min(np.where(side, xs, lightness.shape[1]), axis=1))
+            outside = (xs[None, :] < edge[:, None] - 12 if left
+                       else xs[None, :] > edge[:, None] + 12)
+            white &= ~(outside & supported[:, None])
+        color = white | yellow
 
         sobel = cv2.Sobel(lightness, cv2.CV_32F, 1, 0, ksize=3)
         absolute = np.abs(sobel)
@@ -846,6 +865,13 @@ class LanePipeline:
 
         y_eval = self.config.height * self.config.lookahead_y_ratio
         center_x = 0.5 * (np.polyval(left_fit, y_eval) + np.polyval(right_fit, y_eval))
+        if not np.isfinite(center_x) or not 0 <= center_x < self.config.width:
+            self.reset()
+            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+                              binary_image=binary, color_binary_image=color_binary,
+                              gradient_binary_image=gradient_binary,
+                              reason='center target outside observable image',
+                              tracking_mode=tracking_mode)
         lateral_error = float(np.clip(
             (center_x - self.config.width * 0.5) / (self.config.width * 0.5), -1.5, 1.5,
         ))

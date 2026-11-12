@@ -194,7 +194,8 @@ def test_reassigned_single_boundary_keeps_measured_pixels(monkeypatch):
     for target in ('left', 'right'):
         pipeline = LanePipeline(_identity_config())
         monkeypatch.setattr(pipeline, '_assign_side', lambda fit, fallback: target)
-        image = _synthetic_lane(missing_left=target == 'left',
+        image = _synthetic_lane(offset=-100 if target == 'left' else 100,
+                                missing_left=target == 'left',
                                 missing_right=target == 'right')
         result = pipeline.process(image)
         assert result.valid and result.confidence >= .48
