@@ -79,6 +79,8 @@ class LanePipelineConfig:
     yellow_curve_priority: bool = True
     yellow_curve_min_span: float = 0.20
     curve_nearest_max_forward_m: float = 1.05
+    curve_left_near_max_forward_m: float = 1.05
+    curve_left_center_clearance_ratio: float = 0.15
 
 
 @dataclass
@@ -112,6 +114,8 @@ class LaneResult:
     yellow_curve_priority_active: bool = False
     curve_turn: str = 'unknown'
     curve_nearest_observation: bool = False
+    curve_left_target_active: bool = False
+    curve_left_preview_rad: Optional[float] = None
 
 
 class LanePipeline:
@@ -177,14 +181,25 @@ class LanePipeline:
             if (measured_heading_span(fit, ys, self.config.height)
                     >= self.config.yellow_curve_min_span
                     and classify_lane(bird, fit, ys, self.config) == 'yellow/solid/curve'):
-                confirmed_sides.append((mode, fit, xs.size,
-                                        float(np.polyval(fit, np.max(ys)))))
+                sampled_x = np.polyval(fit, np.linspace(np.min(ys), np.max(ys), 12))
+                steps = np.diff(sampled_x)
+                reversal = bool(np.any(steps > self.config.zigzag_min_step_px)
+                                and np.any(steps < -self.config.zigzag_min_step_px))
+                confirmed_sides.append((
+                    mode, fit, xs.size, float(np.polyval(fit, np.max(ys))),
+                    float(np.polyval(fit, np.min(ys)) - np.polyval(fit, np.max(ys))),
+                    reversal))
         if confirmed_sides:
             by_side = {candidate[0]: candidate for candidate in confirmed_sides}
             if ('left' in by_side and 'right' in by_side
                     and by_side['right'][3] - by_side['left'][3]
                     >= 0.5 * self._expected_width()):
-                self._yellow_curve_side = 'right'
+                # On the clockwise outer curve, the inner right boundary can
+                # disappear. Follow the distinct left paint for early preview;
+                # other turn directions keep the previous inner preference.
+                self._yellow_curve_side = (
+                    'left' if by_side['left'][4] > 20 and not by_side['left'][5]
+                    else 'right')
             else:
                 # Both anchor modes can lock onto the SAME yellow outer line.
                 # Only call it the right boundary if position/history says so.
@@ -760,6 +775,61 @@ class LanePipeline:
         )
         return zigzag, float(score), direction_changes, center_points
 
+    def _left_curve_window_target(self, left_y, left_x, right_fit, right_y):
+        """Clockwise curve: near observed left paint sets center, far paint previews bend.
+
+        The second/third windows at either end avoid clipped extrema while
+        retaining a genuinely distant preview. This is deliberately separate
+        from the zigzag detector and its slow-zone policy.
+        """
+        if self.ground is None or self.config.windows < 6:
+            return None
+        step = self.config.height / self.config.windows
+        def sample(index):
+            mask = (left_y >= index * step) & (left_y < (index + 1) * step)
+            if np.count_nonzero(mask) < max(8, self.config.recenter_min_pixels):
+                return None
+            return (float(np.median(left_x[mask])), float(np.median(left_y[mask])))
+
+        def first_pair(candidates):
+            for indices in candidates:
+                pair = tuple(sample(index) for index in indices)
+                if all(point is not None for point in pair):
+                    return pair
+            return None
+
+        far_pair = first_pair(((1, 2), (2, 3)))
+        near_pair = first_pair(((self.config.windows - 3, self.config.windows - 2),
+                                (self.config.windows - 4, self.config.windows - 3)))
+        if far_pair is None or near_pair is None:
+            return None
+        far_left = np.mean(far_pair, axis=0)
+        near_left = np.mean(near_pair, axis=0)
+        width = self._expected_width()
+        targets = []
+        for boundary_x, row in (far_left, near_left):
+            center_x = float(boundary_x + width * .5)
+            if not self._target_within_bev(center_x, row):
+                return None
+            if right_y.size:
+                clearance = self.config.curve_left_center_clearance_ratio * width
+                if center_x >= float(np.polyval(right_fit, row)) - clearance:
+                    return None
+            targets.append((center_x, float(row)))
+        try:
+            far_lateral, far_forward = self.ground.project_bev_point(*targets[0])
+            near_lateral, near_forward = self.ground.project_bev_point(*targets[1])
+        except ValueError:
+            return None
+        if (far_forward <= near_forward + .10
+                or near_forward > self.config.curve_left_near_max_forward_m):
+            return None
+        preview = float(np.arctan2(far_lateral - near_lateral,
+                                   far_forward - near_forward))
+        if preview <= .03:  # A right-curve preview must agree with rightward paint motion.
+            return None
+        return near_lateral, near_forward, targets[1], preview
+
     def process(self, image: np.ndarray, tracking_mode: str = 'auto') -> LaneResult:
         tracking_mode = tracking_mode if tracking_mode in ('auto', 'both', 'left', 'right') else 'auto'
         if image is None or image.size == 0:
@@ -995,13 +1065,18 @@ class LanePipeline:
             confidence = float(np.clip(
                 0.35 * point_score + 0.40 * inlier_score + 0.25, 0.0, 1.0))
 
+        left_curve_target = (
+            self._left_curve_window_target(left_y, left_x, right_fit, right_y)
+            if (self.ground is not None and yellow_curve_priority_active and not zigzag
+                and curve_turn == 'right' and left_type == 'yellow/solid/curve'
+                and confidence >= 0.70) else None)
         observed_nearest = False
         fixed_row_missing = recovered and not (
             float(observed_ys.min()) <= y_eval <= float(observed_ys.max()))
         curve_recovery_allowed = bool(
             self.ground is not None and yellow_curve_priority_active
             and curve_turn == 'right' and confidence >= 0.70)
-        if fixed_row_missing and not curve_recovery_allowed:
+        if fixed_row_missing and left_curve_target is None and not curve_recovery_allowed:
             self.reset()
             return LaneResult(valid=False, debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
@@ -1019,10 +1094,14 @@ class LanePipeline:
         target_forward_m = None
         if self.ground is not None:
             try:
-                if fixed_row_missing:
+                if left_curve_target is not None:
+                    target_lateral_m, target_forward_m, (center_x, y_eval), _ = left_curve_target
+                    heading_error = float(np.arctan(-np.polyval(np.polyder(center_fit), y_eval)))
+                elif fixed_row_missing:
                     raise ValueError('fixed target outside observed curve rows')
-                target_lateral_m, heading_error, y_eval, target_forward_m = (
-                    self.ground.evaluate_target(center_fit, observed_ys.min(), observed_ys.max()))
+                else:
+                    target_lateral_m, heading_error, y_eval, target_forward_m = (
+                        self.ground.evaluate_target(center_fit, observed_ys.min(), observed_ys.max()))
             except ValueError as error:
                 if curve_recovery_allowed:
                     try:
@@ -1043,9 +1122,11 @@ class LanePipeline:
                                       yellow_curve_priority_active=yellow_curve_priority_active)
             lateral_error = float(np.clip(
                 target_lateral_m / self.config.metric_lateral_scale_m, -1.5, 1.5))
-            center_x = float(np.polyval(center_fit, y_eval))
+            if left_curve_target is None:
+                center_x = float(np.polyval(center_fit, y_eval))
             preview_heading = heading_error  # Do not mix image and metric angles.
-            lookahead_source = ("nearest observed curve" if observed_nearest
+            lookahead_source = ("left curve near-window center" if left_curve_target is not None
+                                else "nearest observed curve" if observed_nearest
                                 else f'{self.config.lookahead_distance_m:.2f}m requested')
             lookahead_description = (
                 f'{lookahead_source}, {target_forward_m:.2f}m used from rear axle y={y_eval:.0f}px')
@@ -1105,6 +1186,8 @@ class LanePipeline:
             curve_heading_span=curve_span,
             curve_turn=curve_turn,
             curve_nearest_observation=observed_nearest,
+            curve_left_target_active=left_curve_target is not None,
+            curve_left_preview_rad=(left_curve_target[3] if left_curve_target is not None else None),
             preview_heading_error=preview_heading,
             lookahead_description=lookahead_description,
             target_lateral_m=target_lateral_m,

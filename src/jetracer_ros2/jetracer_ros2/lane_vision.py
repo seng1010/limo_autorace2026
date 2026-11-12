@@ -40,6 +40,17 @@ class GroundLookahead:
         self.max_near_clamp_m = max_near_clamp_m
         self.edge_margin_m = edge_margin_m
 
+    def project_bev_point(self, x, y):
+        """Map an observed BEV point to lateral/forward metres from rear axle."""
+        if not np.all(np.isfinite([x, y])):
+            raise ValueError('non-finite BEV point')
+        lateral, forward = cv2.perspectiveTransform(
+            np.float32([[[x, y]]]), self.matrix)[0, 0]
+        forward = float(forward) + self.offset
+        if not np.all(np.isfinite([lateral, forward])) or forward <= 0:
+            raise ValueError('BEV point outside forward ground range')
+        return float(lateral), forward
+
     def evaluate(self, fit, lo, hi):
         x, heading, y, _ = self.evaluate_target(fit, lo, hi)
         return float(np.clip(x / self.scale, -1.5, 1.5)), heading, y

@@ -53,3 +53,14 @@ def right_curve_metric_target(target, span, max_angle, minimum_angle, span_gain,
         return min(0.0, target)
     floor = min(max_angle, max(0.0, minimum_angle) + max(0.0, span_gain) * max(0.0, span))
     return max(-1.0, min(target, -floor / max_angle))
+
+
+def left_curve_preview_target(target, preview_rad, max_angle, gain, max_preview_rad):
+    """Anticipate a measured right bend of the outer left line, with a hard cap."""
+    if (not all(math.isfinite(v) for v in
+                (target, preview_rad, max_angle, gain, max_preview_rad))
+            or max_angle <= 0 or gain < 0 or max_preview_rad < 0
+            or preview_rad <= 0):
+        return target
+    anticipation = min(max_preview_rad, gain * preview_rad)
+    return max(-1.0, min(1.0, target - anticipation / max_angle))

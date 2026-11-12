@@ -61,6 +61,56 @@ def _partial_right_yellow_curve(max_forward_m=1.05):
     return config, image
 
 
+def _observed_left_clockwise_curve(include_right=False):
+    config = _identity_config()
+    config.detect_yellow = True
+    config.metric_lookahead_enabled = True
+    config.bev_ground_points_m = (-.32, .9, .32, .9, .32, .421, -.32, .421)
+    config.camera_forward_offset_m = .184
+    config.lane_width_px = 270.0
+    config.low_light_enabled = False
+    image = np.zeros((480, 640, 3), np.uint8)
+    ys = np.arange(48, 436)
+    left = 350 - .001 * ys ** 2
+    for offset in ((0, 270) if include_right else (0,)):
+        cv2.polylines(image, [np.int32(np.column_stack((left + offset, ys))).reshape(-1, 1, 2)],
+                      False, (0, 255, 255), 12)
+    return config, image
+
+
+def test_clockwise_curve_prefers_observed_outer_left_line_and_early_preview():
+    for include_right in (False, True):
+        config, image = _observed_left_clockwise_curve(include_right)
+        result = LanePipeline(config).process(image)
+        assert result.valid and result.recovered_side == 'left'
+        assert result.curve_turn == 'right' and not result.zigzag
+        assert result.curve_left_target_active
+        assert result.curve_left_preview_rad > .03
+        assert .6 < result.target_forward_m <= config.curve_left_near_max_forward_m
+
+
+def test_clockwise_curve_requires_near_and_far_observed_windows():
+    config, image = _observed_left_clockwise_curve()
+    # Clear only distant paint. Normal curve recovery may still use the
+    # remaining line, but must not claim a measured far-window preview.
+    image[:170] = 0
+    result = LanePipeline(config).process(image)
+    assert not result.curve_left_target_active
+    assert result.curve_left_preview_rad is None
+
+
+def test_zigzag_does_not_activate_curve_preview():
+    config = _identity_config()
+    config.detect_yellow = True
+    config.metric_lookahead_enabled = True
+    config.bev_ground_points_m = (-.32, .9, .32, .9, .32, .421, -.32, .421)
+    config.camera_forward_offset_m = .184
+    image = _synthetic_zigzag()
+    image[np.all(image == 255, axis=2)] = (0, 220, 255)
+    result = LanePipeline(config).process(image)
+    assert result.zigzag and not result.curve_left_target_active
+
+
 def test_observed_right_curve_uses_bounded_nearest_metric_target():
     config, image = _partial_right_yellow_curve()
     # The fixed row is below the last observed paint, but the nearby yellow

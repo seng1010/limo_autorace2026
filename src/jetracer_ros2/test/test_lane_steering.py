@@ -7,8 +7,15 @@ import numpy as np
 
 from jetracer_ros2.lane_steering import (
     tracking_error, curve_release_target, limited_steering,
-    right_curve_metric_target,
+    right_curve_metric_target, left_curve_preview_target,
 )
+
+
+def test_outer_left_curve_preview_is_bounded_and_never_applies_opposite_bend():
+    assert left_curve_preview_target(0.0, .2, .42, .5, .16) < 0.0
+    assert left_curve_preview_target(0.0, 10.0, .42, .5, .16) == -.16 / .42
+    assert left_curve_preview_target(.1, -.2, .42, .5, .16) == .1
+    assert left_curve_preview_target(-.9, 1., .42, .5, .16) == -1.0
 
 
 def test_metric_right_curve_feedforward_never_countersteers_or_exceeds_limit():

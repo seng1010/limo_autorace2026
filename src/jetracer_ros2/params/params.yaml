@@ -52,6 +52,10 @@ lane_following_node:
     curve_recovery_sec: 0.50         # 신뢰도 0.70 이상 확인된 곡선 유실만 연결, 최대 0.8초
     curve_recovery_speed: 0.12       # 곡선 유실 시 마지막 조향 유지, 최대 0.12 m/s
     curve_nearest_max_forward_m: 1.05 # 노란 우곡선의 관측 최근접점을 쓸 수 있는 후축 기준 최대 거리
+    curve_left_near_max_forward_m: 1.05 # 우곡선 왼쪽선 아래 2~3번째 창 목표의 후축 기준 상한
+    curve_left_center_clearance_ratio: 0.15 # 오른쪽 선도 보일 때 경계 여유/차선 폭
+    curve_left_preview_gain: 0.50     # 왼쪽선 위 2~3번째 창의 선행 우조향 비율
+    curve_left_preview_max_rad: 0.16  # 선행 우조향 추가량 상한
     right_curve_min_steer_rad: 0.10  # 연속 확인된 우곡선의 최소 우조향; 직선/좌회전에는 미적용
     right_curve_span_gain: 0.20      # 관측 곡률 span에 따른 추가 조향, max_steer_angle 이내
     right_curve_confirm_frames: 2   # 단발 노이즈에는 강제 우조향하지 않음

@@ -25,6 +25,7 @@ from jetracer_ros2.lane_attributes import scale_steering
 from jetracer_ros2.lane_steering import (
     reference_side, tracking_error, curve_release_target, limited_steering,
     right_curve_metric_target,
+    left_curve_preview_target,
 )
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 from jetracer_ros2.live_debug_view import LiveViewer
@@ -142,6 +143,10 @@ class LaneFollowingNode(Node):
             'curve_recovery_sec': 0.50,
             'curve_recovery_speed': 0.12,
             'curve_nearest_max_forward_m': 1.05,
+            'curve_left_near_max_forward_m': 1.05,
+            'curve_left_center_clearance_ratio': 0.15,
+            'curve_left_preview_gain': 0.50,
+            'curve_left_preview_max_rad': 0.16,
             'right_curve_min_steer_rad': 0.10,
             'right_curve_span_gain': 0.20,
             'right_curve_confirm_frames': 2,
@@ -222,6 +227,8 @@ class LaneFollowingNode(Node):
             yellow_curve_priority=p('yellow_curve_priority'),
             yellow_curve_min_span=p('yellow_curve_min_span'),
             curve_nearest_max_forward_m=p('curve_nearest_max_forward_m'),
+            curve_left_near_max_forward_m=p('curve_left_near_max_forward_m'),
+            curve_left_center_clearance_ratio=p('curve_left_center_clearance_ratio'),
             width=p('image_width'), height=p('image_height'),
             src_points=tuple(p('bev_src')), dst_points=tuple(p('bev_dst')),
             detect_white=p('detect_white'),
@@ -329,6 +336,11 @@ class LaneFollowingNode(Node):
                         self.get_parameter('right_curve_min_steer_rad').value,
                         self.get_parameter('right_curve_span_gain').value,
                         self._right_curve_hits >= self.get_parameter('right_curve_confirm_frames').value)
+                    if result.curve_left_target_active:
+                        target_steering = left_curve_preview_target(
+                            target_steering, result.curve_left_preview_rad, max_angle,
+                            self.get_parameter('curve_left_preview_gain').value,
+                            self.get_parameter('curve_left_preview_max_rad').value)
             else:
                 raw_steering = float(np.clip(-error, -1.0, 1.0))
                 target_steering = self._curve_steering_target(raw_steering)
@@ -390,6 +402,8 @@ class LaneFollowingNode(Node):
                 f'lane type(est): L={result.left_type} R={result.right_type} '
                 f'confidence={result.confidence:.2f} usable={usable} '
                 f'curve_turn={result.curve_turn} nearest_observed={result.curve_nearest_observation} '
+                f'left_curve_target={result.curve_left_target_active} '
+                f'left_curve_preview={result.curve_left_preview_rad} '
                 f'lateral={result.lateral_error:+.3f} heading={result.heading_error:+.3f} '
                 f'shape_span={result.curve_heading_span:.3f} curve_weight={self._curve_weight:.2f} '
                 f'reference={reference_side(result)} '
@@ -410,6 +424,8 @@ class LaneFollowingNode(Node):
                 curve_control=bool(self._curve_active or right_curve), lookahead=result.lookahead_description,
                 curve_turn=result.curve_turn,
                 nearest_observed=bool(result.curve_nearest_observation),
+                left_curve_target=bool(result.curve_left_target_active),
+                left_curve_preview_rad=result.curve_left_preview_rad,
                 yellow_curve_priority=bool(result.yellow_curve_priority_active),
                 angle_cmd_deg=float(np.degrees(self._applied_steering * self.get_parameter('max_steer_angle').value)),
                 lane_v=float(cmd.linear.x), lane_omega=float(cmd.angular.z), actual_cmd=self._actual_cmd,
