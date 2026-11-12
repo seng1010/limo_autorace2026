@@ -58,6 +58,7 @@ class LaneFollowingNode(Node):
         self._invalid_frames = 0
         self._last_valid_cmd: Optional[Twist] = None
         self._last_valid_ns = 0
+        self._last_valid_curve = False
 
         self.commands_enabled = self.get_parameter('publish_commands').value
         self.cmd_pub = (self.create_publisher(Twist, self.get_parameter('output_topic').value, 10)
@@ -128,6 +129,8 @@ class LaneFollowingNode(Node):
             'steering_reversal_rate': 4.0,
             'heading_hold_decay': 0.98,
             'invalid_hold_sec': 0.25,
+            'curve_recovery_sec': 0.50,
+            'curve_recovery_speed': 0.10,
             'reset_after_invalid_frames': 5,
             'zigzag_enter_frames': 3,
             'zigzag_exit_frames': 5,
@@ -295,6 +298,16 @@ class LaneFollowingNode(Node):
                 steering * self.get_parameter('max_steer_angle').value, speed)
             self._last_valid_cmd = cmd
             self._last_valid_ns = now_ns
+            self._last_valid_curve = self._curve_active and result.confidence >= 0.70
+        elif (self._last_valid_cmd is not None and self._last_valid_curve
+              and 0 <= (now_ns - self._last_valid_ns) / 1e9 <= min(
+                  0.8, max(0.0, self.get_parameter('curve_recovery_sec').value))):
+            # Short detection gap only; camera watchdog still stops stale input.
+            speed = max(0.0, min(0.12, self._last_valid_cmd.linear.x,
+                                self.get_parameter('curve_recovery_speed').value))
+            cmd.linear.x = speed
+            cmd.angular.z = inner_angle_to_omega(
+                self._held_steering * self.get_parameter('max_steer_angle').value, speed)
         elif self._mode == 'heading_hold' and abs(self._held_steering) > 1e-3:
             self._held_steering *= self.get_parameter('heading_hold_decay').value
             self._applied_steering = self._held_steering
@@ -449,6 +462,7 @@ class LaneFollowingNode(Node):
             self.get_parameter('preview_heading_gain').value, self._curve_weight)
 
     def _reset_steering(self):
+        self._last_valid_curve = False
         self._geometry_hits = 0
         self._curve_weight = 0.0
         self._curve_active = False

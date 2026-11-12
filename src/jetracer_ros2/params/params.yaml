@@ -45,6 +45,8 @@ lane_following_node:
     steering_reversal_rate: 4.0      # S자 등 목표 부호 반전 시 빠른 방향 전환
     heading_hold_decay: 0.98
     invalid_hold_sec: 0.25            # 차선 놓쳤을 때 마지막 명령 유지 시간 [s]
+    curve_recovery_sec: 0.50         # 신뢰도 0.70 이상 확인된 곡선 유실만 연결, 최대 0.8초
+    curve_recovery_speed: 0.10       # 마지막 조향 유지, 최대 0.12 m/s
     reset_after_invalid_frames: 5     # 연속 N프레임 실패 시 이전 차선 기준 초기화
     zigzag_enter_frames: 3
     zigzag_exit_frames: 5
