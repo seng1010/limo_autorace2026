@@ -1,7 +1,8 @@
-"""정지선 검출 -> 앞바퀴까지 거리 발행 (M1, M3 공용).
+"""정지선 검출 -> 판정 기준 바퀴(기본 뒷바퀴)까지 거리 발행 (M1, M3 공용).
 
 발행
-  mission/stop_line_distance  Float32  앞바퀴 -> 정지선 거리 [m], 없으면 -1.0
+  mission/stop_line_distance  Float32  기준 바퀴 -> 정지선 거리 [m], 없으면 -1.0
+                                       (규정집 v3: 뒷바퀴. reference_wheel 로 front/rear 선택)
   mission/stop_line_detected  Bool     거리 값이 유효한지 (화면 검출 또는 odom 추적)
   /stop_line/debug/compressed          디버그 이미지 (거리, 출처, 행 비율 표시)
   /stop_line/debug/row_ratio  Float32  정지선 아래 가장자리 행 비율 (보정용, 없으면 -1.0)
@@ -50,8 +51,10 @@ class StopLineNode(Node):
             'distance_scale_m': 1.6,
             'lut_rows': [0.0],               # 2개 미만 = 보정 전
             'lut_distances_m': [0.0],
+            'reference_wheel': 'rear',       # 규정집 v3 판정 기준점 = 뒷바퀴
+            'wheelbase_m': 0.20,             # 앞바퀴 축 -> 뒷바퀴 축 거리
             'use_odom_tracking': True,
-            'blind_track_max_m': 0.6,
+            'blind_track_max_m': 0.8,
             'blind_pass_margin_m': 0.10,
             'blind_jump_tolerance_m': 0.15,
             'publish_debug': True,
@@ -62,15 +65,21 @@ class StopLineNode(Node):
 
         self.config = StopLineConfig(**{
             field: p(field) for field in StopLineConfig.__dataclass_fields__})
+        reference = str(p('reference_wheel')).strip().lower()
+        if reference not in ('front', 'rear'):
+            raise ValueError("reference_wheel 은 'front' 또는 'rear'")
+        offset = float(p('wheelbase_m')) if reference == 'rear' else 0.0
         self.model = RowDistanceModel(
-            p('lut_rows'), p('lut_distances_m'), p('distance_scale_m'), p('roi_top_ratio'))
+            p('lut_rows'), p('lut_distances_m'), p('distance_scale_m'), p('roi_top_ratio'),
+            reference_offset_m=offset)
         self.tracker = BlindZoneTracker(
             p('blind_track_max_m'), p('blind_pass_margin_m'), p('blind_jump_tolerance_m'))
         self.odom = OdomPathIntegrator()
         self.use_odom = bool(p('use_odom_tracking'))
         self.publish_debug = bool(p('publish_debug'))
         self.get_logger().info(
-            '정지선 거리: ' + ('보정표 사용' if self.model.calibrated
+            f'정지선 거리 기준: {reference} 바퀴, '
+            + ('보정표 사용' if self.model.calibrated
                           else '보정 전 (distance_scale_m 선형식)')
             + (', odom 사각지대 추적 ON' if self.use_odom else ''))
 

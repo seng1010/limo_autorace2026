@@ -147,3 +147,26 @@ def test_fit_recovers_monotonic_table():
     assert all(np.diff(lut_rows) > 0) and all(np.diff(lut_dists) < 0)
     model = RowDistanceModel(lut_rows, lut_dists)
     assert model.distance(1.0 - 0.6 * 0.3) == pytest.approx(0.3, abs=0.01)
+
+
+# ---- 판정 기준 바퀴 (규정집 v3: 뒷바퀴) ------------------------------------- #
+
+def test_rear_wheel_offset_added_only_when_calibrated():
+    rear = RowDistanceModel([0.6, 0.8, 0.95], [0.50, 0.25, 0.12], reference_offset_m=0.20)
+    assert rear.distance(0.8) == pytest.approx(0.45)
+    assert rear.front_distance(0.8) == pytest.approx(0.25)
+    legacy = RowDistanceModel([0.0], [0.0], 1.6, 0.58, reference_offset_m=0.20)
+    assert legacy.distance(0.79) == pytest.approx(0.8)     # 보정 전은 예전 값 그대로
+
+
+def test_rear_wheel_reaches_line_deep_in_blind_zone():
+    """앞바퀴 기준 0.15 m 에서 선이 사라져도 뒷바퀴가 선에 닿을 때까지(0.35 m 더) 추적."""
+    model = RowDistanceModel([0.6, 0.8, 0.95], [0.50, 0.25, 0.15], reference_offset_m=0.20)
+    tracker = BlindZoneTracker(max_track_m=0.8)
+    tracker.update_odom(0.0)
+    assert tracker.update(model.distance(0.95)) == pytest.approx(0.35)
+    tracker.update_odom(0.30)
+    assert tracker.update(None) == pytest.approx(0.05)
+    tracker.update_odom(0.35)
+    assert tracker.update(None) == pytest.approx(0.0)
+    assert tracker.source == 'odom'

@@ -3,8 +3,10 @@
 stop_line_node 와 scripts/calibrate_stop_line.py 가 같이 쓴다. ROS 의존성이 없어서
 합성 이미지로 단위 테스트할 수 있다.
 
-거리 정의: **앞바퀴 접지점 -> 정지선의 가까운 쪽 가장자리** [m].
-(규정: 모든 진입·정지 판정 기준점은 앞바퀴)
+거리 정의: **판정 기준 바퀴 -> 정지선의 가까운 쪽 가장자리** [m].
+규정집 v3(2026-11-12) III-아: 판정 기준점은 **뒷바퀴** (이전 초안은 앞바퀴).
+보정표(lut)는 눈으로 맞추기 쉬운 앞바퀴 기준으로 만들고, 뒷바퀴 기준이면 축간거리
+(wheelbase)를 더한다 -> RowDistanceModel(reference_offset_m=...).
 
 정지선이 차에 가까워지면 카메라 하단 사각지대로 사라진다. 예전에는 그 순간 거리가
 -1 이 되어 "정지선에 서 있음" 상태가 풀렸다(M1 빨간불에 재출발하는 원인).
@@ -92,19 +94,22 @@ def detect_stop_line(image_bgr: np.ndarray,
 # --------------------------------------------------------------------------- #
 
 class RowDistanceModel:
-    """정지선 아래 가장자리의 행 비율 -> 앞바퀴까지 거리 [m].
+    """정지선 아래 가장자리의 행 비율 -> 판정 기준 바퀴까지 거리 [m].
 
-    rows / distances 가 2개 이상이면 보정표(선형 보간, 양끝은 끝 구간 기울기로 외삽).
-    2개 미만이면 보정 전 상태로 보고 예전 식을 그대로 쓴다:
+    rows / distances 가 2개 이상이면 보정표(앞바퀴 기준, 선형 보간, 양끝은 끝 구간
+    기울기로 외삽) + reference_offset_m (뒷바퀴 기준이면 축간거리).
+    2개 미만이면 보정 전 상태로 보고 예전 식을 그대로 쓴다 (offset 도 더하지 않음):
         distance = (1 - ROI 안에서의 아래 가장자리 비율) * legacy_scale_m
     """
 
     def __init__(self, rows: Sequence[float], distances: Sequence[float],
-                 legacy_scale_m: float = 1.6, roi_top_ratio: float = 0.58):
+                 legacy_scale_m: float = 1.6, roi_top_ratio: float = 0.58,
+                 reference_offset_m: float = 0.0):
         rows = [float(r) for r in rows]
         distances = [float(d) for d in distances]
         self.legacy_scale_m = float(legacy_scale_m)
         self.roi_top_ratio = float(roi_top_ratio)
+        self.reference_offset_m = float(reference_offset_m)
         self.calibrated = len(rows) >= 2 and len(distances) >= 2
         if not self.calibrated:
             self._rows = self._distances = None
@@ -121,9 +126,18 @@ class RowDistanceModel:
 
     def distance(self, row_ratio: float) -> float:
         if not self.calibrated:
-            span = max(1e-6, 1.0 - self.roi_top_ratio)
-            bottom_in_roi = (row_ratio - self.roi_top_ratio) / span
-            return max(0.0, (1.0 - bottom_in_roi) * self.legacy_scale_m)
+            return self._legacy(row_ratio)
+        return self.front_distance(row_ratio) + self.reference_offset_m
+
+    def _legacy(self, row_ratio: float) -> float:
+        span = max(1e-6, 1.0 - self.roi_top_ratio)
+        bottom_in_roi = (row_ratio - self.roi_top_ratio) / span
+        return max(0.0, (1.0 - bottom_in_roi) * self.legacy_scale_m)
+
+    def front_distance(self, row_ratio: float) -> float:
+        """보정표 그대로의 앞바퀴 기준 거리."""
+        if not self.calibrated:
+            return self._legacy(row_ratio)
         rows, dists = self._rows, self._distances
         if row_ratio <= rows[0]:
             i, j = 0, 1
@@ -152,7 +166,7 @@ class BlindZoneTracker:
       무시하고 지금 선을 계속 따라감
     """
 
-    def __init__(self, max_track_m: float = 0.6, pass_margin_m: float = 0.10,
+    def __init__(self, max_track_m: float = 0.8, pass_margin_m: float = 0.10,
                  jump_tolerance_m: float = 0.15):
         self.max_track_m = float(max_track_m)
         self.pass_margin_m = float(pass_margin_m)
