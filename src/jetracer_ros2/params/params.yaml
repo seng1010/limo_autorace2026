@@ -64,13 +64,31 @@ lane_following_node:
 stop_line_node:
   ros__parameters:
     image_topic: '/camera/color/image_raw/compressed'
+    odom_topic: '/odom'
     roi_top_ratio: 0.58
+    # 정지선 색: 트랙 차선은 노란색이지만 정지선 색은 아직 미확인 -> 현장에서 확인 후 수정
+    detect_white: true
     white_lightness_min: 180
     white_saturation_max: 90
+    detect_yellow: false
+    yellow_hue_min: 15                # HLS hue (0~180)
+    yellow_hue_max: 35
+    yellow_saturation_min: 80
+    yellow_lightness_min: 60
     horizontal_kernel_ratio: 0.12
     minimum_width_ratio: 0.42
     minimum_area_ratio: 0.018
+    # 거리 = 앞바퀴 -> 정지선 가까운 쪽 가장자리 [m]
+    # 보정표: scripts/calibrate_stop_line.py 결과를 붙여넣기 (소수점 꼭 포함)
+    # 2개 미만이면 보정 전 -> 아래 distance_scale_m 선형식 사용 (예전과 동일)
+    lut_rows: [0.0]                   # 정지선 아래 가장자리 행 비율 (0=위, 1=아래)
+    lut_distances_m: [0.0]
     distance_scale_m: 1.6
+    # 사각지대: 선이 화면에서 사라지면 /odom 이동거리로 남은 거리 계속 추정
+    use_odom_tracking: true
+    blind_track_max_m: 0.6            # 이 거리 안에서 놓친 선만 추적 (멀리서 놓친 건 무시)
+    blind_pass_margin_m: 0.10         # 선을 이만큼 지나치면 추적 종료 -> -1.0
+    blind_jump_tolerance_m: 0.15      # 추적 중 이보다 먼 선이 보이면 다른 선으로 보고 무시
     publish_debug: true
 
 yolo_detection_node:
