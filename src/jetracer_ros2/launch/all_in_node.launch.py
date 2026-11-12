@@ -14,9 +14,11 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('debug_view', default_value='false'),
+        DeclareLaunchArgument('fork_default', default_value='stop', choices=['stop', 'left', 'right']),
         Node(
             package='jetracer_ros2',
             executable='mission_manager_node',
+            parameters=[{'fork_default': ParameterValue(LaunchConfiguration('fork_default'), value_type=str)}],
             output='screen',
         ),
         Node(

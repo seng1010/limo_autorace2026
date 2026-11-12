@@ -26,6 +26,9 @@ DYNAMIC_NODE = {
 }
 
 
+from jetracer_ros2.fork_policy import ForkPolicy
+
+
 class MissionManagerNode(Node):
     def __init__(self):
         super().__init__('mission_manager_node')
@@ -40,6 +43,7 @@ class MissionManagerNode(Node):
             'normal_speed': 0.25,
             'slow_speed': 0.12,
             'command_timeout_sec': 0.40,
+            'fork_default': 'stop',
             'stop_line_distance_m': 0.35,
             'pedestrian_hold_sec': 1.0,
             'auto_start_mission_nodes': True,
@@ -47,6 +51,7 @@ class MissionManagerNode(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self._index = 0
+        self.fork = ForkPolicy(self.get_parameter('fork_default').value)
         self._active = MISSION_ORDER[0]
         self._lane_cmd = Twist()
         self._cone_cmd = Twist()
@@ -90,6 +95,15 @@ class MissionManagerNode(Node):
 
     def _mission_event_callback(self, msg):
         event = msg.data.strip().upper()
+        if self.fork.event(event):
+            if self.fork.active:
+                if self.fork.direction is None:
+                    self.cmd_pub.publish(Twist())
+                else:
+                    self.lane_mode_pub.publish(String(data=self.fork.direction))
+            elif event == 'FORK_EXIT':
+                self.lane_mode_pub.publish(String(data='center'))
+            return
         if self._active == 'M4' and event in ('NEXT', 'M4_DONE'):
             self._blocked = True
             self.cmd_pub.publish(Twist())
@@ -193,6 +207,9 @@ class MissionManagerNode(Node):
         self.cmd_pub.publish(Twist())
 
     def _control_tick(self):
+        if self.fork.active and self.fork.direction is None:
+            self.cmd_pub.publish(Twist())
+            return
         if self._blocked:
             self.cmd_pub.publish(Twist())
             return
@@ -249,9 +266,9 @@ class MissionManagerNode(Node):
 
 
 def main(args=None):
-    argv = sys.argv if args is None else args
+    argv = sys.argv[1:] if args is None else args
     params = os.path.join(get_package_share_directory('jetracer_ros2'), 'params', 'params.yaml')
-    rclpy.init(args=[argv[0], '--ros-args', '--params-file', params])
+    rclpy.init(args=[sys.argv[0], '--ros-args', '--params-file', params, '--'] + list(argv))
     node = MissionManagerNode()
     try:
         rclpy.spin(node)
