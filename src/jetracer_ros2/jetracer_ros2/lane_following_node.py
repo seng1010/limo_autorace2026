@@ -194,6 +194,8 @@ class LaneFollowingNode(Node):
             'metric_max_near_clamp_m': 0.25,
             'metric_edge_margin_m': 0.02,
             'target_roi_margin_px': 20.0,
+            'yellow_curve_priority': True,
+            'yellow_curve_min_span': 0.20,
         }
         for name, default in values.items():
             self.declare_parameter(name, default)
@@ -211,6 +213,8 @@ class LaneFollowingNode(Node):
             metric_max_near_clamp_m=p('metric_max_near_clamp_m'),
             metric_edge_margin_m=p('metric_edge_margin_m'),
             target_roi_margin_px=p('target_roi_margin_px'),
+            yellow_curve_priority=p('yellow_curve_priority'),
+            yellow_curve_min_span=p('yellow_curve_min_span'),
             width=p('image_width'), height=p('image_height'),
             src_points=tuple(p('bev_src')), dst_points=tuple(p('bev_dst')),
             detect_white=p('detect_white'),
@@ -371,6 +375,7 @@ class LaneFollowingNode(Node):
                 f'reference={reference_side(result)} '
                 f'lookahead={result.lookahead_description} light_gain={result.illumination_gain:.2f} '
                 f'curve_control={self._curve_active} zigzag_slow={self._zigzag_active} '
+                f'yellow_curve_priority={result.yellow_curve_priority_active} '
                 f'{steering_status}'
                 f'v={cmd.linear.x:.3f} omega={cmd.angular.z:.3f} '
                 f'reason={result.reason}')
@@ -383,6 +388,7 @@ class LaneFollowingNode(Node):
                 lateral=float(result.lateral_error), heading_rad=float(result.heading_error),
                 shape_span=float(result.curve_heading_span), curve_weight=float(self._curve_weight),
                 curve_control=bool(self._curve_active), lookahead=result.lookahead_description,
+                yellow_curve_priority=bool(result.yellow_curve_priority_active),
                 angle_cmd_deg=float(np.degrees(self._applied_steering * self.get_parameter('max_steer_angle').value)),
                 lane_v=float(cmd.linear.x), lane_omega=float(cmd.angular.z), actual_cmd=self._actual_cmd,
                 actual_cmd_age_sec=round(time.monotonic() - self._actual_cmd_time, 2) if self._actual_cmd_time else None)

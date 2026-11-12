@@ -76,6 +76,8 @@ class LanePipelineConfig:
     metric_max_near_clamp_m: float = 0.25
     metric_edge_margin_m: float = 0.02
     target_roi_margin_px: float = 20.0
+    yellow_curve_priority: bool = True
+    yellow_curve_min_span: float = 0.20
 
 
 @dataclass
@@ -106,6 +108,7 @@ class LaneResult:
     curve_heading_span: float = 0.0  # Measured boundaries only; radians, not 1/metres.
     target_lateral_m: Optional[float] = None
     target_forward_m: Optional[float] = None
+    yellow_curve_priority_active: bool = False
 
 
 class LanePipeline:
@@ -117,6 +120,7 @@ class LanePipeline:
         self._previous_left: Optional[np.ndarray] = None
         self._previous_right: Optional[np.ndarray] = None
         self._previous_width: Optional[float] = None
+        self._yellow_curve_hold = 0
         self._matrix, self._inverse_matrix = self._perspective_matrices()
         self.ground = (GroundLookahead(
             self._normalized_points(config.dst_points), config.bev_ground_points_m,
@@ -128,6 +132,53 @@ class LanePipeline:
         self._previous_left = None
         self._previous_right = None
         self._previous_width = None
+        self._yellow_curve_hold = 0
+
+    def _yellow_curve_mask(self, bird: np.ndarray, tracking_mode: str) -> Optional[np.ndarray]:
+        """Return yellow-only paint when a connected solid yellow curve exists.
+
+        This check precedes the mixed-colour histogram so an outer white mat
+        edge cannot become the curve anchor. Straight/mixed-colour lanes keep
+        their original white candidates.
+        """
+        if not (self.config.detect_yellow and self.config.yellow_curve_priority):
+            return None
+        hls = cv2.cvtColor(bird, cv2.COLOR_BGR2HLS)
+        h, l, s = cv2.split(hls)
+        yellow = np.uint8(
+            (h >= self.config.yellow_hue_min) & (h <= self.config.yellow_hue_max)
+            & (s >= self.config.yellow_saturation_min)
+            & (l >= self.config.yellow_lightness_min)) * 255
+        kernel = np.ones((max(1, self.config.morphology_kernel),) * 2, np.uint8)
+        yellow = cv2.morphologyEx(yellow, cv2.MORPH_OPEN, kernel)
+        yellow = cv2.morphologyEx(yellow, cv2.MORPH_CLOSE, kernel)
+        if cv2.countNonZero(yellow) < self.config.fit_min_points:
+            # Brief occlusion must not immediately hand control to the bright
+            # white mat edge. An empty yellow-only frame safely stops instead.
+            if self._yellow_curve_hold:
+                self._yellow_curve_hold -= 1
+                return yellow
+            return None
+        confirmed = False
+        # Anchor each side independently: a tight curve can cross the image
+        # midpoint, and AUTO would split one yellow line into two short tracks.
+        modes = (tracking_mode,) if tracking_mode in ('left', 'right') else ('left', 'right')
+        for mode in modes:
+            ly, lx, ry, rx, _ = self._sliding_window_points(yellow, tracking_mode=mode)
+            ys, xs = (ly, lx) if mode == 'left' else (ry, rx)
+            if xs.size < self.config.fit_min_points or not self._coverage_ok(ys):
+                continue
+            fit = np.polyfit(ys, xs, self.config.polynomial_degree)
+            if (measured_heading_span(fit, ys, self.config.height)
+                    >= self.config.yellow_curve_min_span
+                    and classify_lane(bird, fit, ys, self.config) == 'yellow/solid/curve'):
+                confirmed = True
+                break
+        if confirmed:
+            self._yellow_curve_hold = 3
+        elif self._yellow_curve_hold:
+            self._yellow_curve_hold -= 1
+        return yellow if self._yellow_curve_hold else None
 
     def _normalized_points(self, values: Tuple[float, ...]) -> np.ndarray:
         points = np.asarray(values, dtype=np.float32).reshape(4, 2).copy()
@@ -708,6 +759,11 @@ class LanePipeline:
         bird, illumination_gain = compensate_light(
             bird, self.config.low_light_enabled, self.config.low_light_max_gain)
         binary, color_binary, gradient_binary = self._binary_masks(bird)
+        yellow_curve_binary = self._yellow_curve_mask(bird, tracking_mode)
+        yellow_curve_priority_active = yellow_curve_binary is not None
+        if yellow_curve_priority_active:
+            binary = color_binary = yellow_curve_binary
+            gradient_binary = np.zeros_like(binary)
         left_y, left_x, right_y, right_x, debug = self._sliding_window_points(
             binary,
             tracking_mode=tracking_mode,
@@ -757,6 +813,7 @@ class LanePipeline:
                 color_binary_image=color_binary,
                 gradient_binary_image=gradient_binary,
                 reason='not enough lane pixels', tracking_mode=tracking_mode,
+                yellow_curve_priority_active=yellow_curve_priority_active,
             )
 
         recovered_side = ''
@@ -795,6 +852,7 @@ class LanePipeline:
                         gradient_binary_image=gradient_binary,
                         reason='lane geometry sanity check failed',
                         tracking_mode=tracking_mode,
+                        yellow_curve_priority_active=yellow_curve_priority_active,
                     )
                 candidates.sort(key=lambda item: (item[0], item[1]))
                 _, _, recovered_side, left_fit, right_fit, mean_width = candidates[0]
@@ -826,6 +884,7 @@ class LanePipeline:
                     gradient_binary_image=gradient_binary,
                     reason='lane geometry sanity check failed',
                     tracking_mode=tracking_mode,
+                    yellow_curve_priority_active=yellow_curve_priority_active,
                 )
 
         recovered = bool(recovered_side)
@@ -877,7 +936,8 @@ class LanePipeline:
             return LaneResult(valid=False, debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
-                              reason='center target is not finite', tracking_mode=tracking_mode)
+                              reason='center target is not finite', tracking_mode=tracking_mode,
+                              yellow_curve_priority_active=yellow_curve_priority_active)
         lateral_error = float(np.clip(
             (center_x - self.config.width * 0.5) / (self.config.width * 0.5), -1.5, 1.5,
         ))
@@ -891,7 +951,8 @@ class LanePipeline:
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
                               reason='one-side target outside observed lane rows',
-                              tracking_mode=tracking_mode)
+                              tracking_mode=tracking_mode,
+                              yellow_curve_priority_active=yellow_curve_priority_active)
         preview_y = float(np.clip(self.config.height * self.config.preview_y_ratio,
                                  observed_ys.min(), observed_ys.max()))
         preview_heading = float(np.arctan(-np.polyval(np.polyder(center_fit), preview_y)))
@@ -903,7 +964,10 @@ class LanePipeline:
                 target_lateral_m, heading_error, y_eval, target_forward_m = self.ground.evaluate_target(
                     center_fit, observed_ys.min(), observed_ys.max())
             except ValueError as error:
-                return LaneResult(valid=False, debug_image=debug, bev_image=bird, reason=str(error))
+                return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+                                  binary_image=binary, color_binary_image=color_binary,
+                                  gradient_binary_image=gradient_binary, reason=str(error),
+                                  yellow_curve_priority_active=yellow_curve_priority_active)
             lateral_error = float(np.clip(
                 target_lateral_m / self.config.metric_lateral_scale_m, -1.5, 1.5))
             center_x = float(np.polyval(center_fit, y_eval))
@@ -921,7 +985,8 @@ class LanePipeline:
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
                               reason='center target outside measured BEV road area',
-                              tracking_mode=tracking_mode)
+                              tracking_mode=tracking_mode,
+                              yellow_curve_priority_active=yellow_curve_priority_active)
 
         if recovered:
             # 한쪽 선만 보이는 곡선에서는 관측하지 않은 반대쪽 선 때문에 점수를
@@ -1001,6 +1066,7 @@ class LanePipeline:
             lookahead_description=lookahead_description,
             target_lateral_m=target_lateral_m,
             target_forward_m=target_forward_m,
+            yellow_curve_priority_active=yellow_curve_priority_active,
             illumination_gain=illumination_gain,
             left_type=left_type,
             right_type=right_type,

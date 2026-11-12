@@ -65,6 +65,8 @@ lane_following_node:
     white_lightness_min: 170
     white_saturation_max: 100
     detect_yellow: true               # 노란 차선 검출
+    yellow_curve_priority: true       # 노란 실선 곡선이면 흰 외곽선보다 우선 추적
+    yellow_curve_min_span: 0.20       # 관측 노란선의 접선 변화(rad)
     yellow_hue_min: 15                # HLS hue (0~180)
     yellow_hue_max: 35
     yellow_saturation_min: 80

@@ -28,6 +28,50 @@ def test_white_only_multilane_markings_are_not_globally_disabled():
     assert result[:,130].any() and result[:,510].any()
 
 
+def test_connected_yellow_curve_overrides_outer_white_trim():
+    cfg = LanePipelineConfig(
+        src_points=(0,0,1,0,1,1,0,1),
+        dst_points=(0,0,1,0,1,1,0,1),
+        detect_yellow=True, lane_width_px=360.0, fit_min_points=80)
+    pipeline = LanePipeline(cfg)
+    image = np.zeros((480,640,3), np.uint8)
+    # Only a short but connected yellow curve is visible near the vehicle.
+    # Its left/right-half support is too short for the old white-trim gate.
+    ys = np.arange(328, 480)
+    xs = 290 + .005 * (479 - ys) ** 2
+    cv2.polylines(image, [np.int32(np.column_stack((xs,ys))).reshape(-1,1,2)],
+                  False, (0,255,255), 10)
+    cv2.line(image, (90,0), (90,479), (255,255,255), 11)
+    bird = image.copy()
+    preferred = pipeline._yellow_curve_mask(bird, 'auto')
+    assert preferred is not None
+    assert preferred[:,90].sum() == 0
+    result = pipeline.process(image)
+    assert result.valid and result.yellow_curve_priority_active
+    assert result.left_type == 'yellow/solid/curve'
+    assert not result.binary_image[:,90].any()
+    # If paint disappears briefly, do not jump straight onto the white trim.
+    occluded = np.zeros_like(image)
+    cv2.line(occluded, (90,0), (90,479), (255,255,255), 11)
+    lost = pipeline.process(occluded)
+    assert not lost.valid
+    assert lost.yellow_curve_priority_active
+    assert not lost.binary_image[:,90].any()
+
+
+def test_yellow_priority_does_not_remove_white_straight_or_parking_lane():
+    cfg = LanePipelineConfig(
+        src_points=(0,0,1,0,1,1,0,1),
+        dst_points=(0,0,1,0,1,1,0,1), detect_yellow=True)
+    pipeline = LanePipeline(cfg)
+    image = np.zeros((480,640,3), np.uint8)
+    cv2.line(image, (140,0), (140,479), (0,255,255), 9)
+    cv2.line(image, (500,0), (500,479), (255,255,255), 9)
+    result = pipeline.process(image)
+    assert result.valid and not result.yellow_curve_priority_active
+    assert result.right_type.startswith('white')
+
+
 def test_offscreen_reconstructed_center_is_rejected(monkeypatch):
     cfg = LanePipelineConfig(src_points=(0,0,1,0,1,1,0,1),
                              dst_points=(0,0,1,0,1,1,0,1))
