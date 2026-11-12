@@ -129,6 +129,7 @@ class LanePipeline:
         self._previous_width: Optional[float] = None
         self._yellow_curve_hold = 0
         self._yellow_curve_side = ''
+        self._yellow_curve_outer_missing = False
         self._matrix, self._inverse_matrix = self._perspective_matrices()
         self.ground = (GroundLookahead(
             self._normalized_points(config.dst_points), config.bev_ground_points_m,
@@ -142,6 +143,7 @@ class LanePipeline:
         self._previous_width = None
         self._yellow_curve_hold = 0
         self._yellow_curve_side = ''
+        self._yellow_curve_outer_missing = False
 
     def _yellow_curve_mask(self, bird: np.ndarray, tracking_mode: str) -> Optional[np.ndarray]:
         """Return yellow-only paint when a connected solid yellow curve exists.
@@ -152,6 +154,7 @@ class LanePipeline:
         """
         if not (self.config.detect_yellow and self.config.yellow_curve_priority):
             return None
+        self._yellow_curve_outer_missing = False
         hls = cv2.cvtColor(bird, cv2.COLOR_BGR2HLS)
         h, l, s = cv2.split(hls)
         yellow = np.uint8(
@@ -191,23 +194,28 @@ class LanePipeline:
                     reversal))
         if confirmed_sides:
             by_side = {candidate[0]: candidate for candidate in confirmed_sides}
-            if ('left' in by_side and 'right' in by_side
-                    and by_side['right'][3] - by_side['left'][3]
-                    >= 0.5 * self._expected_width()):
-                # On the clockwise outer curve, the inner right boundary can
-                # disappear. Follow the distinct left paint for early preview;
-                # other turn directions keep the previous inner preference.
-                self._yellow_curve_side = (
-                    'left' if by_side['left'][4] > 20 and not by_side['left'][5]
-                    else 'right')
+            distinct = ('left' in by_side and 'right' in by_side
+                        and by_side['right'][3] - by_side['left'][3]
+                        >= 0.5 * self._expected_width())
+            clockwise = any(candidate[4] > 20 and not candidate[5]
+                            for candidate in confirmed_sides)
+            if distinct and clockwise:
+                # Never substitute the inner/right curve when the left outer
+                # boundary is missing or does not itself bend clockwise.
+                left = by_side['left']
+                self._yellow_curve_side = 'left' if left[4] > 20 and not left[5] else 'right'
+            elif distinct:
+                self._yellow_curve_side = 'right'
             else:
-                # Both anchor modes can lock onto the SAME yellow outer line.
-                # Only call it the right boundary if position/history says so.
+                # Both modes can follow the SAME paint. Position/history must
+                # identify it as outer-left before it can command a right turn.
                 best = max(confirmed_sides, key=lambda candidate: candidate[2])
                 self._yellow_curve_side = self._assign_side(best[1], best[0])
+            self._yellow_curve_outer_missing = clockwise and self._yellow_curve_side != 'left'
             self._yellow_curve_hold = 3
         elif self._yellow_curve_hold:
             self._yellow_curve_hold -= 1
+            self._yellow_curve_outer_missing = True
         return yellow if self._yellow_curve_hold else None
 
     def _normalized_points(self, values: Tuple[float, ...]) -> np.ndarray:
@@ -1075,7 +1083,22 @@ class LanePipeline:
             float(observed_ys.min()) <= y_eval <= float(observed_ys.max()))
         curve_recovery_allowed = bool(
             self.ground is not None and yellow_curve_priority_active
-            and curve_turn == 'right' and confidence >= 0.70)
+            and curve_turn == 'right' and left_type == 'yellow/solid/curve'
+            and not zigzag and confidence >= 0.70)
+        inner_only_clockwise = (
+            tracking_mode in ('auto', 'both') and curve_turn == 'right'
+            and right_type == 'yellow/solid/curve'
+            and left_type != 'yellow/solid/curve')
+        if (yellow_curve_priority_active and self._yellow_curve_outer_missing
+                or inner_only_clockwise):
+            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+                              binary_image=binary, color_binary_image=color_binary,
+                              gradient_binary_image=gradient_binary,
+                              reason='outer left curve not observed',
+                              tracking_mode=tracking_mode, confidence=confidence,
+                              curve_heading_span=curve_span, curve_turn=curve_turn,
+                              left_type=left_type, right_type=right_type,
+                              yellow_curve_priority_active=True)
         if fixed_row_missing and left_curve_target is None and not curve_recovery_allowed:
             self.reset()
             return LaneResult(valid=False, debug_image=debug, bev_image=bird,

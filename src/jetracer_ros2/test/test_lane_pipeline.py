@@ -111,23 +111,24 @@ def test_zigzag_does_not_activate_curve_preview():
     assert result.zigzag and not result.curve_left_target_active
 
 
-def test_observed_right_curve_uses_bounded_nearest_metric_target():
+def test_inner_right_curve_is_not_used_when_outer_left_is_missing():
+    for max_forward_m in (1.05, .70):
+        config, image = _partial_right_yellow_curve(max_forward_m=max_forward_m)
+        result = LanePipeline(config).process(image)
+        assert not result.valid and result.reason == 'outer left curve not observed'
+        # Keep diagnostic quality separate from authorization to drive.
+        assert result.confidence >= .7 and result.curve_turn == 'right'
+        assert result.left_type == 'unobserved'
+        assert result.right_type == 'yellow/solid/curve'
+        assert not result.curve_nearest_observation
+
+
+def test_inner_only_curve_stops_even_without_yellow_priority_filter():
     config, image = _partial_right_yellow_curve()
-    # The fixed row is below the last observed paint, but the nearby yellow
-    # inner curve is strong and still lies in the calibrated ground polygon.
+    config.yellow_curve_priority = False
     result = LanePipeline(config).process(image)
-    assert result.valid and result.confidence >= .7
-    assert result.recovered_side == 'right' and result.curve_turn == 'right'
-    assert result.curve_nearest_observation
-    assert .6 < result.target_forward_m < 1.05
-
-
-def test_curve_observation_quality_survives_unsafe_target_rejection():
-    config, image = _partial_right_yellow_curve(max_forward_m=.70)
-    result = LanePipeline(config).process(image)
-    assert not result.valid and result.confidence >= .7
-    assert result.curve_turn == 'right'
-    assert 'safe recovery range' in result.reason
+    assert not result.valid and result.reason == 'outer left curve not observed'
+    assert result.right_type == 'yellow/solid/curve'
 
 
 def test_detects_two_curved_lanes():

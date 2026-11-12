@@ -300,7 +300,9 @@ class LaneFollowingNode(Node):
         usable = result.valid and result.confidence >= self.get_parameter('minimum_confidence').value
         right_curve = bool(
             usable and self._mode == 'center' and result.yellow_curve_priority_active
-            and result.curve_turn == 'right' and result.confidence >= 0.70)
+            and result.curve_turn == 'right' and not result.zigzag
+            and result.left_type == 'yellow/solid/curve'
+            and result.confidence >= 0.70)
         self._right_curve_hits = self._right_curve_hits + 1 if right_curve else 0
         if usable:
             self._invalid_frames = 0
