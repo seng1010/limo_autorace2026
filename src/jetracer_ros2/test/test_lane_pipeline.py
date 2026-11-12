@@ -57,6 +57,20 @@ def test_recovers_one_missing_lane():
     result = pipeline.process(_synthetic_lane(missing_right=True))
     assert result.valid
     assert result.reason == 'one-side recovery'
+    # 노드 기본 임계값(0.48)을 넘겨 한쪽 선만으로도 계속 주행할 수 있어야 한다.
+    assert result.confidence >= 0.48
+
+
+def test_strong_single_lane_can_recover_after_large_curve_shift():
+    """곡선에서 중심이 크게 변해도 한쪽 선 자체가 강하면 정지하지 않아야 한다."""
+    pipeline = LanePipeline(_identity_config())
+    assert pipeline.process(_synthetic_lane()).valid
+
+    result = pipeline.process(_synthetic_lane(offset=-110, missing_right=True))
+
+    assert result.valid
+    assert result.recovered_side == 'left'
+    assert result.confidence >= 0.48
 
 
 def test_rejects_empty_scene():
@@ -75,15 +89,13 @@ def test_detects_zigzag_for_slow_driving():
     assert result.zigzag_score > 0.5
 
 
-def test_reset_recovers_after_lane_shift_while_lost():
-    """차선을 놓친 사이 차가 밀리면 급변 검사에 계속 걸린다. reset()으로 복구돼야 한다."""
+def test_recovers_after_lane_shift_while_lost():
+    """차선을 놓친 사이 위치가 변해도 강한 차선을 다시 찾아야 한다."""
     pipeline = LanePipeline(_identity_config())
     assert pipeline.process(_synthetic_lane()).valid
     for _ in range(5):
         pipeline.process(np.zeros((480, 640, 3), dtype=np.uint8))
     shifted = _synthetic_lane(offset=-110)
-    assert not pipeline.process(shifted).valid
-    pipeline.reset()
     assert pipeline.process(shifted).valid
 
 

@@ -50,6 +50,8 @@ class LanePipelineConfig:
     lane_width_tolerance: float = 0.35
     max_lane_width_change_px: float = 70.0
     max_fit_jump_px: float = 90.0
+    strong_single_inlier_ratio: float = 0.65
+    strong_single_point_multiplier: float = 1.5
     lookahead_y_ratio: float = 0.62
     smoothing_alpha: float = 0.35
     zigzag_min_step_px: float = 8.0
@@ -233,12 +235,20 @@ class LanePipeline:
             binary.shape[1] if previous_left_x is not None else midpoint,
             expected_x=previous_left_x,
         )
+        if left_current is None and previous_left_x is not None:
+            # 급곡선에서 선이 직전 탐색 반경 밖으로 이동했으면 화면 왼쪽 절반에서
+            # 다시 잡는다. 이후 RANSAC/강한 한쪽 선 검사가 오검출을 걸러낸다.
+            left_current = self._histogram_peak(histogram, 0, midpoint)
         right_current = self._histogram_peak(
             histogram,
             0 if previous_right_x is not None else midpoint,
             binary.shape[1],
             expected_x=previous_right_x,
         )
+        if right_current is None and previous_right_x is not None:
+            right_current = self._histogram_peak(
+                histogram, midpoint, binary.shape[1],
+            )
 
         search_opposite = bool(self.config.search_opposite_in_single_mode)
         expected_width = self._expected_width()
@@ -505,6 +515,19 @@ class LanePipeline:
         current_center = 0.5 * (np.polyval(left, y_eval) + np.polyval(right, y_eval))
         return abs(current_center - previous_center) <= self.config.max_fit_jump_px
 
+    def _strong_single_line(
+        self, ratio: float, ys: np.ndarray, point_count: int,
+    ) -> bool:
+        """이전 중심과 달라도 독립적으로 믿을 수 있는 한쪽 선인지 확인한다."""
+        minimum_points = (
+            self.config.fit_min_points * self.config.strong_single_point_multiplier
+        )
+        return bool(
+            ratio >= self.config.strong_single_inlier_ratio
+            and point_count >= minimum_points
+            and self._coverage_ok(ys)
+        )
+
     def _sanity_check(self, left: np.ndarray, right: np.ndarray) -> Tuple[bool, float]:
         sample_y = np.asarray([
             self.config.height * 0.35,
@@ -688,8 +711,9 @@ class LanePipeline:
                     previous_center = 0.5 * (np.polyval(self._previous_left, y_eval)
                                              + np.polyval(self._previous_right, y_eval))
                 candidates = []
-                for side, fit, ys, points in (('left', left_fit, left_y, left_x.size),
-                                              ('right', right_fit, right_y, right_x.size)):
+                for side, fit, ratio, ys, points in (
+                        ('left', left_fit, left_ratio, left_y, left_x.size),
+                        ('right', right_fit, right_ratio, right_y, right_x.size)):
                     if tracking_mode in ('left', 'right') and side != tracking_mode:
                         continue
                     # 화면 끝에 조금 걸친 짧은 조각은 믿지 않는다
@@ -697,7 +721,8 @@ class LanePipeline:
                         continue
                     cand_left, cand_right = self._single_side(fit, side)
                     # 직접 만든 반대쪽 선은 폭이 맞게 만들어졌으므로 '급변'만 검사한다
-                    if not self._jump_ok(cand_left, cand_right):
+                    if (not self._jump_ok(cand_left, cand_right)
+                            and not self._strong_single_line(ratio, ys, points)):
                         continue
                     center = 0.5 * (np.polyval(cand_left, y_eval) + np.polyval(cand_right, y_eval))
                     jump = 0.0 if previous_center is None else abs(center - previous_center)
@@ -715,6 +740,9 @@ class LanePipeline:
         else:
             # [2] 선이 하나만 보이면, 그게 왼쪽인지 오른쪽인지 판단해서 반대쪽을 만든다.
             only_fit = left_fit if left_fit is not None else right_fit
+            only_ratio = left_ratio if left_fit is not None else right_ratio
+            only_y = left_y if left_fit is not None else right_y
+            only_points = left_x.size if left_fit is not None else right_x.size
             fallback = 'left' if left_fit is not None else 'right'
             recovered_side = (
                 tracking_mode if tracking_mode in ('left', 'right')
@@ -722,7 +750,8 @@ class LanePipeline:
             )
             left_fit, right_fit = self._single_side(only_fit, recovered_side)
             mean_width = self._expected_width()
-            if not self._jump_ok(left_fit, right_fit):
+            if (not self._jump_ok(left_fit, right_fit)
+                    and not self._strong_single_line(only_ratio, only_y, only_points)):
                 return LaneResult(
                     valid=False, debug_image=debug, binary_image=binary,
                     color_binary_image=color_binary,
@@ -732,7 +761,6 @@ class LanePipeline:
                 )
 
         recovered = bool(recovered_side)
-        observed_sides = 1 if recovered else 2
         if recovered:
             # 한쪽 복구로 '만든' 선으로 폭을 다시 재면 매 프레임 조금씩 줄어든다.
             # 실제 두 선을 본 마지막 폭을 그대로 유지한다.
@@ -782,10 +810,36 @@ class LanePipeline:
         derivative = float(np.polyval(np.polyder(center_fit), y_eval))
         heading_error = float(np.arctan(-derivative))
 
-        point_score = min(1.0, (left_x.size + right_x.size) / (2.0 * self.config.fit_min_points * 3.0))
-        inlier_score = max(left_ratio, right_ratio) if recovered else 0.5 * (left_ratio + right_ratio)
-        side_score = 1.0 if observed_sides == 2 else 0.65
-        confidence = float(np.clip(0.35 * point_score + 0.40 * inlier_score + 0.25 * side_score, 0.0, 1.0))
+        if recovered:
+            # 한쪽 선만 보이는 곡선에서는 관측하지 않은 반대쪽 선 때문에 점수를
+            # 깎지 않는다. 실제로 본 선의 픽셀 수, RANSAC 인라이어 비율, 세로
+            # 검출 범위만으로 신뢰도를 계산한다.
+            observed_x = left_x if recovered_side == 'left' else right_x
+            observed_y = left_y if recovered_side == 'left' else right_y
+            point_score = min(
+                1.0,
+                observed_x.size / (self.config.fit_min_points * 3.0),
+            )
+            inlier_score = max(left_ratio, right_ratio)
+            coverage_score = (
+                min(1.0, float(np.ptp(observed_y)) / (self.config.height * 0.65))
+                if observed_y.size else 0.0
+            )
+            confidence = float(np.clip(
+                0.30 * point_score + 0.50 * inlier_score + 0.20 * coverage_score,
+                0.0, 1.0,
+            ))
+        else:
+            point_score = min(
+                1.0,
+                (left_x.size + right_x.size)
+                / (2.0 * self.config.fit_min_points * 3.0),
+            )
+            inlier_score = 0.5 * (left_ratio + right_ratio)
+            confidence = float(np.clip(
+                0.35 * point_score + 0.40 * inlier_score + 0.25,
+                0.0, 1.0,
+            ))
 
         cv2.circle(debug, (int(center_x), int(y_eval)), 7, (0, 255, 0), -1)
         cv2.putText(

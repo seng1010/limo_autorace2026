@@ -39,6 +39,12 @@ class LaneFollowingNode(Node):
         self._zigzag_active = False
         self._mode = 'center'
         self._held_steering = 0.0
+        self._applied_steering = 0.0
+        self._last_steering_ns = 0
+        self._curve_active = False
+        self._curve_direction = 0.0
+        self._curve_candidate_direction = 0.0
+        self._curve_hits = 0
         self._invalid_frames = 0
         self._last_valid_cmd: Optional[Twist] = None
         self._last_valid_ns = 0
@@ -81,6 +87,12 @@ class LaneFollowingNode(Node):
             'lateral_gain': 0.95,
             'heading_gain': 0.70,
             'max_steer_angle': 0.42,
+            'curve_enter_error': 0.55,
+            'curve_exit_error': 0.25,
+            'curve_enter_frames': 2,
+            'curve_max_steering_ratio': 1.0,
+            'steering_attack_rate': 4.0,
+            'steering_release_rate': 1.2,
             'heading_hold_decay': 0.98,
             'invalid_hold_sec': 0.25,
             'reset_after_invalid_frames': 5,
@@ -117,6 +129,8 @@ class LaneFollowingNode(Node):
             'lane_width_tolerance': 0.35,
             'max_lane_width_change_px': 70.0,
             'max_fit_jump_px': 90.0,
+            'strong_single_inlier_ratio': 0.65,
+            'strong_single_point_multiplier': 1.5,
             'lookahead_y_ratio': 0.62,
             'smoothing_alpha': 0.35,
             'zigzag_min_step_px': 8.0,
@@ -154,7 +168,10 @@ class LaneFollowingNode(Node):
             ransac_iterations=p('ransac_iterations'), ransac_residual_px=p('ransac_residual_px'),
             lane_width_px=p('lane_width_px'), lane_width_tolerance=p('lane_width_tolerance'),
             max_lane_width_change_px=p('max_lane_width_change_px'),
-            max_fit_jump_px=p('max_fit_jump_px'), lookahead_y_ratio=p('lookahead_y_ratio'),
+            max_fit_jump_px=p('max_fit_jump_px'),
+            strong_single_inlier_ratio=p('strong_single_inlier_ratio'),
+            strong_single_point_multiplier=p('strong_single_point_multiplier'),
+            lookahead_y_ratio=p('lookahead_y_ratio'),
             smoothing_alpha=p('smoothing_alpha'), zigzag_min_step_px=p('zigzag_min_step_px'),
             zigzag_min_span_px=p('zigzag_min_span_px'),
             zigzag_min_direction_changes=p('zigzag_min_direction_changes'),
@@ -209,7 +226,9 @@ class LaneFollowingNode(Node):
         cmd = Twist()
         if usable:
             error = self._mode_error(result)
-            steering = float(np.clip(-error, -1.0, 1.0))
+            raw_steering = float(np.clip(-error, -1.0, 1.0))
+            target_steering = self._curve_steering_target(raw_steering)
+            steering = self._rate_limit_steering(target_steering, now_ns)
             self._held_steering = steering
             speed = (self.get_parameter('zigzag_speed').value
                      if self._zigzag_active else self.get_parameter('normal_speed').value)
@@ -232,6 +251,60 @@ class LaneFollowingNode(Node):
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
         self.cmd_pub.publish(cmd)
         self._publish_result(msg, result)
+
+    def _curve_steering_target(self, raw_steering):
+        """곡선 진입은 크게 조향하고 작은 오차가 될 때까지 유지한다.
+
+        한 프레임의 노이즈로 최대 조향이 걸리지 않도록 연속 프레임을 확인하고,
+        진입/탈출 임계값을 다르게 둬 곡선 경계에서 상태가 흔들리지 않게 한다.
+        """
+        magnitude = abs(raw_steering)
+        direction = float(np.sign(raw_steering))
+        enter = self.get_parameter('curve_enter_error').value
+        exit_error = self.get_parameter('curve_exit_error').value
+
+        if self._curve_active:
+            if direction == 0.0 or direction != self._curve_direction or magnitude <= exit_error:
+                self._curve_active = False
+                self._curve_direction = 0.0
+                self._curve_hits = 0
+        elif magnitude >= enter and direction != 0.0:
+            if direction == self._curve_candidate_direction:
+                self._curve_hits += 1
+            else:
+                self._curve_candidate_direction = direction
+                self._curve_hits = 1
+            if self._curve_hits >= int(self.get_parameter('curve_enter_frames').value):
+                self._curve_active = True
+                self._curve_direction = direction
+        else:
+            self._curve_candidate_direction = 0.0
+            self._curve_hits = 0
+
+        if self._curve_active:
+            ratio = self.get_parameter('curve_max_steering_ratio').value
+            return float(np.clip(self._curve_direction * ratio, -1.0, 1.0))
+        return raw_steering
+
+    def _rate_limit_steering(self, target, now_ns):
+        """곡선 진입은 빠르게, 탈출과 방향 전환은 천천히 적용한다."""
+        previous = self._applied_steering
+        same_direction = previous == 0.0 or previous * target >= 0.0
+        increasing = same_direction and abs(target) > abs(previous)
+        parameter = 'steering_attack_rate' if increasing else 'steering_release_rate'
+        rate = max(1e-4, float(self.get_parameter(parameter).value))
+        if self._last_steering_ns:
+            delta_sec = (now_ns - self._last_steering_ns) / 1e9
+            delta_sec = float(np.clip(delta_sec, 0.01, 0.20))
+        else:
+            delta_sec = 0.05
+        self._last_steering_ns = now_ns
+        maximum_step = rate * delta_sec
+        delta = float(np.clip(target - previous, -maximum_step, maximum_step))
+        self._applied_steering = float(np.clip(previous + delta, -1.0, 1.0))
+        if abs(self._applied_steering) < 1e-4:
+            self._applied_steering = 0.0
+        return self._applied_steering
 
     def _mode_error(self, result):
         lateral = result.lateral_error

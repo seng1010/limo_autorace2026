@@ -25,6 +25,12 @@ lane_following_node:
     lateral_gain: 0.95
     heading_gain: 0.70
     max_steer_angle: 0.42
+    curve_enter_error: 0.55          # 이 오차가 연속되면 곡선 모드 진입
+    curve_exit_error: 0.25           # 이 오차 아래에서 곡선 모드 해제
+    curve_enter_frames: 2
+    curve_max_steering_ratio: 1.0    # 곡선 모드 목표 조향(1.0 = max_steer_angle)
+    steering_attack_rate: 4.0        # 초당 조향 증가량(약 0.25초에 0→최대)
+    steering_release_rate: 1.2       # 초당 조향 해제/반전량(약 0.83초에 최대→0)
     heading_hold_decay: 0.98
     invalid_hold_sec: 0.25            # 차선 놓쳤을 때 마지막 명령 유지 시간 [s]
     reset_after_invalid_frames: 5     # 연속 N프레임 실패 시 이전 차선 기준 초기화
@@ -61,6 +67,8 @@ lane_following_node:
     lane_width_tolerance: 0.35
     max_lane_width_change_px: 70.0
     max_fit_jump_px: 90.0
+    strong_single_inlier_ratio: 0.65     # 강한 한쪽 선은 이전 중심 급변 검사보다 우선
+    strong_single_point_multiplier: 1.5
     lookahead_y_ratio: 0.62
     smoothing_alpha: 0.35
     zigzag_min_step_px: 8.0
