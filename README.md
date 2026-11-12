@@ -78,7 +78,7 @@ src/jetracer_ros2/
 ### 별도 노드 없이 `mission_manager_node`에서 처리
 
 - **M2 갈림길**: YOLO `sign_a` / `sign_b` → `lane_following_node` 모드를 `left` / `right`로 전환
-- **M3 보행자**: YOLO `pedestrian` → 정지 후 대기 (`pedestrian_hold_sec`)
+- **M3 보행자** (`m3_pedestrian.py`): YOLO `pedestrian` 또는 정지선 → 정지선 앞까지 감속·정밀 정지(앞바퀴 기준, `stop_approach.py`) → odom으로 완전정지 확인 후 `m3_hold_sec`(3.5초) 대기 → 출발 → `m3_done_distance_m` 이동하면 자동으로 M7
 - **M5 서행**: YOLO `slow_sign` → `slow_speed`로 감속
 
 ### 개발·디버그용
@@ -165,7 +165,7 @@ ros2 topic pub --once mission/event std_msgs/String "data: 'NEXT'"
 
 ### 디버그 (RViz / rqt_image_view)
 
-`/lane/debug/compressed`, `/stop_line/debug/compressed`, `/stop_line/debug/row_ratio`, `/yolo/debug/compressed`, `/autorace/debug_markers`, `/lane/model`, `/lane/mode_state`, `/lane/zigzag`
+`/lane/debug/compressed`, `/stop_line/debug/compressed`, `/stop_line/debug/row_ratio`, `/mission_manager/debug/state`, `/yolo/debug/compressed`, `/autorace/debug_markers`, `/lane/model`, `/lane/mode_state`, `/lane/zigzag`
 
 ## 빌드 및 실행
 

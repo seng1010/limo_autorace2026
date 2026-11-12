@@ -3,6 +3,12 @@
 Mission order: M5 -> M6 -> M3 -> M7 -> M2 -> M8 -> M1 -> M4.
 Always-on perception nodes publish proposals or events.  This node selects one
 command source, applies mission speed/stop constraints, and owns ``/cmd_vel``.
+
+M3 (보행자 표지판 정지) 판단은 ``m3_pedestrian.PedestrianStopMission`` 이 하고,
+이 노드는 입력(정지선 거리, odom 속도·이동거리, YOLO 이벤트)을 모아 매 주기 넘긴다.
+
+테스트용: ``ros2 run jetracer_ros2 mission_manager_node --ros-args -p start_mission:=M3``
+디버그:   ``/mission_manager/debug/state`` (String) — 현재 미션·상태·정지선 거리·속도
 """
 
 import os
@@ -13,8 +19,14 @@ import sys
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
+
+from jetracer_ros2.m3_pedestrian import M3Config, PedestrianStopMission
+from jetracer_ros2.stop_approach import (
+    FullStopDetector, StopApproachConfig, StopApproachController)
+from jetracer_ros2.stop_line_detector import OdomPathIntegrator
 
 
 MISSION_ORDER = ('M5', 'M6', 'M3', 'M7', 'M2', 'M8', 'M1', 'M4')
@@ -41,13 +53,32 @@ class MissionManagerNode(Node):
             'slow_speed': 0.12,
             'command_timeout_sec': 0.40,
             'stop_line_distance_m': 0.35,
-            'pedestrian_hold_sec': 1.0,
             'auto_start_mission_nodes': True,
+            'start_mission': 'M5',                  # 테스트할 때 M3 등으로 바로 시작
+            'odom_topic': '/odom',
+            'odom_timeout_sec': 0.5,
+            'stop_line_timeout_sec': 0.5,           # 정지선 거리 메시지가 이보다 오래되면 없음 처리
+            # 정지선 감속·정밀 정지 (M1·M3 공용)
+            'approach_start_m': 0.50,
+            'approach_gain': 0.8,
+            'approach_creep_speed': 0.06,
+            'approach_stop_offset_m': 0.01,
+            'full_stop_speed': 0.01,
+            'full_stop_sec': 0.3,
+            # M3
+            'm3_trigger': 'sign_or_line',
+            'm3_line_arm_distance_m': 0.80,
+            'm3_hold_sec': 3.5,
+            'm3_done_distance_m': 0.50,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
-        self._index = 0
-        self._active = MISSION_ORDER[0]
+        p = lambda name: self.get_parameter(name).value  # noqa: E731
+        start = str(p('start_mission')).strip().upper()
+        if start not in MISSION_ORDER:
+            raise ValueError(f'start_mission 은 {MISSION_ORDER} 중 하나')
+        self._index = MISSION_ORDER.index(start)
+        self._active = start
         self._lane_cmd = Twist()
         self._cone_cmd = Twist()
         self._parking_cmd = Twist()
@@ -56,9 +87,26 @@ class MissionManagerNode(Node):
         self._blocked = False
         self._at_stop_line = False
         self._traffic = 'unknown'
-        self._pedestrian_until_ns = 0
         self._obstacle_seen = False
         self._processes = {}
+        self._stop_line_m = None
+        self._stop_line_ns = 0
+        self._odom = OdomPathIntegrator()
+        self._odom_speed = 0.0
+        self._odom_ns = 0
+        self._odom_warned = False
+        self._last_out_speed = 0.0
+        self._pedestrian_seen = False
+        approach = StopApproachController(StopApproachConfig(
+            approach_start_m=p('approach_start_m'), gain=p('approach_gain'),
+            creep_speed=p('approach_creep_speed'), max_speed=p('normal_speed'),
+            stop_offset_m=p('approach_stop_offset_m')))
+        self._m3 = PedestrianStopMission(
+            M3Config(trigger=p('m3_trigger'),
+                     line_arm_distance_m=p('m3_line_arm_distance_m'),
+                     hold_sec=p('m3_hold_sec'), done_distance_m=p('m3_done_distance_m')),
+            approach, FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
+        self._m3_last_state = ''
 
         self.cmd_pub = self.create_publisher(
             Twist, self.get_parameter('output_topic').value, 10)
@@ -67,6 +115,8 @@ class MissionManagerNode(Node):
         self.lane_mode_pub = self.create_publisher(
             String, self.get_parameter('lane_mode_topic').value, 10)
         self.parking_start_pub = self.create_publisher(Bool, 'mission/parking/start', 10)
+        self.debug_pub = self.create_publisher(String, '/mission_manager/debug/state', 10)
+        self.create_subscription(Odometry, p('odom_topic'), self._odom_callback, 20)
         self.create_subscription(Twist, self.get_parameter('lane_command_topic').value,
                                  lambda msg: self._store_cmd('lane', msg), 10)
         self.create_subscription(Twist, self.get_parameter('cone_command_topic').value,
@@ -111,15 +161,22 @@ class MissionManagerNode(Node):
         if self._active == 'M5' and event == 'slow_sign':
             self._slow = True
         elif self._active == 'M3' and event == 'pedestrian':
-            hold = self.get_parameter('pedestrian_hold_sec').value
-            self._pedestrian_until_ns = self.get_clock().now().nanoseconds + int(hold * 1e9)
+            self._pedestrian_seen = True
         elif self._active == 'M2' and event in ('sign_a', 'sign_b'):
             self.lane_mode_pub.publish(String(data='left' if event == 'sign_a' else 'right'))
         elif self._active == 'M4' and event == 'parking_sign':
             self.parking_start_pub.publish(Bool(data=True))
 
+    def _odom_callback(self, msg):
+        pose = msg.pose.pose.position
+        self._odom_speed = float(msg.twist.twist.linear.x)
+        self._odom.update(pose.x, pose.y, self._odom_speed)
+        self._odom_ns = self.get_clock().now().nanoseconds
+
     def _stop_line_callback(self, msg):
         distance = msg.data
+        self._stop_line_m = float(distance) if distance >= 0.0 else None
+        self._stop_line_ns = self.get_clock().now().nanoseconds
         self._at_stop_line = 0.0 <= distance <= self.get_parameter('stop_line_distance_m').value
 
     def _traffic_callback(self, msg):
@@ -175,6 +232,9 @@ class MissionManagerNode(Node):
         self._at_stop_line = False
         self._traffic = 'unknown'
         self._obstacle_seen = False
+        self._pedestrian_seen = False
+        if mission == 'M3':
+            self._m3.reset()
         self.lane_mode_pub.publish(String(data='center'))
         self.active_pub.publish(String(data=mission))
         process = DYNAMIC_NODE.get(mission)
@@ -192,28 +252,75 @@ class MissionManagerNode(Node):
             self._stop_process(process)
         self.cmd_pub.publish(Twist())
 
+    def _fresh_stop_line(self, now_ns):
+        age = (now_ns - self._stop_line_ns) / 1e9
+        if self._stop_line_ns == 0 or age > self.get_parameter('stop_line_timeout_sec').value:
+            return None
+        return self._stop_line_m
+
+    def _measured_speed(self, now_ns):
+        """odom 속도. odom 이 끊기면 마지막으로 내보낸 명령 속도로 대신한다 (경고 1회)."""
+        age = (now_ns - self._odom_ns) / 1e9
+        if self._odom_ns and age <= self.get_parameter('odom_timeout_sec').value:
+            return self._odom_speed
+        if not self._odom_warned:
+            self.get_logger().warn('odom 없음 — 완전정지 판정을 명령 속도로 대신함')
+            self._odom_warned = True
+        return self._last_out_speed
+
+    def _publish(self, command):
+        self._last_out_speed = float(command.linear.x)
+        self.cmd_pub.publish(command)
+
+    def _debug(self, text):
+        self.debug_pub.publish(String(data=f'{self._active} {text}'))
+
+    def _m3_tick(self, now_ns):
+        """M3 판단. 속도 제한(None=평소, 0=정지)을 돌려주고, 끝나면 다음 미션으로."""
+        stop_line = self._fresh_stop_line(now_ns)
+        speed = self._measured_speed(now_ns)
+        decision = self._m3.update(now_ns / 1e9, stop_line, speed, self._odom.s,
+                                   pedestrian_seen=self._pedestrian_seen)
+        self._pedestrian_seen = False
+        if decision.state != self._m3_last_state:
+            self.get_logger().info(f'M3 상태: {self._m3_last_state or "-"} -> {decision.state}'
+                                   + (f' (정지선 {stop_line:.3f} m)' if stop_line is not None else ''))
+            self._m3_last_state = decision.state
+        line_text = f'{stop_line:.3f}' if stop_line is not None else 'none'
+        self._debug(f'{decision.state} line={line_text} v={speed:.3f}')
+        if decision.done:
+            self._m3_last_state = ''
+            self._advance('M3 정지·3초 대기·출발 완료')
+            return None
+        return decision.speed_limit
+
     def _control_tick(self):
         if self._blocked:
-            self.cmd_pub.publish(Twist())
+            self._publish(Twist())
             return
         now = self.get_clock().now().nanoseconds
-        if self._active == 'M3' and now < self._pedestrian_until_ns:
-            self.cmd_pub.publish(Twist())
-            return
+        speed_limit = None
+        if self._active == 'M3':
+            speed_limit = self._m3_tick(now)
+            if speed_limit == 0.0:
+                self._publish(Twist())
+                return
         if self._active == 'M1' and self._at_stop_line and self._traffic != 'green':
-            self.cmd_pub.publish(Twist())
+            self._publish(Twist())
             return
         source = 'cone' if self._active == 'M8' else ('parking' if self._active == 'M4' else 'lane')
         age = (now - self._last_cmd_ns[source]) / 1e9 if self._last_cmd_ns[source] else float('inf')
         if age > self.get_parameter('command_timeout_sec').value:
-            self.cmd_pub.publish(Twist())
+            self._publish(Twist())
             return
         command = getattr(self, f'_{source}_cmd')
         if source == 'lane':
             target = (self.get_parameter('slow_speed').value
                       if self._slow else self.get_parameter('normal_speed').value)
+            if speed_limit is not None:
+                target = min(target, speed_limit)
             command = self._limit_speed(command, target)
-        self.cmd_pub.publish(command)
+        self._publish(command)
 
     @staticmethod
     def _limit_speed(command, limit):
@@ -251,7 +358,8 @@ class MissionManagerNode(Node):
 def main(args=None):
     argv = sys.argv if args is None else args
     params = os.path.join(get_package_share_directory('jetracer_ros2'), 'params', 'params.yaml')
-    rclpy.init(args=[argv[0], '--ros-args', '--params-file', params])
+    # params.yaml 뒤에 명령줄 인자를 붙여서 `--ros-args -p start_mission:=M3` 같은 값이 이기게 한다
+    rclpy.init(args=[argv[0], '--ros-args', '--params-file', params] + list(argv[1:]))
     node = MissionManagerNode()
     try:
         rclpy.spin(node)
