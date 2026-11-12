@@ -160,3 +160,13 @@ def test_launch_arguments_override_defaults_and_viewer_closes_on_shutdown():
     assert calls[0][-len(args):] == args
     assert calls[0].index('--params-file') < calls[0].index('-p')
     assert calls[1:] == ['close', 'destroy']
+
+
+def test_bev_roi_is_visible_even_when_lane_is_invalid_and_can_be_hidden():
+    packet = sample_packet(valid=False)
+    packet['bev_roi'] = np.float32([[140, 0], [500, 0], [500, 479], [140, 479]])
+    visible = render_view(packet, 'bev', dict(roi=True))
+    assert np.any(visible[:, 140] != 0)
+    assert np.any(visible[:, 500] != 0)
+    assert not render_view(packet, 'bev', dict(roi=False)).any()
+    assert not packet['bev'].any()

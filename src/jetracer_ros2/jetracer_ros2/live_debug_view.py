@@ -59,8 +59,11 @@ def render_view(packet, kind, options):
         result = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
     if kind not in ('overlay', 'bev'):
         return result
-    if camera and options.get('roi', True):
-        cv2.polylines(result, [np.rint(packet['roi']).astype(np.int32)], True, (0, 220, 220), 2)
+    if options.get('roi', True):
+        # Show the mapped ROI, not the warped full-image/padding outline.
+        roi = packet.get('roi' if camera else 'bev_roi')
+        if roi is not None:
+            cv2.polylines(result, [np.rint(roi).astype(np.int32)], True, (0, 220, 220), 2)
     layers = path_layers(packet, camera)
     recovered = packet['state'].get('reference', 'both')
     for name, color in (('left', (255, 120, 0)), ('right', (0, 120, 255)), ('center', (0, 255, 0))):

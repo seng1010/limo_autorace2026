@@ -186,3 +186,19 @@ def test_missing_boundary_is_not_classified_as_paint():
     result = LanePipeline(_identity_config()).process(_synthetic_lane(missing_right=True))
     assert result.valid
     assert result.right_type == 'unobserved'
+
+
+def test_reassigned_single_boundary_keeps_measured_pixels(monkeypatch):
+    # During a turn, semantic left/right need not match the search half.
+    # Reassigning a right-half observation to left used to delete all pixels.
+    for target in ('left', 'right'):
+        pipeline = LanePipeline(_identity_config())
+        monkeypatch.setattr(pipeline, '_assign_side', lambda fit, fallback: target)
+        image = _synthetic_lane(missing_left=target == 'left',
+                                missing_right=target == 'right')
+        result = pipeline.process(image)
+        assert result.valid and result.confidence >= .48
+        assert result.recovered_side == target
+        observed_type = result.left_type if target == 'left' else result.right_type
+        assert observed_type.startswith('white/')
+        assert np.isfinite(result.preview_heading_error)

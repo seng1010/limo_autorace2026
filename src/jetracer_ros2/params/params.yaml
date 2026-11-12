@@ -50,8 +50,9 @@ lane_following_node:
     zigzag_exit_frames: 5
     image_width: 640
     image_height: 480
-    bev_src: [0.18, 0.48, 0.82, 0.48, 1.00, 0.98, 0.00, 0.98]
-    # TL,TR,BR,BL. 아래변은 원본 x=0~width-1 전체 사용. 위변도 확대.
+    bev_src: [0.3605, 0.46, 0.6395, 0.46, 1.00, 0.82, 0.00, 0.82]
+    # 영상 추정 보정(2026-11-13): TL,TR,BR,BL. 소실선 y≈154/480, 수평 가정.
+    # 원본 y=46~82%의 바닥 사용. 실측 거리/렌즈 보정은 아님; 카메라 자세 변경 시 재검증.
     bev_dst: [0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00]
     detect_white: true                # 흰 점선도 추적/분류. 흰 표식 오검출 시 false로 복귀
     white_lightness_min: 170
@@ -76,14 +77,14 @@ lane_following_node:
     polynomial_degree: 3
     ransac_iterations: 60
     ransac_residual_px: 7.0
-    lane_width_px: 360.0
+    lane_width_px: 370.0           # 새 BEV에서 직선 경계 간격 추정(픽셀)
     lane_width_tolerance: 0.35
     max_lane_width_change_px: 70.0
     max_fit_jump_px: 90.0
     strong_single_inlier_ratio: 0.65     # 강한 한쪽 선은 이전 중심 급변 검사보다 우선
     strong_single_point_multiplier: 1.5
-    lookahead_y_ratio: 0.62
-    preview_y_ratio: 0.40
+    lookahead_y_ratio: 0.92        # 기존 목표의 원본 영상 y≈73.5% 유지
+    preview_y_ratio: 0.76          # 기존 미리보기의 원본 영상 y≈62.9% 유지
     low_light_enabled: true
     low_light_max_gain: 3.0          # 색상 유지 밝기 증폭 상한. 검은 영역은 제외
     # 아래 거리 모드는 네 모서리 바닥 좌표 실측 후에만 켠다. ROS 재시작 필요.

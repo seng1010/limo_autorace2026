@@ -133,7 +133,7 @@ class LaneFollowingNode(Node):
             'zigzag_exit_frames': 5,
             'image_width': 640,
             'image_height': 480,
-            'bev_src': [0.18, 0.48, 0.82, 0.48, 1.00, 0.98, 0.00, 0.98],
+            'bev_src': [0.3605, 0.46, 0.6395, 0.46, 1.00, 0.82, 0.00, 0.82],
             'bev_dst': [0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00],
             'detect_white': True,
             'white_lightness_min': 170,
@@ -158,13 +158,13 @@ class LaneFollowingNode(Node):
             'polynomial_degree': 3,
             'ransac_iterations': 60,
             'ransac_residual_px': 7.0,
-            'lane_width_px': 360.0,
+            'lane_width_px': 370.0,
             'lane_width_tolerance': 0.35,
             'max_lane_width_change_px': 70.0,
             'max_fit_jump_px': 90.0,
             'strong_single_inlier_ratio': 0.65,
             'strong_single_point_multiplier': 1.5,
-            'lookahead_y_ratio': 0.62,
+            'lookahead_y_ratio': 0.92,
             'smoothing_alpha': 0.35,
             'zigzag_min_step_px': 8.0,
             'zigzag_min_span_px': 55.0,
@@ -173,7 +173,7 @@ class LaneFollowingNode(Node):
             'duplicate_gap_ratio': 0.50,
             'low_light_enabled': True,
             'low_light_max_gain': 3.0,
-            'preview_y_ratio': 0.40,
+            'preview_y_ratio': 0.76,
             'metric_lookahead_enabled': False,
             'lookahead_distance_m': 0.40,
             'camera_forward_offset_m': 0.0,
@@ -349,7 +349,8 @@ class LaneFollowingNode(Node):
                 color=result.color_binary_image, gradient=result.gradient_binary_image,
                 left_fit=result.left_fit, right_fit=result.right_fit, target_bev_xy=result.target_bev_xy,
                 inverse_matrix=self.pipeline._inverse_matrix,
-                roi=self.pipeline._normalized_points(self.pipeline.config.src_points)))
+                roi=self.pipeline._normalized_points(self.pipeline.config.src_points),
+                bev_roi=self.pipeline._normalized_points(self.pipeline.config.dst_points)))
         self._publish_result(msg, result)
 
     def _publish_command(self, command):

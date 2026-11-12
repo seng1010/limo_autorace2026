@@ -20,8 +20,9 @@ from jetracer_ros2.lane_vision import compensate_light, GroundLookahead
 class LanePipelineConfig:
     width: int = 640
     height: int = 480
+    # Screen-video estimate; not a metric camera/ground calibration.
     src_points: Tuple[float, ...] = (
-        0.18, 0.48, 0.82, 0.48, 1.00, 0.98, 0.00, 0.98,
+        0.3605, 0.46, 0.6395, 0.46, 1.00, 0.82, 0.00, 0.82,
     )
     dst_points: Tuple[float, ...] = (
         0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00,
@@ -49,13 +50,13 @@ class LanePipelineConfig:
     polynomial_degree: int = 3
     ransac_iterations: int = 60
     ransac_residual_px: float = 7.0
-    lane_width_px: float = 360.0
+    lane_width_px: float = 370.0
     lane_width_tolerance: float = 0.35
     max_lane_width_change_px: float = 70.0
     max_fit_jump_px: float = 90.0
     strong_single_inlier_ratio: float = 0.65
     strong_single_point_multiplier: float = 1.5
-    lookahead_y_ratio: float = 0.62
+    lookahead_y_ratio: float = 0.92
     smoothing_alpha: float = 0.35
     zigzag_min_step_px: float = 8.0
     zigzag_min_span_px: float = 55.0
@@ -66,7 +67,7 @@ class LanePipelineConfig:
     random_seed: int = 7
     low_light_enabled: bool = True
     low_light_max_gain: float = 3.0
-    preview_y_ratio: float = 0.40
+    preview_y_ratio: float = 0.76
     metric_lookahead_enabled: bool = False
     lookahead_distance_m: float = 0.40
     camera_forward_offset_m: float = 0.0
@@ -776,12 +777,19 @@ class LanePipeline:
             only_fit = left_fit if left_fit is not None else right_fit
             only_ratio = left_ratio if left_fit is not None else right_ratio
             only_y = left_y if left_fit is not None else right_y
-            only_points = left_x.size if left_fit is not None else right_x.size
+            only_x = left_x if left_fit is not None else right_x
+            only_points = only_x.size
             fallback = 'left' if left_fit is not None else 'right'
             recovered_side = (
                 tracking_mode if tracking_mode in ('left', 'right')
                 else self._assign_side(only_fit, fallback)
             )
+            # A line can be reassigned across the image midpoint. Move its
+            # observations with it before discarding the inferred side below.
+            if recovered_side == 'left':
+                left_y, left_x, left_ratio = only_y, only_x, only_ratio
+            else:
+                right_y, right_x, right_ratio = only_y, only_x, only_ratio
             left_fit, right_fit = self._single_side(only_fit, recovered_side)
             mean_width = self._expected_width()
             if (not self._jump_ok(left_fit, right_fit)

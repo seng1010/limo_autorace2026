@@ -39,7 +39,8 @@ def test_roi_reaches_pixel_edges():
     points = pipeline._normalized_points(pipeline.config.src_points)
     assert points[2, 0] == 639
     assert points[3, 0] == 0
-    assert points[0, 0] < 0.30 * 640
+    projected = cv2.perspectiveTransform(points[None], pipeline._matrix)[0]
+    assert np.allclose(projected, pipeline._normalized_points(pipeline.config.dst_points), atol=1e-3)
 
 
 def ground(distance=0.4, offset=0.1):
@@ -81,3 +82,35 @@ def test_preview_boost_only_for_same_direction_tightening():
     assert tracking_error(result, .95, .7, 1.35, 1., .25, 1.0) > base
     result.preview_heading_error = -.6
     assert tracking_error(result, .95, .7, 1.35, 1., .25, 1.0) == base
+
+
+def test_video_estimate_rectifies_observed_parallel_boundaries():
+    # Independent straight-line fits from raw screen video at 20s and 35s;
+    # 55s checks another straight segment with small camera/track variation.
+    boundaries = [
+        ((-1.038518, 463.663611), (1.793026, 28.720665)),
+        ((-1.560761, 537.902043), (1.219076, 105.213298)),
+        ((-1.348182, 550.903898), (1.365397, 149.842283)),
+    ]
+    pipeline = LanePipeline(LanePipelineConfig())
+    ys = np.float32([230, 265, 300])
+    for left, right in boundaries:
+        mapped = []
+        for fit in (left, right):
+            points = np.column_stack((np.polyval(fit, ys), ys)).astype(np.float32)
+            mapped.append(cv2.perspectiveTransform(points[None], pipeline._matrix)[0])
+        widths = mapped[1][:, 0] - mapped[0][:, 0]
+        assert np.ptp(widths) / np.mean(widths) < 0.05
+        assert abs(np.mean(widths) - pipeline.config.lane_width_px) < 30
+
+
+def test_new_bev_preserves_camera_rows_of_control_targets():
+    old = LanePipeline(LanePipelineConfig(
+        src_points=(.18, .48, .82, .48, 1., .98, 0., .98),
+        lookahead_y_ratio=.62, preview_y_ratio=.40))
+    new = LanePipeline(LanePipelineConfig())
+    for old_ratio, new_ratio in ((.62, new.config.lookahead_y_ratio),
+                                  (.40, new.config.preview_y_ratio)):
+        old_point = cv2.perspectiveTransform(np.float32([[[320, 480 * old_ratio]]]), old._inverse_matrix)
+        new_point = cv2.perspectiveTransform(np.float32([[[320, 480 * new_ratio]]]), new._inverse_matrix)
+        assert np.linalg.norm(old_point - new_point) < 2.0
