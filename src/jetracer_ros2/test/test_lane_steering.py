@@ -7,7 +7,16 @@ import numpy as np
 
 from jetracer_ros2.lane_steering import (
     tracking_error, curve_release_target, limited_steering,
+    right_curve_metric_target,
 )
+
+
+def test_metric_right_curve_feedforward_never_countersteers_or_exceeds_limit():
+    assert right_curve_metric_target(.4, .3, .42, .10, .20, False) == 0.0
+    target = right_curve_metric_target(.4, .3, .42, .10, .20, True)
+    assert -.42 < target < -.3
+    assert right_curve_metric_target(-.9, .3, .42, .10, .20, True) == -.9
+    assert right_curve_metric_target(.2, 10., .42, .10, .20, True) == -1.0
 
 
 def controller():

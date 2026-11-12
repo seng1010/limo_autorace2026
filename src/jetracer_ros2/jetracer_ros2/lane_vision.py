@@ -63,3 +63,26 @@ class GroundLookahead:
         slope = float(np.interp(effective, forward, np.gradient(lateral, forward)))
         y = float(np.interp(effective, forward, ys[::-1]))
         return x, float(np.arctan(slope)), y, effective
+
+    def evaluate_nearest_observed(self, fit, lo, hi, max_forward_m):
+        """Use the closest *measured* curve row, never a polynomial extension.
+
+        This is a separate, bounded low-speed target for a confirmed curve;
+        it does not relax the normal lookahead's near-edge allowance.
+        """
+        if not np.isfinite(max_forward_m) or max_forward_m <= 0:
+            raise ValueError('invalid curve observation range')
+        ys = np.linspace(lo, hi, 200)
+        points = np.column_stack((np.polyval(fit, ys), ys)).astype(np.float32)
+        world = cv2.perspectiveTransform(points[None], self.matrix)[0]
+        world[:, 1] += self.offset
+        if not np.all(np.isfinite(world)) or not np.all(np.diff(world[:, 1]) < 0):
+            raise ValueError('ground calibration must map upper image to farther ground')
+        forward, lateral = world[::-1, 1], world[::-1, 0]
+        effective = float(forward[0]) + self.edge_margin_m
+        if effective > min(float(forward[-1]), max_forward_m):
+            raise ValueError('observed curve is farther than safe recovery range')
+        x = float(np.interp(effective, forward, lateral))
+        slope = float(np.interp(effective, forward, np.gradient(lateral, forward)))
+        y = float(np.interp(effective, forward, ys[::-1]))
+        return x, float(np.arctan(slope)), y, effective

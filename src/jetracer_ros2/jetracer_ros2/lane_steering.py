@@ -38,3 +38,18 @@ def limited_steering(previous, target, dt, attack, release, reversal):
     rate = reversal if reversing else attack if increasing else release
     step = max(0.0, rate) * min(0.20, max(0.0, dt))
     return min(1.0, max(-1.0, previous + min(step, max(-step, target - previous))))
+
+
+def right_curve_metric_target(target, span, max_angle, minimum_angle, span_gain,
+                              confirmed):
+    """Keep a measured clockwise curve from commanding a counter-turn.
+
+    Negative is right steering. The floor is applied only after consecutive
+    confirmation; it never overrides the hardware's maximum steering angle.
+    """
+    if not math.isfinite(target) or not math.isfinite(span) or max_angle <= 0:
+        return 0.0
+    if not confirmed:
+        return min(0.0, target)
+    floor = min(max_angle, max(0.0, minimum_angle) + max(0.0, span_gain) * max(0.0, span))
+    return max(-1.0, min(target, -floor / max_angle))

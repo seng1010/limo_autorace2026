@@ -51,6 +51,10 @@ lane_following_node:
     invalid_hold_sec: 0.25            # 차선 놓쳤을 때 마지막 명령 유지 시간 [s]
     curve_recovery_sec: 0.50         # 신뢰도 0.70 이상 확인된 곡선 유실만 연결, 최대 0.8초
     curve_recovery_speed: 0.12       # 곡선 유실 시 마지막 조향 유지, 최대 0.12 m/s
+    curve_nearest_max_forward_m: 1.05 # 노란 우곡선의 관측 최근접점을 쓸 수 있는 후축 기준 최대 거리
+    right_curve_min_steer_rad: 0.10  # 연속 확인된 우곡선의 최소 우조향; 직선/좌회전에는 미적용
+    right_curve_span_gain: 0.20      # 관측 곡률 span에 따른 추가 조향, max_steer_angle 이내
+    right_curve_confirm_frames: 2   # 단발 노이즈에는 강제 우조향하지 않음
     reset_after_invalid_frames: 5     # 연속 N프레임 실패 시 이전 차선 기준 초기화
     zigzag_confirm_sec: 2.0          # 이 시간 이상 누적 검출되면 확정 구간
     zigzag_gap_sec: 0.35             # 짧은 미검출은 같은 구간으로 간주
@@ -97,7 +101,7 @@ lane_following_node:
     low_light_enabled: true
     low_light_max_gain: 3.0          # 색상 유지 밝기 증폭 상한. 검은 영역은 제외
     # 네 ROI 모서리의 실측 추정값. 실제 주행 전 명령 없는 디버거에서 확인한다.
-    metric_lookahead_enabled: false   # launch의 metric_ackermann:=true로만 시험 활성화
+    metric_lookahead_enabled: false   # launch 인자가 덮어씀: all_in_node 기본 true, 끄려면 metric_ackermann:=false
     lookahead_distance_m: 0.40        # 요청 목표. 보이지 않으면 허용 범위 안에서 가장 가까운 관측점 사용
     camera_forward_offset_m: 0.184  # 공식 LIMO ROS2 URDF 명목값(0.100+0.084m); LIMO Pro 실차에서 확인
     metric_lateral_scale_m: 0.30    # 횡오차 정규화 거리, 실제 트랙에 맞춰 보정

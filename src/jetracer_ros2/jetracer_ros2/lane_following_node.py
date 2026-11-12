@@ -24,6 +24,7 @@ from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
 from jetracer_ros2.lane_attributes import scale_steering
 from jetracer_ros2.lane_steering import (
     reference_side, tracking_error, curve_release_target, limited_steering,
+    right_curve_metric_target,
 )
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 from jetracer_ros2.live_debug_view import LiveViewer
@@ -62,6 +63,7 @@ class LaneFollowingNode(Node):
         self._last_valid_cmd: Optional[Twist] = None
         self._last_valid_ns = 0
         self._last_valid_curve = False
+        self._right_curve_hits = 0
 
         self.commands_enabled = self.get_parameter('publish_commands').value
         self.cmd_pub = (self.create_publisher(Twist, self.get_parameter('output_topic').value, 10)
@@ -139,6 +141,10 @@ class LaneFollowingNode(Node):
             'invalid_hold_sec': 0.25,
             'curve_recovery_sec': 0.50,
             'curve_recovery_speed': 0.12,
+            'curve_nearest_max_forward_m': 1.05,
+            'right_curve_min_steer_rad': 0.10,
+            'right_curve_span_gain': 0.20,
+            'right_curve_confirm_frames': 2,
             'reset_after_invalid_frames': 5,
             'zigzag_confirm_sec': 2.0,
             'zigzag_gap_sec': 0.35,
@@ -215,6 +221,7 @@ class LaneFollowingNode(Node):
             target_roi_margin_px=p('target_roi_margin_px'),
             yellow_curve_priority=p('yellow_curve_priority'),
             yellow_curve_min_span=p('yellow_curve_min_span'),
+            curve_nearest_max_forward_m=p('curve_nearest_max_forward_m'),
             width=p('image_width'), height=p('image_height'),
             src_points=tuple(p('bev_src')), dst_points=tuple(p('bev_dst')),
             detect_white=p('detect_white'),
@@ -284,6 +291,10 @@ class LaneFollowingNode(Node):
         now_ns = self.get_clock().now().nanoseconds
         self._update_zigzag(yellow_zigzag_evidence(result), now_ns)
         usable = result.valid and result.confidence >= self.get_parameter('minimum_confidence').value
+        right_curve = bool(
+            usable and self._mode == 'center' and result.yellow_curve_priority_active
+            and result.curve_turn == 'right' and result.confidence >= 0.70)
+        self._right_curve_hits = self._right_curve_hits + 1 if right_curve else 0
         if usable:
             self._invalid_frames = 0
             self._update_curve_geometry(result)
@@ -312,6 +323,12 @@ class LaneFollowingNode(Node):
                     self.get_parameter('ackermann_wheelbase_m').value,
                     self.get_parameter('ackermann_track_m').value,
                     max_angle) / max_angle
+                if right_curve:
+                    target_steering = right_curve_metric_target(
+                        target_steering, result.curve_heading_span, max_angle,
+                        self.get_parameter('right_curve_min_steer_rad').value,
+                        self.get_parameter('right_curve_span_gain').value,
+                        self._right_curve_hits >= self.get_parameter('right_curve_confirm_frames').value)
             else:
                 raw_steering = float(np.clip(-error, -1.0, 1.0))
                 target_steering = self._curve_steering_target(raw_steering)
@@ -330,6 +347,8 @@ class LaneFollowingNode(Node):
                 self.get_parameter('normal_speed').value,
                 self.get_parameter('curve_speed').value,
                 self.get_parameter('zigzag_speed').value)
+            if result.curve_nearest_observation:
+                speed = min(speed, self.get_parameter('curve_recovery_speed').value)
             cmd.linear.x = speed
             cmd.angular.z = self._omega(steering, speed)
             self._last_valid_cmd = cmd
@@ -370,11 +389,12 @@ class LaneFollowingNode(Node):
             self.get_logger().info(
                 f'lane type(est): L={result.left_type} R={result.right_type} '
                 f'confidence={result.confidence:.2f} usable={usable} '
+                f'curve_turn={result.curve_turn} nearest_observed={result.curve_nearest_observation} '
                 f'lateral={result.lateral_error:+.3f} heading={result.heading_error:+.3f} '
                 f'shape_span={result.curve_heading_span:.3f} curve_weight={self._curve_weight:.2f} '
                 f'reference={reference_side(result)} '
                 f'lookahead={result.lookahead_description} light_gain={result.illumination_gain:.2f} '
-                f'curve_control={self._curve_active} zigzag_slow={self._zigzag_active} '
+                f'curve_control={self._curve_active or right_curve} zigzag_slow={self._zigzag_active} '
                 f'yellow_curve_priority={result.yellow_curve_priority_active} '
                 f'{steering_status}'
                 f'v={cmd.linear.x:.3f} omega={cmd.angular.z:.3f} '
@@ -387,7 +407,9 @@ class LaneFollowingNode(Node):
                 reference=reference_side(result), left_type=result.left_type, right_type=result.right_type,
                 lateral=float(result.lateral_error), heading_rad=float(result.heading_error),
                 shape_span=float(result.curve_heading_span), curve_weight=float(self._curve_weight),
-                curve_control=bool(self._curve_active), lookahead=result.lookahead_description,
+                curve_control=bool(self._curve_active or right_curve), lookahead=result.lookahead_description,
+                curve_turn=result.curve_turn,
+                nearest_observed=bool(result.curve_nearest_observation),
                 yellow_curve_priority=bool(result.yellow_curve_priority_active),
                 angle_cmd_deg=float(np.degrees(self._applied_steering * self.get_parameter('max_steer_angle').value)),
                 lane_v=float(cmd.linear.x), lane_omega=float(cmd.angular.z), actual_cmd=self._actual_cmd,
@@ -506,6 +528,7 @@ class LaneFollowingNode(Node):
 
     def _reset_steering(self):
         self._last_valid_curve = False
+        self._right_curve_hits = 0
         self._geometry_hits = 0
         self._curve_weight = 0.0
         self._curve_active = False

@@ -78,6 +78,7 @@ class LanePipelineConfig:
     target_roi_margin_px: float = 20.0
     yellow_curve_priority: bool = True
     yellow_curve_min_span: float = 0.20
+    curve_nearest_max_forward_m: float = 1.05
 
 
 @dataclass
@@ -109,6 +110,8 @@ class LaneResult:
     target_lateral_m: Optional[float] = None
     target_forward_m: Optional[float] = None
     yellow_curve_priority_active: bool = False
+    curve_turn: str = 'unknown'
+    curve_nearest_observation: bool = False
 
 
 class LanePipeline:
@@ -121,6 +124,7 @@ class LanePipeline:
         self._previous_right: Optional[np.ndarray] = None
         self._previous_width: Optional[float] = None
         self._yellow_curve_hold = 0
+        self._yellow_curve_side = ''
         self._matrix, self._inverse_matrix = self._perspective_matrices()
         self.ground = (GroundLookahead(
             self._normalized_points(config.dst_points), config.bev_ground_points_m,
@@ -133,6 +137,7 @@ class LanePipeline:
         self._previous_right = None
         self._previous_width = None
         self._yellow_curve_hold = 0
+        self._yellow_curve_side = ''
 
     def _yellow_curve_mask(self, bird: np.ndarray, tracking_mode: str) -> Optional[np.ndarray]:
         """Return yellow-only paint when a connected solid yellow curve exists.
@@ -159,7 +164,7 @@ class LanePipeline:
                 self._yellow_curve_hold -= 1
                 return yellow
             return None
-        confirmed = False
+        confirmed_sides = []
         # Anchor each side independently: a tight curve can cross the image
         # midpoint, and AUTO would split one yellow line into two short tracks.
         modes = (tracking_mode,) if tracking_mode in ('left', 'right') else ('left', 'right')
@@ -172,9 +177,19 @@ class LanePipeline:
             if (measured_heading_span(fit, ys, self.config.height)
                     >= self.config.yellow_curve_min_span
                     and classify_lane(bird, fit, ys, self.config) == 'yellow/solid/curve'):
-                confirmed = True
-                break
-        if confirmed:
+                confirmed_sides.append((mode, fit, xs.size,
+                                        float(np.polyval(fit, np.max(ys)))))
+        if confirmed_sides:
+            by_side = {candidate[0]: candidate for candidate in confirmed_sides}
+            if ('left' in by_side and 'right' in by_side
+                    and by_side['right'][3] - by_side['left'][3]
+                    >= 0.5 * self._expected_width()):
+                self._yellow_curve_side = 'right'
+            else:
+                # Both anchor modes can lock onto the SAME yellow outer line.
+                # Only call it the right boundary if position/history says so.
+                best = max(confirmed_sides, key=lambda candidate: candidate[2])
+                self._yellow_curve_side = self._assign_side(best[1], best[0])
             self._yellow_curve_hold = 3
         elif self._yellow_curve_hold:
             self._yellow_curve_hold -= 1
@@ -764,9 +779,14 @@ class LanePipeline:
         if yellow_curve_priority_active:
             binary = color_binary = yellow_curve_binary
             gradient_binary = np.zeros_like(binary)
+        # Independent yellow anchors were checked above; AUTO must not split
+        # the inner curve across the image midpoint or select the outer edge.
+        search_mode = (self._yellow_curve_side if yellow_curve_priority_active
+                       and tracking_mode in ('auto', 'both') and self._yellow_curve_side
+                       else tracking_mode)
         left_y, left_x, right_y, right_x, debug = self._sliding_window_points(
             binary,
-            tracking_mode=tracking_mode,
+            tracking_mode=search_mode,
             color_binary=color_binary,
             gradient_binary=gradient_binary,
         )
@@ -796,7 +816,7 @@ class LanePipeline:
                 merged_ratio = left_ratio if use_left else right_ratio
             # [2] 남은 한 줄이 실제로 왼쪽 선인지 오른쪽 선인지 판단
             side = (
-                tracking_mode if tracking_mode in ('left', 'right')
+                search_mode if search_mode in ('left', 'right')
                 else self._assign_side(merged_fit, fallback='left')
             )
             empty = np.array([], dtype=merged_x.dtype)
@@ -832,7 +852,7 @@ class LanePipeline:
                 for side, fit, ratio, ys, points in (
                         ('left', left_fit, left_ratio, left_y, left_x.size),
                         ('right', right_fit, right_ratio, right_y, right_x.size)):
-                    if tracking_mode in ('left', 'right') and side != tracking_mode:
+                    if search_mode in ('left', 'right') and side != search_mode:
                         continue
                     # 화면 끝에 조금 걸친 짧은 조각은 믿지 않는다
                     if not self._coverage_ok(ys):
@@ -865,7 +885,7 @@ class LanePipeline:
             only_points = only_x.size
             fallback = 'left' if left_fit is not None else 'right'
             recovered_side = (
-                tracking_mode if tracking_mode in ('left', 'right')
+                search_mode if search_mode in ('left', 'right')
                 else self._assign_side(only_fit, fallback)
             )
             # A line can be reassigned across the image midpoint. Move its
@@ -945,13 +965,51 @@ class LanePipeline:
         derivative = float(np.polyval(np.polyder(center_fit), y_eval))
         heading_error = float(np.arctan(-derivative))
         observed_ys = np.concatenate((left_y, right_y))
-        if recovered and not (float(observed_ys.min()) <= y_eval <= float(observed_ys.max())):
+        left_type = classify_lane(bird, measured_left_fit, left_y, self.config, zigzag)
+        right_type = classify_lane(bird, measured_right_fit, right_y, self.config, zigzag)
+        curve_span = max(
+            measured_heading_span(measured_left_fit, left_y, self.config.height),
+            measured_heading_span(measured_right_fit, right_y, self.config.height))
+        curve_turn = 'unknown'
+        for fit, ys, lane_type in ((measured_right_fit, right_y, right_type),
+                                   (measured_left_fit, left_y, left_type)):
+            if fit is None or ys.size < 2 or lane_type != 'yellow/solid/curve':
+                continue
+            displacement = float(np.polyval(fit, np.min(ys)) - np.polyval(fit, np.max(ys)))
+            if abs(displacement) >= 20.0 and curve_span >= self.config.yellow_curve_min_span:
+                curve_turn = 'right' if displacement > 0 else 'left'
+                break
+        if recovered:
+            observed_x = left_x if recovered_side == 'left' else right_x
+            observed_y = left_y if recovered_side == 'left' else right_y
+            point_score = min(1.0, observed_x.size / (self.config.fit_min_points * 3.0))
+            inlier_score = max(left_ratio, right_ratio)
+            coverage_score = (min(1.0, float(np.ptp(observed_y)) / (self.config.height * 0.65))
+                              if observed_y.size else 0.0)
+            confidence = float(np.clip(
+                0.30 * point_score + 0.50 * inlier_score + 0.20 * coverage_score, 0.0, 1.0))
+        else:
+            point_score = min(1.0, (left_x.size + right_x.size)
+                              / (2.0 * self.config.fit_min_points * 3.0))
+            inlier_score = 0.5 * (left_ratio + right_ratio)
+            confidence = float(np.clip(
+                0.35 * point_score + 0.40 * inlier_score + 0.25, 0.0, 1.0))
+
+        observed_nearest = False
+        fixed_row_missing = recovered and not (
+            float(observed_ys.min()) <= y_eval <= float(observed_ys.max()))
+        curve_recovery_allowed = bool(
+            self.ground is not None and yellow_curve_priority_active
+            and curve_turn == 'right' and confidence >= 0.70)
+        if fixed_row_missing and not curve_recovery_allowed:
             self.reset()
             return LaneResult(valid=False, debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
                               reason='one-side target outside observed lane rows',
-                              tracking_mode=tracking_mode,
+                              tracking_mode=tracking_mode, confidence=confidence,
+                              curve_heading_span=curve_span, curve_turn=curve_turn,
+                              left_type=left_type, right_type=right_type,
                               yellow_curve_priority_active=yellow_curve_priority_active)
         preview_y = float(np.clip(self.config.height * self.config.preview_y_ratio,
                                  observed_ys.min(), observed_ys.max()))
@@ -961,20 +1019,36 @@ class LanePipeline:
         target_forward_m = None
         if self.ground is not None:
             try:
-                target_lateral_m, heading_error, y_eval, target_forward_m = self.ground.evaluate_target(
-                    center_fit, observed_ys.min(), observed_ys.max())
+                if fixed_row_missing:
+                    raise ValueError('fixed target outside observed curve rows')
+                target_lateral_m, heading_error, y_eval, target_forward_m = (
+                    self.ground.evaluate_target(center_fit, observed_ys.min(), observed_ys.max()))
             except ValueError as error:
-                return LaneResult(valid=False, debug_image=debug, bev_image=bird,
-                                  binary_image=binary, color_binary_image=color_binary,
-                                  gradient_binary_image=gradient_binary, reason=str(error),
-                                  yellow_curve_priority_active=yellow_curve_priority_active)
+                if curve_recovery_allowed:
+                    try:
+                        target_lateral_m, heading_error, y_eval, target_forward_m = (
+                            self.ground.evaluate_nearest_observed(
+                                center_fit, observed_ys.min(), observed_ys.max(),
+                                self.config.curve_nearest_max_forward_m))
+                        observed_nearest = True
+                    except ValueError as recovery_error:
+                        error = recovery_error
+                if target_lateral_m is None:
+                    return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+                                      binary_image=binary, color_binary_image=color_binary,
+                                      gradient_binary_image=gradient_binary, reason=str(error),
+                                      confidence=confidence, curve_heading_span=curve_span,
+                                      curve_turn=curve_turn, left_type=left_type,
+                                      right_type=right_type,
+                                      yellow_curve_priority_active=yellow_curve_priority_active)
             lateral_error = float(np.clip(
                 target_lateral_m / self.config.metric_lateral_scale_m, -1.5, 1.5))
             center_x = float(np.polyval(center_fit, y_eval))
             preview_heading = heading_error  # Do not mix image and metric angles.
+            lookahead_source = ("nearest observed curve" if observed_nearest
+                                else f'{self.config.lookahead_distance_m:.2f}m requested')
             lookahead_description = (
-                f'{self.config.lookahead_distance_m:.2f}m requested, '
-                f'{target_forward_m:.2f}m used from rear axle y={y_eval:.0f}px')
+                f'{lookahead_source}, {target_forward_m:.2f}m used from rear axle y={y_eval:.0f}px')
 
         # A polynomial can have many inliers yet extrapolate the driving
         # target outside the measured BEV road area (seen at the fork in the
@@ -985,39 +1059,10 @@ class LanePipeline:
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
                               reason='center target outside measured BEV road area',
-                              tracking_mode=tracking_mode,
+                              tracking_mode=tracking_mode, confidence=confidence,
+                              curve_heading_span=curve_span, curve_turn=curve_turn,
+                              left_type=left_type, right_type=right_type,
                               yellow_curve_priority_active=yellow_curve_priority_active)
-
-        if recovered:
-            # 한쪽 선만 보이는 곡선에서는 관측하지 않은 반대쪽 선 때문에 점수를
-            # 깎지 않는다. 실제로 본 선의 픽셀 수, RANSAC 인라이어 비율, 세로
-            # 검출 범위만으로 신뢰도를 계산한다.
-            observed_x = left_x if recovered_side == 'left' else right_x
-            observed_y = left_y if recovered_side == 'left' else right_y
-            point_score = min(
-                1.0,
-                observed_x.size / (self.config.fit_min_points * 3.0),
-            )
-            inlier_score = max(left_ratio, right_ratio)
-            coverage_score = (
-                min(1.0, float(np.ptp(observed_y)) / (self.config.height * 0.65))
-                if observed_y.size else 0.0
-            )
-            confidence = float(np.clip(
-                0.30 * point_score + 0.50 * inlier_score + 0.20 * coverage_score,
-                0.0, 1.0,
-            ))
-        else:
-            point_score = min(
-                1.0,
-                (left_x.size + right_x.size)
-                / (2.0 * self.config.fit_min_points * 3.0),
-            )
-            inlier_score = 0.5 * (left_ratio + right_ratio)
-            confidence = float(np.clip(
-                0.35 * point_score + 0.40 * inlier_score + 0.25,
-                0.0, 1.0,
-            ))
 
         cv2.circle(debug, (int(center_x), int(y_eval)), 7, (0, 255, 0), -1)
         cv2.putText(
@@ -1042,8 +1087,6 @@ class LanePipeline:
             (10, 109), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 255, 160), 2,
         )
 
-        left_type = classify_lane(bird, measured_left_fit, left_y, self.config, zigzag)
-        right_type = classify_lane(bird, measured_right_fit, right_y, self.config, zigzag)
         cv2.putText(debug, f'L: {left_type}', (10, 136),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
         cv2.putText(debug, f'R: {right_type}', (10, 160),
@@ -1059,9 +1102,9 @@ class LanePipeline:
                 debug[-120:, -160:] = cv2.resize(roi_view, (160, 120))
         return LaneResult(
             valid=True,
-            curve_heading_span=max(
-                measured_heading_span(measured_left_fit, left_y, self.config.height),
-                measured_heading_span(measured_right_fit, right_y, self.config.height)),
+            curve_heading_span=curve_span,
+            curve_turn=curve_turn,
+            curve_nearest_observation=observed_nearest,
             preview_heading_error=preview_heading,
             lookahead_description=lookahead_description,
             target_lateral_m=target_lateral_m,

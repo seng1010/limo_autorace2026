@@ -44,6 +44,42 @@ def _identity_config():
     )
 
 
+def _partial_right_yellow_curve(max_forward_m=1.05):
+    config = _identity_config()
+    config.detect_yellow = True
+    config.metric_lookahead_enabled = True
+    config.bev_ground_points_m = (-.32, .9, .32, .9, .32, .421, -.32, .421)
+    config.camera_forward_offset_m = .184
+    config.lane_width_px = 270.0
+    config.curve_nearest_max_forward_m = max_forward_m
+    config.low_light_enabled = False
+    image = np.zeros((480, 640, 3), np.uint8)
+    ys = np.arange(190, 436)
+    xs = 560 - .003 * (ys - 190) ** 2
+    cv2.polylines(image, [np.int32(np.column_stack((xs, ys))).reshape(-1, 1, 2)],
+                  False, (0, 255, 255), 12)
+    return config, image
+
+
+def test_observed_right_curve_uses_bounded_nearest_metric_target():
+    config, image = _partial_right_yellow_curve()
+    # The fixed row is below the last observed paint, but the nearby yellow
+    # inner curve is strong and still lies in the calibrated ground polygon.
+    result = LanePipeline(config).process(image)
+    assert result.valid and result.confidence >= .7
+    assert result.recovered_side == 'right' and result.curve_turn == 'right'
+    assert result.curve_nearest_observation
+    assert .6 < result.target_forward_m < 1.05
+
+
+def test_curve_observation_quality_survives_unsafe_target_rejection():
+    config, image = _partial_right_yellow_curve(max_forward_m=.70)
+    result = LanePipeline(config).process(image)
+    assert not result.valid and result.confidence >= .7
+    assert result.curve_turn == 'right'
+    assert 'safe recovery range' in result.reason
+
+
 def test_detects_two_curved_lanes():
     result = LanePipeline(_identity_config()).process(_synthetic_lane())
     assert result.valid

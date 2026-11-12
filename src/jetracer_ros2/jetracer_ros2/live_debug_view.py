@@ -123,6 +123,8 @@ def status_text(packet):
         f"curve weight: {s['curve_weight']:.2f}",
         f"curve control: {s['curve_control']}",
         f"yellow curve priority: {s.get('yellow_curve_priority', False)}",
+        f"observed turn: {s.get('curve_turn', 'unknown')}",
+        f"nearest curve target: {s.get('nearest_observed', False)}",
         f"calculated steer: {s['angle_cmd_deg']:+.1f} deg",
         f"calculated v: {s['lane_v']:.3f} m/s",
         f"calculated omega: {s['lane_omega']:+.3f} rad/s",

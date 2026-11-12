@@ -14,7 +14,9 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('debug_view', default_value='false'),
-        DeclareLaunchArgument('metric_ackermann', default_value='false'),
+        # The measured ground ROI now drives the bounded curve recovery path.
+        # Operators can still compare the legacy pixel controller with false.
+        DeclareLaunchArgument('metric_ackermann', default_value='true'),
         DeclareLaunchArgument('fork_default', default_value='stop', choices=['stop', 'left', 'right']),
         Node(
             package='jetracer_ros2',
