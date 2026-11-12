@@ -66,7 +66,7 @@ stop_line_node:
     image_topic: '/camera/color/image_raw/compressed'
     odom_topic: '/odom'
     roi_top_ratio: 0.58
-    # 정지선 색: 트랙 차선은 노란색이지만 정지선 색은 아직 미확인 -> 현장에서 확인 후 수정
+    # 정지선 색: 흰색 (트랙 확인). 옆 차선은 노란색이라 흰색만 검출해야 차선이 안 섞임
     detect_white: true
     white_lightness_min: 180
     white_saturation_max: 90
