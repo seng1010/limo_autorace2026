@@ -61,6 +61,21 @@ def test_recovers_one_missing_lane():
     assert result.confidence >= 0.48
 
 
+def test_single_side_margin_never_crosses_measured_curve():
+    """The inferred boundary and center keep the measured curve's shape."""
+    pipeline = LanePipeline(_identity_config())
+    observed = np.array([0.00008, -0.045, 5.0, 90.0])
+    ys = np.linspace(0, 479, 100)
+    for side in ('left', 'right'):
+        left, right = pipeline._single_side(observed, side)
+        gap = np.polyval(right, ys) - np.polyval(left, ys)
+        assert np.all(gap > 0)
+        assert np.ptp(gap) < 1e-6
+        assert abs(float(gap[0]) - pipeline.config.lane_width_px) < 1e-6
+        measured = left if side == 'left' else right
+        assert np.allclose(np.polyval(measured, ys), np.polyval(observed, ys))
+
+
 def test_strong_single_lane_can_recover_after_large_curve_shift():
     """곡선에서 중심이 크게 변해도 한쪽 선 자체가 강하면 정지하지 않아야 한다."""
     pipeline = LanePipeline(_identity_config())

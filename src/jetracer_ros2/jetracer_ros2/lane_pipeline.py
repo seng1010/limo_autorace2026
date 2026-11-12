@@ -486,23 +486,6 @@ class LanePipeline:
         )
         return fit, float(best_count / x.size)
 
-    def _offset_fit(self, fit: np.ndarray, width: float, direction: float) -> np.ndarray:
-        """선과 평행하게, 선에 '수직 방향'으로 width 만큼 떨어진 선을 만든다.
-
-        direction=+1 이면 오른쪽(왼쪽 선 -> 오른쪽 선), -1 이면 왼쪽.
-        가로로만 width 를 밀면 기울어진(곡선) 구간에서 실제 차선보다 좁아지므로,
-        기울기만큼 sqrt(1 + (dx/dy)^2) 를 곱해 가로 간격을 보정한다.
-        """
-        y_values = np.linspace(0.0, self.config.height - 1.0, 48)
-        x_values = np.polyval(fit, y_values)
-        slope = np.polyval(np.polyder(fit), y_values)
-        norm = np.sqrt(1.0 + slope ** 2)
-        # 선의 접선 (dx/dy, 1) 에 수직인 방향 (1, -dx/dy) 으로 width 만큼 이동한
-        # 점들로 다시 곡선을 맞춘다 (= 정확한 평행 곡선).
-        shifted_x = x_values + direction * width / norm
-        shifted_y = y_values - direction * width * slope / norm
-        return np.polyfit(shifted_y, shifted_x, len(fit) - 1)
-
     def _expected_width(self) -> float:
         return self._previous_width or self.config.lane_width_px
 
@@ -526,15 +509,21 @@ class LanePipeline:
     def _single_side(
         self, fit: np.ndarray, side: str,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """선 하나(side 쪽)를 기준으로 반대쪽 선을 만들어 (left, right)를 돌려준다."""
-        # 차선 폭 전체만큼 옮기면 급커브에서 곡선이 크게 일그러지므로,
-        # 절반만 옮겨 '중심선'을 먼저 만들고 반대쪽 선 = 2*중심 - 보이는 선 으로 만든다.
-        half = 0.5 * self._expected_width()
+        """Infer a center from the measured line without refitting another curve.
+
+        The former normal-offset/re-fit can fold at a tight bend and cross the
+        measured line. A constant BEV lane-width margin preserves
+        the measured polynomial's shape and the boundary ordering at every y.
+        The returned opposite fit is only the mirror of that center, not an
+        independent observation.
+        """
+        gap = self._expected_width()
+        other = fit.copy()
         if side == 'left':
-            center = self._offset_fit(fit, half, +1.0)
-            return fit, 2.0 * center - fit
-        center = self._offset_fit(fit, half, -1.0)
-        return 2.0 * center - fit, fit
+            other[-1] += gap
+            return fit, other
+        other[-1] -= gap
+        return other, fit
 
     def _is_duplicate(
         self,
@@ -896,6 +885,13 @@ class LanePipeline:
         derivative = float(np.polyval(np.polyder(center_fit), y_eval))
         heading_error = float(np.arctan(-derivative))
         observed_ys = np.concatenate((left_y, right_y))
+        if recovered and not (float(observed_ys.min()) <= y_eval <= float(observed_ys.max())):
+            self.reset()
+            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+                              binary_image=binary, color_binary_image=color_binary,
+                              gradient_binary_image=gradient_binary,
+                              reason='one-side target outside observed lane rows',
+                              tracking_mode=tracking_mode)
         preview_y = float(np.clip(self.config.height * self.config.preview_y_ratio,
                                  observed_ys.min(), observed_ys.max()))
         preview_heading = float(np.arctan(-np.polyval(np.polyder(center_fit), preview_y)))

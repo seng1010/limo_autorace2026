@@ -23,7 +23,7 @@ lane_following_node:
     live_debug_fps: 5.0            # 화면 전달만 제한; 차선 계산 주기는 변경하지 않음
     command_timeout_sec: 0.30
     minimum_confidence: 0.48
-    normal_speed: 0.70            # 유효 직선 차선에서만 적용
+    normal_speed: 0.40            # 유효 직선 차선에서만 적용; 곡선 진입 전 관측 여유 확보
     curve_speed: 0.30             # 곡선 검출 시; 유실 시 curve_recovery_speed
     curve_steering_speed_threshold: 0.35  # 조향 해제 중에는 곡선 속도 유지
     zigzag_speed: 0.18            # 노란 지그재그 우선 서행

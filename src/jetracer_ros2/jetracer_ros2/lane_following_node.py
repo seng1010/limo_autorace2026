@@ -111,7 +111,7 @@ class LaneFollowingNode(Node):
             'live_debug_fps': 5.0,
             'command_timeout_sec': 0.30,
             'minimum_confidence': 0.48,
-            'normal_speed': 0.70,
+            'normal_speed': 0.40,
             'curve_speed': 0.30,
             'curve_steering_speed_threshold': 0.35,
             'zigzag_speed': 0.18,
