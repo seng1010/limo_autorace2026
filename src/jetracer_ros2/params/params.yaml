@@ -25,7 +25,8 @@ lane_following_node:
     lateral_gain: 0.95
     heading_gain: 0.70
     steering_gain: 1.20              # 최종 목표 조향 배율. 1.0=기존, 1.2=20% 증가(최대각 유지)
-    left_reference_gain: 1.15        # 실제 왼쪽 선 하나로 복원한 중심경로 오차 보정
+    left_reference_gain: 1.35        # 왼쪽 기준 강화(기존 1.15). 최대각 제한 유지
+    preview_heading_gain: 0.25      # 더 먼 곳에서 같은 방향으로 급해지는 곡선 선제 보정
     right_reference_gain: 1.0        # 실제 오른쪽 선 하나로 복원한 중심경로 오차 보정
     status_log_interval_sec: 1.0     # 선 종류 추정/confidence/명령 로그 주기. 0=끄기
     max_steer_angle: 0.42
@@ -43,7 +44,8 @@ lane_following_node:
     zigzag_exit_frames: 5
     image_width: 640
     image_height: 480
-    bev_src: [0.30, 0.52, 0.70, 0.52, 0.94, 0.92, 0.06, 0.92]
+    bev_src: [0.18, 0.48, 0.82, 0.48, 1.00, 0.98, 0.00, 0.98]
+    # TL,TR,BR,BL. 아래변은 원본 x=0~width-1 전체 사용. 위변도 확대.
     bev_dst: [0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00]
     detect_white: true                # 흰 점선도 추적/분류. 흰 표식 오검출 시 false로 복귀
     white_lightness_min: 170
@@ -75,6 +77,16 @@ lane_following_node:
     strong_single_inlier_ratio: 0.65     # 강한 한쪽 선은 이전 중심 급변 검사보다 우선
     strong_single_point_multiplier: 1.5
     lookahead_y_ratio: 0.62
+    preview_y_ratio: 0.40
+    low_light_enabled: true
+    low_light_max_gain: 3.0          # 색상 유지 밝기 증폭 상한. 검은 영역은 제외
+    # 아래 거리 모드는 네 모서리 바닥 좌표 실측 후에만 켠다. ROS 재시작 필요.
+    metric_lookahead_enabled: false
+    lookahead_distance_m: 0.40       # 뒤 차축 중심으로부터 목표 전방거리(0.30~0.50m 시험)
+    camera_forward_offset_m: 0.0    # 뒤 차축→카메라 수직 투영점 전방 오프셋, 반드시 실측
+    metric_lateral_scale_m: 0.30    # 횡오차 정규화 거리, 실제 트랙에 맞춰 보정
+    bev_ground_points_m: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # bev_src TL,TR,BR,BL 각각의 [오른쪽 m, 카메라 투영점에서 전방 m]. 0은 미보정.
     smoothing_alpha: 0.35
     zigzag_min_step_px: 8.0
     zigzag_min_span_px: 55.0

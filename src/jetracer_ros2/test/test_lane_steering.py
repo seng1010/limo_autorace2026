@@ -23,7 +23,7 @@ def controller():
                   curve_enter_frames=2, curve_max_steering_ratio=1.0,
                   steering_attack_rate=4.0, steering_release_rate=1.2,
                   steering_reversal_rate=4.0, lateral_gain=0.95, heading_gain=0.70,
-                  left_reference_gain=1.15, right_reference_gain=1.0)
+                  left_reference_gain=1.15, right_reference_gain=1.0, preview_heading_gain=0.25)
     cls = type('Controller', (), {name: scope[name] for name in names})
     instance = cls()
     instance.get_parameter = lambda name: SimpleNamespace(value=params[name])

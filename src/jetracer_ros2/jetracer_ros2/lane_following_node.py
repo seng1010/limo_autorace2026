@@ -92,7 +92,8 @@ class LaneFollowingNode(Node):
             'lateral_gain': 0.95,
             'heading_gain': 0.70,
             'steering_gain': 1.20,
-            'left_reference_gain': 1.15,
+            'left_reference_gain': 1.35,
+            'preview_heading_gain': 0.25,
             'right_reference_gain': 1.0,
             'status_log_interval_sec': 1.0,
             'max_steer_angle': 0.42,
@@ -110,7 +111,7 @@ class LaneFollowingNode(Node):
             'zigzag_exit_frames': 5,
             'image_width': 640,
             'image_height': 480,
-            'bev_src': [0.30, 0.52, 0.70, 0.52, 0.94, 0.92, 0.06, 0.92],
+            'bev_src': [0.18, 0.48, 0.82, 0.48, 1.00, 0.98, 0.00, 0.98],
             'bev_dst': [0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00],
             'detect_white': True,
             'white_lightness_min': 170,
@@ -148,6 +149,14 @@ class LaneFollowingNode(Node):
             'zigzag_min_direction_changes': 1,
             'duplicate_overlap_ratio': 0.30,
             'duplicate_gap_ratio': 0.50,
+            'low_light_enabled': True,
+            'low_light_max_gain': 3.0,
+            'preview_y_ratio': 0.40,
+            'metric_lookahead_enabled': False,
+            'lookahead_distance_m': 0.40,
+            'camera_forward_offset_m': 0.0,
+            'metric_lateral_scale_m': 0.30,
+            'bev_ground_points_m': [0.0] * 8,
         }
         for name, default in values.items():
             self.declare_parameter(name, default)
@@ -155,6 +164,13 @@ class LaneFollowingNode(Node):
     def _pipeline_config(self):
         p = lambda name: self.get_parameter(name).value
         return LanePipelineConfig(
+            low_light_enabled=p('low_light_enabled'), low_light_max_gain=p('low_light_max_gain'),
+            preview_y_ratio=p('preview_y_ratio'),
+            metric_lookahead_enabled=p('metric_lookahead_enabled'),
+            lookahead_distance_m=p('lookahead_distance_m'),
+            camera_forward_offset_m=p('camera_forward_offset_m'),
+            metric_lateral_scale_m=p('metric_lateral_scale_m'),
+            bev_ground_points_m=tuple(p('bev_ground_points_m')),
             width=p('image_width'), height=p('image_height'),
             src_points=tuple(p('bev_src')), dst_points=tuple(p('bev_dst')),
             detect_white=p('detect_white'),
@@ -280,6 +296,7 @@ class LaneFollowingNode(Node):
                 f'lane type(est): L={result.left_type} R={result.right_type} '
                 f'confidence={result.confidence:.2f} usable={usable} '
                 f'reference={reference_side(result)} '
+                f'lookahead={result.lookahead_description} light_gain={result.illumination_gain:.2f} '
                 f'curve_control={self._curve_active} '
                 f'{steering_status}'
                 f'v={cmd.linear.x:.3f} omega={cmd.angular.z:.3f} '
@@ -343,7 +360,8 @@ class LaneFollowingNode(Node):
             result, self.get_parameter('lateral_gain').value,
             self.get_parameter('heading_gain').value,
             self.get_parameter('left_reference_gain').value,
-            self.get_parameter('right_reference_gain').value)
+            self.get_parameter('right_reference_gain').value,
+            self.get_parameter('preview_heading_gain').value)
 
     def _reset_steering(self):
         self._curve_active = False

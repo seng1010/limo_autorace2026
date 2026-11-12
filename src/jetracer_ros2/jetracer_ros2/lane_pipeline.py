@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from jetracer_ros2.lane_attributes import classify_lane
+from jetracer_ros2.lane_vision import compensate_light, GroundLookahead
 
 
 @dataclass
@@ -20,7 +21,7 @@ class LanePipelineConfig:
     width: int = 640
     height: int = 480
     src_points: Tuple[float, ...] = (
-        0.30, 0.52, 0.70, 0.52, 0.94, 0.92, 0.06, 0.92,
+        0.18, 0.48, 0.82, 0.48, 1.00, 0.98, 0.00, 0.98,
     )
     dst_points: Tuple[float, ...] = (
         0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00,
@@ -63,6 +64,14 @@ class LanePipelineConfig:
     duplicate_overlap_ratio: float = 0.30   # 두 쪽 픽셀이 이 비율 이상 겹치면 같은 선
     duplicate_gap_ratio: float = 0.50       # 두 선 간격이 차선 폭의 이 비율보다 좁으면 같은 선
     random_seed: int = 7
+    low_light_enabled: bool = True
+    low_light_max_gain: float = 3.0
+    preview_y_ratio: float = 0.40
+    metric_lookahead_enabled: bool = False
+    lookahead_distance_m: float = 0.40
+    camera_forward_offset_m: float = 0.0
+    metric_lateral_scale_m: float = 0.30
+    bev_ground_points_m: Tuple[float, ...] = (0.0,) * 8
 
 
 @dataclass
@@ -85,6 +94,9 @@ class LaneResult:
     tracking_mode: str = 'auto'
     left_type: str = 'unknown'
     right_type: str = 'unknown'
+    preview_heading_error: float = 0.0
+    lookahead_description: str = 'uncalibrated'
+    illumination_gain: float = 1.0
 
 
 class LanePipeline:
@@ -97,6 +109,10 @@ class LanePipeline:
         self._previous_right: Optional[np.ndarray] = None
         self._previous_width: Optional[float] = None
         self._matrix, self._inverse_matrix = self._perspective_matrices()
+        self.ground = (GroundLookahead(
+            self._normalized_points(config.dst_points), config.bev_ground_points_m,
+            config.camera_forward_offset_m, config.lookahead_distance_m,
+            config.metric_lateral_scale_m) if config.metric_lookahead_enabled else None)
 
     def reset(self) -> None:
         self._previous_left = None
@@ -105,8 +121,8 @@ class LanePipeline:
 
     def _normalized_points(self, values: Tuple[float, ...]) -> np.ndarray:
         points = np.asarray(values, dtype=np.float32).reshape(4, 2).copy()
-        points[:, 0] *= self.config.width
-        points[:, 1] *= self.config.height
+        points[:, 0] *= self.config.width - 1
+        points[:, 1] *= self.config.height - 1
         return points
 
     def _perspective_matrices(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -124,12 +140,14 @@ class LanePipeline:
         hue = hls[:, :, 0]
         lightness = hls[:, :, 1]
         saturation = hls[:, :, 2]
+        local_contrast = lightness.astype(float) - cv2.GaussianBlur(lightness, (31, 31), 0)
 
         color = np.zeros(lightness.shape, dtype=bool)
         if self.config.detect_white:
             color |= (
                 (lightness >= self.config.white_lightness_min)
                 & (saturation <= self.config.white_saturation_max)
+                & ((local_contrast >= 8) | (lightness >= 230))
             )
         if self.config.detect_yellow:
             color |= (
@@ -657,6 +675,8 @@ class LanePipeline:
         bird = cv2.warpPerspective(
             resized, self._matrix, (self.config.width, self.config.height),
         )
+        bird, illumination_gain = compensate_light(
+            bird, self.config.low_light_enabled, self.config.low_light_max_gain)
         binary, color_binary, gradient_binary = self._binary_masks(bird)
         left_y, left_x, right_y, right_x, debug = self._sliding_window_points(
             binary,
@@ -667,6 +687,13 @@ class LanePipeline:
 
         left_fit, left_ratio = self._ransac_quadratic(left_y, left_x)
         right_fit, right_ratio = self._ransac_quadratic(right_y, right_x)
+        # Show the actual camera-space ROI even when geometry validation fails.
+        roi_view = resized.copy()
+        cv2.polylines(roi_view, [np.int32(self._normalized_points(self.config.src_points))],
+                      True, (0, 255, 0), 2)
+        thumb = cv2.resize(roi_view, (160, 120))
+        if debug.shape[0] >= 120 and debug.shape[1] >= 160:
+            debug[-120:, -160:] = thumb
 
         # [1] 왼쪽/오른쪽 탐색이 같은 선을 나눠 잡았으면 '선 하나'로 합친다.
         if (left_fit is not None and right_fit is not None
@@ -814,6 +841,20 @@ class LanePipeline:
         center_fit = 0.5 * (left_fit + right_fit)
         derivative = float(np.polyval(np.polyder(center_fit), y_eval))
         heading_error = float(np.arctan(-derivative))
+        observed_ys = np.concatenate((left_y, right_y))
+        preview_y = float(np.clip(self.config.height * self.config.preview_y_ratio,
+                                 observed_ys.min(), observed_ys.max()))
+        preview_heading = float(np.arctan(-np.polyval(np.polyder(center_fit), preview_y)))
+        lookahead_description = f'uncalibrated y={y_eval:.0f}px'
+        if self.ground is not None:
+            try:
+                lateral_error, heading_error, y_eval = self.ground.evaluate(
+                    center_fit, observed_ys.min(), observed_ys.max())
+            except ValueError as error:
+                return LaneResult(valid=False, debug_image=debug, reason=str(error))
+            center_x = float(np.polyval(center_fit, y_eval))
+            preview_heading = heading_error  # Do not mix image and metric angles.
+            lookahead_description = f'{self.config.lookahead_distance_m:.2f}m rear-axle y={y_eval:.0f}px'
 
         if recovered:
             # 한쪽 선만 보이는 곡선에서는 관측하지 않은 반대쪽 선 때문에 점수를
@@ -875,8 +916,20 @@ class LanePipeline:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
         cv2.putText(debug, f'R: {right_type}', (10, 160),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
+        cv2.putText(debug, f'lookahead: {lookahead_description}', (10, 184),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        cv2.line(debug, (0, int(y_eval)), (self.config.width - 1, int(y_eval)), (0, 255, 0), 1)
+        target_camera = cv2.perspectiveTransform(
+            np.float32([[[center_x, y_eval]]]), self._inverse_matrix)[0, 0]
+        if np.all(np.isfinite(target_camera)):
+            cv2.circle(roi_view, tuple(np.int32(target_camera)), 6, (0, 0, 255), -1)
+            if debug.shape[0] >= 120 and debug.shape[1] >= 160:
+                debug[-120:, -160:] = cv2.resize(roi_view, (160, 120))
         return LaneResult(
             valid=True,
+            preview_heading_error=preview_heading,
+            lookahead_description=lookahead_description,
+            illumination_gain=illumination_gain,
             left_type=left_type,
             right_type=right_type,
             lateral_error=lateral_error,
