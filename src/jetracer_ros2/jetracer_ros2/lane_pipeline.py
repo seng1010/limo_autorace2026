@@ -12,6 +12,8 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
+from jetracer_ros2.lane_attributes import classify_lane
+
 
 @dataclass
 class LanePipelineConfig:
@@ -81,6 +83,8 @@ class LaneResult:
     reason: str = ''
     recovered_side: str = ''   # 한쪽 복구 시 실제로 보고 간 선: 'left' / 'right'
     tracking_mode: str = 'auto'
+    left_type: str = 'unknown'
+    right_type: str = 'unknown'
 
 
 class LanePipeline:
@@ -775,6 +779,7 @@ class LanePipeline:
                 left_y = np.array([], dtype=right_y.dtype)
                 left_x = np.array([], dtype=right_x.dtype)
 
+        measured_left_fit, measured_right_fit = left_fit, right_fit
         left_fit = self._smooth(left_fit, self._previous_left)
         right_fit = self._smooth(right_fit, self._previous_right)
         self._previous_left = left_fit
@@ -864,8 +869,16 @@ class LanePipeline:
             (10, 109), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 255, 160), 2,
         )
 
+        left_type = classify_lane(bird, measured_left_fit, left_y, self.config, zigzag)
+        right_type = classify_lane(bird, measured_right_fit, right_y, self.config, zigzag)
+        cv2.putText(debug, f'L: {left_type}', (10, 136),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
+        cv2.putText(debug, f'R: {right_type}', (10, 160),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
         return LaneResult(
             valid=True,
+            left_type=left_type,
+            right_type=right_type,
             lateral_error=lateral_error,
             heading_error=heading_error,
             confidence=confidence,

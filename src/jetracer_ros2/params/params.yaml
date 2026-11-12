@@ -24,13 +24,18 @@ lane_following_node:
     zigzag_speed: 0.12
     lateral_gain: 0.95
     heading_gain: 0.70
+    steering_gain: 1.20              # 최종 목표 조향 배율. 1.0=기존, 1.2=20% 증가(최대각 유지)
+    left_reference_gain: 1.15        # 실제 왼쪽 선 하나로 복원한 중심경로 오차 보정
+    right_reference_gain: 1.0        # 실제 오른쪽 선 하나로 복원한 중심경로 오차 보정
+    status_log_interval_sec: 1.0     # 선 종류 추정/confidence/명령 로그 주기. 0=끄기
     max_steer_angle: 0.42
     curve_enter_error: 0.55          # 이 오차가 연속되면 곡선 모드 진입
     curve_exit_error: 0.25           # 이 오차 아래에서 곡선 모드 해제
     curve_enter_frames: 2
     curve_max_steering_ratio: 1.0    # 곡선 모드 목표 조향(1.0 = max_steer_angle)
     steering_attack_rate: 4.0        # 초당 조향 증가량(약 0.25초에 0→최대)
-    steering_release_rate: 1.2       # 초당 조향 해제/반전량(약 0.83초에 최대→0)
+    steering_release_rate: 1.2       # 초당 같은 방향 조향 해제량(약 0.83초에 최대→0)
+    steering_reversal_rate: 4.0      # S자 등 목표 부호 반전 시 빠른 방향 전환
     heading_hold_decay: 0.98
     invalid_hold_sec: 0.25            # 차선 놓쳤을 때 마지막 명령 유지 시간 [s]
     reset_after_invalid_frames: 5     # 연속 N프레임 실패 시 이전 차선 기준 초기화
@@ -40,7 +45,7 @@ lane_following_node:
     image_height: 480
     bev_src: [0.30, 0.52, 0.70, 0.52, 0.94, 0.92, 0.06, 0.92]
     bev_dst: [0.22, 0.00, 0.78, 0.00, 0.78, 1.00, 0.22, 1.00]
-    detect_white: false               # 트랙 차선이 노란색이라 흰색 검출 끔
+    detect_white: true                # 흰 점선도 추적/분류. 흰 표식 오검출 시 false로 복귀
     white_lightness_min: 170
     white_saturation_max: 100
     detect_yellow: true               # 노란 차선 검출

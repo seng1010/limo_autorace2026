@@ -19,6 +19,10 @@ from sensor_msgs.msg import CameraInfo, CompressedImage
 from std_msgs.msg import Bool, String
 
 from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
+from jetracer_ros2.lane_attributes import scale_steering
+from jetracer_ros2.lane_steering import (
+    reference_side, tracking_error, curve_release_target, limited_steering,
+)
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 
 
@@ -34,6 +38,7 @@ class LaneFollowingNode(Node):
         self._distortion: Optional[np.ndarray] = None
         self._last_image_ns = 0
         self._last_warning_ns = 0
+        self._last_status_ns = 0
         self._zigzag_hits = 0
         self._zigzag_clears = 0
         self._zigzag_active = False
@@ -86,6 +91,10 @@ class LaneFollowingNode(Node):
             'zigzag_speed': 0.12,
             'lateral_gain': 0.95,
             'heading_gain': 0.70,
+            'steering_gain': 1.20,
+            'left_reference_gain': 1.15,
+            'right_reference_gain': 1.0,
+            'status_log_interval_sec': 1.0,
             'max_steer_angle': 0.42,
             'curve_enter_error': 0.55,
             'curve_exit_error': 0.25,
@@ -93,6 +102,7 @@ class LaneFollowingNode(Node):
             'curve_max_steering_ratio': 1.0,
             'steering_attack_rate': 4.0,
             'steering_release_rate': 1.2,
+            'steering_reversal_rate': 4.0,
             'heading_hold_decay': 0.98,
             'invalid_hold_sec': 0.25,
             'reset_after_invalid_frames': 5,
@@ -190,6 +200,7 @@ class LaneFollowingNode(Node):
             return
         if mode != self._mode:
             self.pipeline.reset()
+            self._reset_steering()
             self._mode = mode
             self.get_logger().info(f'lane mode -> {mode}')
         self.mode_state_pub.publish(String(data=self._mode))
@@ -216,6 +227,8 @@ class LaneFollowingNode(Node):
             self._invalid_frames = 0
         else:
             self._invalid_frames += 1
+            self._curve_hits = 0
+            self._curve_candidate_direction = 0.0
             reset_after = int(self.get_parameter('reset_after_invalid_frames').value)
             if reset_after > 0 and self._invalid_frames % reset_after == 0:
                 # 이전 차선 기준이 오래되면 급변 검사(max_fit_jump_px)에 계속 걸려
@@ -228,6 +241,8 @@ class LaneFollowingNode(Node):
             error = self._mode_error(result)
             raw_steering = float(np.clip(-error, -1.0, 1.0))
             target_steering = self._curve_steering_target(raw_steering)
+            target_steering = scale_steering(
+                target_steering, self.get_parameter('steering_gain').value)
             steering = self._rate_limit_steering(target_steering, now_ns)
             self._held_steering = steering
             speed = (self.get_parameter('zigzag_speed').value
@@ -239,6 +254,8 @@ class LaneFollowingNode(Node):
             self._last_valid_ns = now_ns
         elif self._mode == 'heading_hold' and abs(self._held_steering) > 1e-3:
             self._held_steering *= self.get_parameter('heading_hold_decay').value
+            self._applied_steering = self._held_steering
+            self._last_steering_ns = now_ns
             cmd.linear.x = self.get_parameter('zigzag_speed').value
             cmd.angular.z = inner_angle_to_omega(
                 self._held_steering * self.get_parameter('max_steer_angle').value,
@@ -248,12 +265,29 @@ class LaneFollowingNode(Node):
             # 반사·그림자 등으로 잠깐 놓친 프레임은 마지막 명령을 유지해 덜컥거림을 막는다.
             cmd = self._last_valid_cmd
         else:
+            self._reset_steering()
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
         self.cmd_pub.publish(cmd)
+        interval = float(self.get_parameter('status_log_interval_sec').value)
+        if interval > 0 and (now_ns - self._last_status_ns) / 1e9 >= interval:
+            self._last_status_ns = now_ns
+            steering_status = (
+                f'target_norm={target_steering:+.2f} applied_norm={steering:+.2f} '
+                f'angle_cmd_deg={np.degrees(steering * self.get_parameter("max_steer_angle").value):+.1f} '
+                if usable else 'steering=held_or_stopped '
+            )
+            self.get_logger().info(
+                f'lane type(est): L={result.left_type} R={result.right_type} '
+                f'confidence={result.confidence:.2f} usable={usable} '
+                f'reference={reference_side(result)} '
+                f'curve_control={self._curve_active} '
+                f'{steering_status}'
+                f'v={cmd.linear.x:.3f} omega={cmd.angular.z:.3f} '
+                f'reason={result.reason}')
         self._publish_result(msg, result)
 
     def _curve_steering_target(self, raw_steering):
-        """곡선 진입은 크게 조향하고 작은 오차가 될 때까지 유지한다.
+        """곡선 진입은 크게 조향하고 오차 감소에 따라 목표 조향을 푼다.
 
         한 프레임의 노이즈로 최대 조향이 걸리지 않도록 연속 프레임을 확인하고,
         진입/탈출 임계값을 다르게 둬 곡선 경계에서 상태가 흔들리지 않게 한다.
@@ -283,41 +317,43 @@ class LaneFollowingNode(Node):
 
         if self._curve_active:
             ratio = self.get_parameter('curve_max_steering_ratio').value
-            return float(np.clip(self._curve_direction * ratio, -1.0, 1.0))
+            return self._curve_direction * curve_release_target(
+                magnitude, enter, exit_error, float(np.clip(ratio, 0.0, 1.0)))
         return raw_steering
 
     def _rate_limit_steering(self, target, now_ns):
-        """곡선 진입은 빠르게, 탈출과 방향 전환은 천천히 적용한다."""
+        """진입/반전은 빠르게, 같은 방향의 조향 해제는 천천히 적용한다."""
         previous = self._applied_steering
-        same_direction = previous == 0.0 or previous * target >= 0.0
-        increasing = same_direction and abs(target) > abs(previous)
-        parameter = 'steering_attack_rate' if increasing else 'steering_release_rate'
-        rate = max(1e-4, float(self.get_parameter(parameter).value))
         if self._last_steering_ns:
             delta_sec = (now_ns - self._last_steering_ns) / 1e9
-            delta_sec = float(np.clip(delta_sec, 0.01, 0.20))
         else:
             delta_sec = 0.05
         self._last_steering_ns = now_ns
-        maximum_step = rate * delta_sec
-        delta = float(np.clip(target - previous, -maximum_step, maximum_step))
-        self._applied_steering = float(np.clip(previous + delta, -1.0, 1.0))
+        self._applied_steering = limited_steering(
+            previous, target, delta_sec,
+            self.get_parameter('steering_attack_rate').value,
+            self.get_parameter('steering_release_rate').value,
+            self.get_parameter('steering_reversal_rate').value)
         if abs(self._applied_steering) < 1e-4:
             self._applied_steering = 0.0
         return self._applied_steering
 
     def _mode_error(self, result):
-        lateral = result.lateral_error
-        if self._mode in ('left', 'right'):
-            y = self.get_parameter('image_height').value * self.get_parameter('lookahead_y_ratio').value
-            width = self.get_parameter('lane_width_px').value
-            target_x = self.get_parameter('image_width').value / 2.0
-            if self._mode == 'left' and result.left_fit is not None:
-                lateral = (np.polyval(result.left_fit, y) + width / 2.0 - target_x) / (target_x)
-            elif self._mode == 'right' and result.right_fit is not None:
-                lateral = (np.polyval(result.right_fit, y) - width / 2.0 - target_x) / target_x
-        return (self.get_parameter('lateral_gain').value * lateral
-                + self.get_parameter('heading_gain').value * result.heading_error)
+        return tracking_error(
+            result, self.get_parameter('lateral_gain').value,
+            self.get_parameter('heading_gain').value,
+            self.get_parameter('left_reference_gain').value,
+            self.get_parameter('right_reference_gain').value)
+
+    def _reset_steering(self):
+        self._curve_active = False
+        self._curve_direction = 0.0
+        self._curve_candidate_direction = 0.0
+        self._curve_hits = 0
+        self._applied_steering = self._held_steering = 0.0
+        self._last_steering_ns = 0
+        self._last_valid_cmd = None
+        self._last_valid_ns = 0
 
     def _update_zigzag(self, detected):
         if detected:
@@ -350,9 +386,11 @@ class LaneFollowingNode(Node):
     def _watchdog_callback(self):
         if self._last_image_ns == 0 or ((self.get_clock().now().nanoseconds - self._last_image_ns) / 1e9
                                        > self.get_parameter('command_timeout_sec').value):
+            self._reset_steering()
             self.cmd_pub.publish(Twist())
 
     def _safe_stop(self, reason):
+        self._reset_steering()
         self.cmd_pub.publish(Twist())
         self._warn(reason)
 

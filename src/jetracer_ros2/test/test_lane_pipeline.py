@@ -166,3 +166,23 @@ def test_upper_marking_without_bottom_connection_is_rejected():
     result = LanePipeline(_identity_config()).process(image)
 
     assert not result.valid
+
+
+def test_mixed_yellow_solid_and_white_dashed_attributes():
+    config = _identity_config()
+    config.detect_yellow = True
+    config.detect_white = True
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.line(image, (140, 0), (140, 479), (0, 220, 255), 8)
+    for start in range(0, 480, 80):
+        cv2.line(image, (500, start), (500, start + 39), (255, 255, 255), 8)
+    result = LanePipeline(config).process(image)
+    assert result.valid
+    assert result.left_type == 'yellow/solid/straight'
+    assert result.right_type == 'white/dashed/straight'
+
+
+def test_missing_boundary_is_not_classified_as_paint():
+    result = LanePipeline(_identity_config()).process(_synthetic_lane(missing_right=True))
+    assert result.valid
+    assert result.right_type == 'unobserved'
