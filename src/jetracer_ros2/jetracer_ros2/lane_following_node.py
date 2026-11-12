@@ -99,9 +99,15 @@ class LaneFollowingNode(Node):
             'yellow_saturation_min': 80,
             'yellow_lightness_min': 60,
             'gradient_min': 35,
+            'gradient_require_color_support': True,
+            'gradient_support_dilation': 9,
             'morphology_kernel': 3,
             'windows': 10,
             'window_margin': 55,
+            'opposite_window_margin': 30,
+            'search_opposite_in_single_mode': False,
+            'histogram_min_peak': 12,
+            'bottom_tracking_windows': 3,
             'recenter_min_pixels': 35,
             'fit_min_points': 120,
             'polynomial_degree': 3,
@@ -116,6 +122,8 @@ class LaneFollowingNode(Node):
             'zigzag_min_step_px': 8.0,
             'zigzag_min_span_px': 55.0,
             'zigzag_min_direction_changes': 1,
+            'duplicate_overlap_ratio': 0.30,
+            'duplicate_gap_ratio': 0.50,
         }
         for name, default in values.items():
             self.declare_parameter(name, default)
@@ -132,8 +140,15 @@ class LaneFollowingNode(Node):
             yellow_hue_min=p('yellow_hue_min'), yellow_hue_max=p('yellow_hue_max'),
             yellow_saturation_min=p('yellow_saturation_min'),
             yellow_lightness_min=p('yellow_lightness_min'),
-            gradient_min=p('gradient_min'), morphology_kernel=p('morphology_kernel'),
+            gradient_min=p('gradient_min'),
+            gradient_require_color_support=p('gradient_require_color_support'),
+            gradient_support_dilation=p('gradient_support_dilation'),
+            morphology_kernel=p('morphology_kernel'),
             windows=p('windows'), window_margin=p('window_margin'),
+            opposite_window_margin=p('opposite_window_margin'),
+            search_opposite_in_single_mode=p('search_opposite_in_single_mode'),
+            histogram_min_peak=p('histogram_min_peak'),
+            bottom_tracking_windows=p('bottom_tracking_windows'),
             recenter_min_pixels=p('recenter_min_pixels'), fit_min_points=p('fit_min_points'),
             polynomial_degree=p('polynomial_degree'),
             ransac_iterations=p('ransac_iterations'), ransac_residual_px=p('ransac_residual_px'),
@@ -142,7 +157,9 @@ class LaneFollowingNode(Node):
             max_fit_jump_px=p('max_fit_jump_px'), lookahead_y_ratio=p('lookahead_y_ratio'),
             smoothing_alpha=p('smoothing_alpha'), zigzag_min_step_px=p('zigzag_min_step_px'),
             zigzag_min_span_px=p('zigzag_min_span_px'),
-            zigzag_min_direction_changes=p('zigzag_min_direction_changes'))
+            zigzag_min_direction_changes=p('zigzag_min_direction_changes'),
+            duplicate_overlap_ratio=p('duplicate_overlap_ratio'),
+            duplicate_gap_ratio=p('duplicate_gap_ratio'))
 
     def _camera_info_callback(self, msg: CameraInfo):
         if len(msg.k) == 9 and msg.k[0] > 0.0:
@@ -169,7 +186,8 @@ class LaneFollowingNode(Node):
         if self._camera_matrix is not None and self._distortion is not None:
             image = cv2.undistort(image, self._camera_matrix, self._distortion)
         try:
-            result = self.pipeline.process(image)
+            tracking_mode = self._mode if self._mode in ('left', 'right') else 'auto'
+            result = self.pipeline.process(image, tracking_mode=tracking_mode)
         except (cv2.error, ValueError, TypeError, np.linalg.LinAlgError) as error:
             self._safe_stop(f'lane processing failed: {error}')
             return

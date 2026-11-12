@@ -43,9 +43,15 @@ lane_following_node:
     yellow_saturation_min: 80
     yellow_lightness_min: 60
     gradient_min: 35
+    gradient_require_color_support: true  # gradient는 차선 색상 주변 보강에만 사용
+    gradient_support_dilation: 9
     morphology_kernel: 3
     windows: 10
     window_margin: 55
+    opposite_window_margin: 30       # 기준선 반대편은 예상 위치 주변만 검색
+    search_opposite_in_single_mode: false  # left/right 모드는 기준선 하나만 실제 추적
+    histogram_min_peak: 12           # 빈 영상 절반의 임의 argmax 방지
+    bottom_tracking_windows: 3       # 하단과 연결되지 않은 상단 표식 거부
     recenter_min_pixels: 35
     fit_min_points: 120
     polynomial_degree: 3
@@ -60,6 +66,8 @@ lane_following_node:
     zigzag_min_step_px: 8.0
     zigzag_min_span_px: 55.0
     zigzag_min_direction_changes: 1
+    duplicate_overlap_ratio: 0.30
+    duplicate_gap_ratio: 0.50
 
 stop_line_node:
   ros__parameters:

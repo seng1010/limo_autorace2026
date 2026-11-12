@@ -4,14 +4,15 @@ import numpy as np
 from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
 
 
-def _synthetic_lane(offset=0, missing_right=False):
+def _synthetic_lane(offset=0, missing_left=False, missing_right=False):
     image = np.zeros((480, 640, 3), dtype=np.uint8)
     y = np.arange(480, dtype=np.float32)
     curve = 0.00035 * (y - 240.0) ** 2
     left = 140.0 + offset + curve
     right = left + 360.0
     left_points = np.int32(np.column_stack((left, y))).reshape(-1, 1, 2)
-    cv2.polylines(image, [left_points], False, (255, 255, 255), 10)
+    if not missing_left:
+        cv2.polylines(image, [left_points], False, (255, 255, 255), 10)
     if not missing_right:
         right_points = np.int32(np.column_stack((right, y))).reshape(-1, 1, 2)
         cv2.polylines(image, [right_points], False, (255, 255, 255), 10)
@@ -103,3 +104,53 @@ def test_detects_yellow_lanes_when_enabled():
     result = LanePipeline(yellow_config).process(yellow)
     assert result.valid
     assert abs(result.lateral_error) < 0.25
+
+
+def test_gradient_does_not_create_lane_without_enabled_colour():
+    """White road markings must not leak through gradient in yellow-only mode."""
+    config = _identity_config()
+    config.detect_white = False
+    config.detect_yellow = True
+    config.gradient_min = 20
+    config.gradient_require_color_support = True
+
+    result = LanePipeline(config).process(_synthetic_lane())
+
+    assert not result.valid
+    assert result.color_binary_image is not None
+    assert cv2.countNonZero(result.color_binary_image) == 0
+    assert cv2.countNonZero(result.gradient_binary_image) == 0
+
+
+def test_left_mode_uses_left_anchor_only():
+    pipeline = LanePipeline(_identity_config())
+    image = _synthetic_lane(missing_right=True)
+    cv2.line(image, (620, 0), (620, 479), (255, 255, 255), 12)
+
+    result = pipeline.process(image, tracking_mode='left')
+
+    assert result.valid
+    assert result.recovered_side == 'left'
+    assert result.tracking_mode == 'left'
+
+
+def test_right_mode_uses_right_anchor_only():
+    pipeline = LanePipeline(_identity_config())
+    image = _synthetic_lane(missing_left=True)
+    cv2.line(image, (20, 0), (20, 479), (255, 255, 255), 12)
+
+    result = pipeline.process(image, tracking_mode='right')
+
+    assert result.valid
+    assert result.recovered_side == 'right'
+    assert result.tracking_mode == 'right'
+
+
+def test_upper_marking_without_bottom_connection_is_rejected():
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.line(image, (150, 40), (150, 210), (255, 255, 255), 12)
+    cv2.line(image, (510, 40), (510, 210), (255, 255, 255), 12)
+
+    result = LanePipeline(_identity_config()).process(image)
+
+    assert not result.valid
