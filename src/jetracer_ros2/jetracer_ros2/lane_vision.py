@@ -23,7 +23,8 @@ class GroundLookahead:
     Four measured ground points correspond to the four bev_src corners. Offset
     is the camera's forward displacement from the rear axle (not viewing range).
     """
-    def __init__(self, bird_corners, ground_points, offset, distance, lateral_scale):
+    def __init__(self, bird_corners, ground_points, offset, distance, lateral_scale,
+                 max_near_clamp_m=0.0, edge_margin_m=0.0):
         ground = np.asarray(ground_points, np.float32).reshape(4, 2)
         if (not np.all(np.isfinite(ground)) or not cv2.isContourConvex(ground)
                 or abs(cv2.contourArea(ground)) < 1e-4):
@@ -31,11 +32,16 @@ class GroundLookahead:
         if (not np.all(np.isfinite([distance, lateral_scale, offset]))
                 or distance <= 0 or lateral_scale <= 0):
             raise ValueError('invalid metric lookahead distance/scale/offset')
+        if (not np.all(np.isfinite([max_near_clamp_m, edge_margin_m]))
+                or max_near_clamp_m < 0 or edge_margin_m < 0):
+            raise ValueError('invalid metric edge allowance')
         self.matrix = cv2.getPerspectiveTransform(np.float32(bird_corners), ground)
         self.offset, self.distance, self.scale = offset, distance, lateral_scale
+        self.max_near_clamp_m = max_near_clamp_m
+        self.edge_margin_m = edge_margin_m
 
     def evaluate(self, fit, lo, hi):
-        x, heading, y = self.evaluate_target(fit, lo, hi)
+        x, heading, y, _ = self.evaluate_target(fit, lo, hi)
         return float(np.clip(x / self.scale, -1.5, 1.5)), heading, y
 
     def evaluate_target(self, fit, lo, hi):
@@ -47,9 +53,13 @@ class GroundLookahead:
         if not np.all(np.isfinite(world)) or not np.all(np.diff(world[:, 1]) < 0):
             raise ValueError('ground calibration must map upper image to farther ground')
         forward, lateral = world[::-1, 1], world[::-1, 0]
-        if not forward[0] <= self.distance <= forward[-1]:
+        if self.distance > forward[-1]:
             raise ValueError('lookahead distance outside observed ground range')
-        x = float(np.interp(self.distance, forward, lateral))
-        slope = float(np.interp(self.distance, forward, np.gradient(lateral, forward)))
-        y = float(np.interp(self.distance, forward, ys[::-1]))
-        return x, float(np.arctan(slope)), y
+        effective = max(self.distance, float(forward[0]) + self.edge_margin_m)
+        if (effective > forward[-1]
+                or effective - self.distance > self.max_near_clamp_m + 1e-8):
+            raise ValueError('lookahead too close to or outside observed ground range')
+        x = float(np.interp(effective, forward, lateral))
+        slope = float(np.interp(effective, forward, np.gradient(lateral, forward)))
+        y = float(np.interp(effective, forward, ys[::-1]))
+        return x, float(np.arctan(slope)), y, effective

@@ -94,13 +94,16 @@ lane_following_node:
     preview_y_ratio: 0.76          # 기존 미리보기의 원본 영상 y≈62.9% 유지
     low_light_enabled: true
     low_light_max_gain: 3.0          # 색상 유지 밝기 증폭 상한. 검은 영역은 제외
-    # 아래 거리 모드는 네 모서리 바닥 좌표 실측 후에만 켠다. ROS 재시작 필요.
-    metric_lookahead_enabled: false
-    lookahead_distance_m: 0.40       # 뒤 차축 중심으로부터 목표 전방거리(0.30~0.50m 시험)
+    # 네 ROI 모서리의 실측 추정값. 실제 주행 전 명령 없는 디버거에서 확인한다.
+    metric_lookahead_enabled: false   # launch의 metric_ackermann:=true로만 시험 활성화
+    lookahead_distance_m: 0.40        # 요청 목표. 보이지 않으면 허용 범위 안에서 가장 가까운 관측점 사용
     camera_forward_offset_m: 0.184  # 공식 LIMO ROS2 URDF 명목값(0.100+0.084m); LIMO Pro 실차에서 확인
     metric_lateral_scale_m: 0.30    # 횡오차 정규화 거리, 실제 트랙에 맞춰 보정
-    bev_ground_points_m: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    # bev_src TL,TR,BR,BL 각각의 [오른쪽 m, 카메라 투영점에서 전방 m]. 0은 미보정.
+    bev_ground_points_m: [-0.24, 1.326, 0.24, 1.326, 0.22, 0.421, -0.22, 0.421]
+    # bev_src TL,TR,BR,BL 각각의 [오른쪽 m, 카메라 투영점에서 전방 m].
+    # 사용자 실측: 뒤 차축 기준 앞 1.51/0.605m, 좌우 0.24/0.22m; 전방에서 0.184m 차감.
+    metric_max_near_clamp_m: 0.25     # 요청 거리보다 가까운 목표가 안 보일 때 허용하는 최대 부족분
+    metric_edge_margin_m: 0.02        # 마지막 관측 픽셀 자체 대신 2cm 안쪽의 목표 사용
     smoothing_alpha: 0.35
     zigzag_min_step_px: 8.0
     zigzag_min_span_px: 55.0

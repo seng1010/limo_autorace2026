@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import pytest
 from types import SimpleNamespace
 
 from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
@@ -58,9 +59,42 @@ def test_metric_lookahead_30_to_50_cm_and_camera_offset():
     assert rows[0] > rows[1] > rows[2]
     # Moving the camera forward means the same rear-axle target is nearer to it.
     assert ground(offset=0.2).evaluate(np.array([0, 319.5]), 0, 479)[2] > rows[1]
-    x, heading, y = ground(distance=.4, offset=.184).evaluate_target(
+    x, heading, y, used = ground(distance=.4, offset=.184).evaluate_target(
         np.array([0, 319.5]), 0, 479)
     assert abs(x) < 1e-5 and abs(heading) < 1e-5 and 0 <= y <= 479
+    assert used == .4
+
+
+def test_measured_roi_clamps_requested_target_to_visible_ground_edge():
+    bird = [[.22 * 639, 0], [.78 * 639, 0], [.78 * 639, 479], [.22 * 639, 479]]
+    measured = [-.24, 1.326, .24, 1.326, .22, .421, -.22, .421]
+    ground = GroundLookahead(bird, measured, .184, .4, .3, .25, .02)
+    x, heading, y, used = ground.evaluate_target(np.array([0, 319.5]), 0, 479)
+    assert abs(x) < .001 and abs(heading) < .001
+    assert used == pytest.approx(.625, abs=.001)
+    assert 0 <= y < 479
+    # If the near lane is missing, never extrapolate more than the allowance.
+    with pytest.raises(ValueError, match='too close'):
+        ground.evaluate_target(np.array([0, 319.5]), 0, 300)
+    far = GroundLookahead(bird, measured, .184, .7, .3, .25, .02)
+    assert far.evaluate_target(np.array([0, 319.5]), 0, 479)[3] == .7
+
+
+def test_measured_roi_pipeline_uses_effective_not_requested_distance():
+    calibrated = LanePipelineConfig(
+        detect_yellow=True, metric_lookahead_enabled=True,
+        camera_forward_offset_m=.184,
+        bev_ground_points_m=(-.24, 1.326, .24, 1.326, .22, .421, -.22, .421))
+    pipeline = LanePipeline(calibrated)
+    bird = np.zeros((480, 640, 3), np.uint8)
+    for x in (140, 500):
+        cv2.line(bird, (x, 0), (x, 479), (0, 255, 255), 12)
+    camera = cv2.warpPerspective(bird, pipeline._inverse_matrix, (640, 480))
+    result = pipeline.process(camera)
+    assert result.valid
+    assert result.target_forward_m == pytest.approx(.625, abs=.01)
+    assert abs(result.target_lateral_m) < .01
+    assert '0.40m requested' in result.lookahead_description
 
 
 def test_metric_pipeline_exposes_rear_axle_target_only_when_calibrated():

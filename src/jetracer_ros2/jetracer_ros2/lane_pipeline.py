@@ -73,6 +73,8 @@ class LanePipelineConfig:
     camera_forward_offset_m: float = 0.0
     metric_lateral_scale_m: float = 0.30
     bev_ground_points_m: Tuple[float, ...] = (0.0,) * 8
+    metric_max_near_clamp_m: float = 0.25
+    metric_edge_margin_m: float = 0.02
 
 
 @dataclass
@@ -118,7 +120,8 @@ class LanePipeline:
         self.ground = (GroundLookahead(
             self._normalized_points(config.dst_points), config.bev_ground_points_m,
             config.camera_forward_offset_m, config.lookahead_distance_m,
-            config.metric_lateral_scale_m) if config.metric_lookahead_enabled else None)
+            config.metric_lateral_scale_m, config.metric_max_near_clamp_m,
+            config.metric_edge_margin_m) if config.metric_lookahead_enabled else None)
 
     def reset(self) -> None:
         self._previous_left = None
@@ -889,16 +892,17 @@ class LanePipeline:
         target_forward_m = None
         if self.ground is not None:
             try:
-                target_lateral_m, heading_error, y_eval = self.ground.evaluate_target(
+                target_lateral_m, heading_error, y_eval, target_forward_m = self.ground.evaluate_target(
                     center_fit, observed_ys.min(), observed_ys.max())
             except ValueError as error:
                 return LaneResult(valid=False, debug_image=debug, bev_image=bird, reason=str(error))
-            target_forward_m = self.config.lookahead_distance_m
             lateral_error = float(np.clip(
                 target_lateral_m / self.config.metric_lateral_scale_m, -1.5, 1.5))
             center_x = float(np.polyval(center_fit, y_eval))
             preview_heading = heading_error  # Do not mix image and metric angles.
-            lookahead_description = f'{self.config.lookahead_distance_m:.2f}m rear-axle y={y_eval:.0f}px'
+            lookahead_description = (
+                f'{self.config.lookahead_distance_m:.2f}m requested, '
+                f'{target_forward_m:.2f}m used from rear axle y={y_eval:.0f}px')
 
         if recovered:
             # 한쪽 선만 보이는 곡선에서는 관측하지 않은 반대쪽 선 때문에 점수를
