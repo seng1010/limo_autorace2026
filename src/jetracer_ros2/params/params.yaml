@@ -18,6 +18,9 @@ lane_following_node:
     mode_topic: 'mission/lane_mode'
     use_camera_info: true
     publish_debug: true
+    publish_commands: true         # 시작 시 적용. lane_debug launch는 false로 덮어씀
+    live_debug_enabled: false      # NoMachine 데스크톱 GUI. 저장 기능 없음
+    live_debug_fps: 5.0            # 화면 전달만 제한; 차선 계산 주기는 변경하지 않음
     command_timeout_sec: 0.30
     minimum_confidence: 0.48
     normal_speed: 0.25

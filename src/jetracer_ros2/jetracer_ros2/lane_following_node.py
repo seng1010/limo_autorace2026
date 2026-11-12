@@ -6,6 +6,7 @@ This node never publishes ``/cmd_vel``.  It publishes a proposed command on
 
 import os
 import sys
+import time
 from typing import Optional
 
 import cv2
@@ -14,6 +15,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist, Vector3Stamped
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, CompressedImage
 from std_msgs.msg import Bool, String
@@ -24,6 +26,7 @@ from jetracer_ros2.lane_steering import (
     reference_side, tracking_error, curve_release_target, limited_steering,
 )
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
+from jetracer_ros2.live_debug_view import LiveViewer
 
 
 VALID_MODES = {'center', 'left', 'right', 'heading_hold'}
@@ -56,8 +59,19 @@ class LaneFollowingNode(Node):
         self._last_valid_cmd: Optional[Twist] = None
         self._last_valid_ns = 0
 
-        self.cmd_pub = self.create_publisher(
-            Twist, self.get_parameter('output_topic').value, 10)
+        self.commands_enabled = self.get_parameter('publish_commands').value
+        self.cmd_pub = (self.create_publisher(Twist, self.get_parameter('output_topic').value, 10)
+                        if self.commands_enabled else None)
+        self.viewer = None
+        self._actual_cmd = None
+        self._actual_cmd_time = 0.0
+        if self.get_parameter('live_debug_enabled').value:
+            try:
+                self.viewer = LiveViewer(float(self.get_parameter('live_debug_fps').value))
+                self.actual_cmd_sub = self.create_subscription(
+                    Twist, '/cmd_vel', self._actual_cmd_callback, qos_profile_sensor_data)
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.get_logger().warn(f'Live debugger unavailable: {exc}')
         self.model_pub = self.create_publisher(
             Vector3Stamped, '/lane/model', 10)
         self.debug_pub = self.create_publisher(
@@ -77,7 +91,7 @@ class LaneFollowingNode(Node):
         self.watchdog = self.create_timer(0.05, self._watchdog_callback)
         self.get_logger().info(
             f"lane follower ready: {self.get_parameter('image_topic').value} -> "
-            f"{self.get_parameter('output_topic').value}")
+            f"{self.get_parameter('output_topic').value}; command output={self.commands_enabled}")
 
     def _declare_parameters(self):
         values = {
@@ -87,6 +101,9 @@ class LaneFollowingNode(Node):
             'mode_topic': 'mission/lane_mode',
             'use_camera_info': True,
             'publish_debug': True,
+            'publish_commands': True,  # Startup-only. False creates no command publisher.
+            'live_debug_enabled': False,
+            'live_debug_fps': 5.0,
             'command_timeout_sec': 0.30,
             'minimum_confidence': 0.48,
             'normal_speed': 0.25,
@@ -232,6 +249,7 @@ class LaneFollowingNode(Node):
         if image is None:
             self._safe_stop('image decode failed')
             return
+        raw_image = image
         if self._camera_matrix is not None and self._distortion is not None:
             image = cv2.undistort(image, self._camera_matrix, self._distortion)
         try:
@@ -292,7 +310,7 @@ class LaneFollowingNode(Node):
         else:
             self._reset_steering()
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
-        self.cmd_pub.publish(cmd)
+        self._publish_command(cmd)
         interval = float(self.get_parameter('status_log_interval_sec').value)
         if interval > 0 and (now_ns - self._last_status_ns) / 1e9 >= interval:
             self._last_status_ns = now_ns
@@ -312,7 +330,39 @@ class LaneFollowingNode(Node):
                 f'{steering_status}'
                 f'v={cmd.linear.x:.3f} omega={cmd.angular.z:.3f} '
                 f'reason={result.reason}')
+        if self.viewer and self.viewer.wants_frame():
+            state = dict(
+                received_mono=time.monotonic(), source_stamp_ns=msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec,
+                commands_enabled=self.commands_enabled, valid=bool(result.valid), usable=bool(usable),
+                confidence=float(result.confidence), reason=result.reason, mode=self._mode,
+                reference=reference_side(result), left_type=result.left_type, right_type=result.right_type,
+                lateral=float(result.lateral_error), heading_rad=float(result.heading_error),
+                shape_span=float(result.curve_heading_span), curve_weight=float(self._curve_weight),
+                curve_control=bool(self._curve_active), lookahead=result.lookahead_description,
+                angle_cmd_deg=float(np.degrees(self._applied_steering * self.get_parameter('max_steer_angle').value)),
+                lane_v=float(cmd.linear.x), lane_omega=float(cmd.angular.z), actual_cmd=self._actual_cmd,
+                actual_cmd_age_sec=round(time.monotonic() - self._actual_cmd_time, 2) if self._actual_cmd_time else None)
+            self.viewer.submit(dict(
+                state=state, raw=raw_image,
+                camera=cv2.resize(image, (self.pipeline.config.width, self.pipeline.config.height)),
+                bev=result.bev_image, windows=result.debug_image, binary=result.binary_image,
+                color=result.color_binary_image, gradient=result.gradient_binary_image,
+                left_fit=result.left_fit, right_fit=result.right_fit, target_bev_xy=result.target_bev_xy,
+                inverse_matrix=self.pipeline._inverse_matrix,
+                roi=self.pipeline._normalized_points(self.pipeline.config.src_points)))
         self._publish_result(msg, result)
+
+    def _publish_command(self, command):
+        if self.cmd_pub is not None:
+            self.cmd_pub.publish(command)
+
+    def _actual_cmd_callback(self, msg):
+        self._actual_cmd = dict(v=round(float(msg.linear.x), 3), omega=round(float(msg.angular.z), 3))
+        self._actual_cmd_time = time.monotonic()
+
+    def close_viewer(self):
+        if self.viewer:
+            self.viewer.close()
 
     def _update_curve_geometry(self, result):
         """Require measured bending on consecutive valid images before boosting."""
@@ -438,14 +488,21 @@ class LaneFollowingNode(Node):
             self.debug_pub.publish(debug)
 
     def _watchdog_callback(self):
+        if self.viewer:
+            message = self.viewer.poll_message()
+            if message:
+                if 'unavailable' in message:
+                    self.get_logger().warn(message)
+                else:
+                    self.get_logger().info(message)
         if self._last_image_ns == 0 or ((self.get_clock().now().nanoseconds - self._last_image_ns) / 1e9
                                        > self.get_parameter('command_timeout_sec').value):
             self._reset_steering()
-            self.cmd_pub.publish(Twist())
+            self._publish_command(Twist())
 
     def _safe_stop(self, reason):
         self._reset_steering()
-        self.cmd_pub.publish(Twist())
+        self._publish_command(Twist())
         self._warn(reason)
 
     def _warn(self, text):
@@ -456,16 +513,18 @@ class LaneFollowingNode(Node):
 
 
 def main(args=None):
-    argv = sys.argv if args is None else args
+    argv = sys.argv[1:] if args is None else args
     params = os.path.join(get_package_share_directory('jetracer_ros2'), 'params', 'params.yaml')
-    rclpy.init(args=[argv[0], '--ros-args', '--params-file', params])
+    rclpy.init(args=[sys.argv[0], '--ros-args', '--params-file', params, '--'] + list(argv))
     node = LaneFollowingNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.cmd_pub.publish(Twist())
+        if rclpy.ok():
+            node._publish_command(Twist())
+        node.close_viewer()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

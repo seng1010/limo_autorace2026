@@ -86,6 +86,8 @@ class LaneResult:
     left_fit: Optional[np.ndarray] = None
     right_fit: Optional[np.ndarray] = None
     debug_image: Optional[np.ndarray] = None
+    bev_image: Optional[np.ndarray] = None
+    target_bev_xy: Optional[Tuple[float, float]] = None
     binary_image: Optional[np.ndarray] = None
     color_binary_image: Optional[np.ndarray] = None
     gradient_binary_image: Optional[np.ndarray] = None
@@ -724,7 +726,7 @@ class LanePipeline:
 
         if left_fit is None and right_fit is None:
             return LaneResult(
-                valid=False, debug_image=debug, binary_image=binary,
+                valid=False, debug_image=debug, bev_image=bird, binary_image=binary,
                 color_binary_image=color_binary,
                 gradient_binary_image=gradient_binary,
                 reason='not enough lane pixels', tracking_mode=tracking_mode,
@@ -761,7 +763,7 @@ class LanePipeline:
                     candidates.append((jump, -points, side, cand_left, cand_right, self._expected_width()))
                 if not candidates:
                     return LaneResult(
-                        valid=False, debug_image=debug, binary_image=binary,
+                        valid=False, debug_image=debug, bev_image=bird, binary_image=binary,
                         color_binary_image=color_binary,
                         gradient_binary_image=gradient_binary,
                         reason='lane geometry sanity check failed',
@@ -785,7 +787,7 @@ class LanePipeline:
             if (not self._jump_ok(left_fit, right_fit)
                     and not self._strong_single_line(only_ratio, only_y, only_points)):
                 return LaneResult(
-                    valid=False, debug_image=debug, binary_image=binary,
+                    valid=False, debug_image=debug, bev_image=bird, binary_image=binary,
                     color_binary_image=color_binary,
                     gradient_binary_image=gradient_binary,
                     reason='lane geometry sanity check failed',
@@ -852,7 +854,7 @@ class LanePipeline:
                 lateral_error, heading_error, y_eval = self.ground.evaluate(
                     center_fit, observed_ys.min(), observed_ys.max())
             except ValueError as error:
-                return LaneResult(valid=False, debug_image=debug, reason=str(error))
+                return LaneResult(valid=False, debug_image=debug, bev_image=bird, reason=str(error))
             center_x = float(np.polyval(center_fit, y_eval))
             preview_heading = heading_error  # Do not mix image and metric angles.
             lookahead_description = f'{self.config.lookahead_distance_m:.2f}m rear-axle y={y_eval:.0f}px'
@@ -945,6 +947,8 @@ class LanePipeline:
             left_fit=left_fit,
             right_fit=right_fit,
             debug_image=debug,
+            bev_image=bird,
+            target_bev_xy=(float(center_x), float(y_eval)),
             binary_image=binary,
             color_binary_image=color_binary,
             gradient_binary_image=gradient_binary,

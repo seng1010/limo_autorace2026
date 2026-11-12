@@ -1,0 +1,162 @@
+"""Viewer projection, overload handling, and manual-mode command isolation."""
+import ast
+from pathlib import Path
+import queue
+from types import SimpleNamespace
+
+import cv2
+import numpy as np
+
+from jetracer_ros2.live_debug_view import LiveViewer, render_view, render_grid, path_layers, VIEW_NAMES
+from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
+
+
+def sample_packet(valid=True):
+    image = np.zeros((480, 640, 3), np.uint8)
+    return dict(raw=image, camera=image, bev=image, windows=image,
+                binary=np.zeros((480, 640), np.uint8), color=None, gradient=None,
+                state=dict(valid=valid, reference='both'),
+                left_fit=np.array([0., 140.]), right_fit=np.array([0., 500.]),
+                target_bev_xy=(320., 300.), inverse_matrix=np.eye(3),
+                roi=np.float32([[100, 240], [540, 240], [639, 479], [0, 479]]))
+
+
+def test_projection_uses_actual_pipeline_transform():
+    packet = sample_packet()
+    packet['inverse_matrix'] = np.array([[.5, 0, 20], [0, .5, 30], [0, 0, 1.]])
+    layers = path_layers(packet, camera=True)
+    assert np.allclose(layers['center'][:, 0], 180.)
+    assert np.allclose(layers['center'][0], [180., 30.])
+    result = render_view(packet, 'overlay', dict(roi=False))
+    assert np.any(result != 0)
+    assert not packet['camera'].any()  # Rendering must not mutate inference buffers.
+
+
+def test_invalid_result_does_not_show_old_path():
+    packet = sample_packet(valid=False)
+    assert path_layers(packet, camera=True) == {}
+    assert not render_view(packet, 'overlay', dict(roi=False)).any()
+
+
+def test_layer_toggles_and_inferred_boundary():
+    packet = sample_packet()
+    off = dict(roi=False, left=False, right=False, center=False, target=False)
+    assert not render_view(packet, 'overlay', off).any()
+    on = {**off, 'left': True}
+    measured = render_view(packet, 'bev', on)
+    packet['state']['reference'] = 'right'
+    inferred = render_view(packet, 'bev', on)
+    assert 0 < np.count_nonzero(inferred) < np.count_nonzero(measured)
+
+
+def test_all_layouts_keep_dimensions_and_handle_missing_images():
+    packet = sample_packet()
+    for columns in (0, 1, 2, 3):
+        result = render_grid(packet, list(VIEW_NAMES), {}, 1000, 700, columns)
+        assert result.ndim == 3 and result.shape[2] == 3
+        assert result.shape[0] <= 700 and result.shape[1] <= 1000
+    assert render_grid(packet, [], {}, 1000, 700).shape == (700, 1000, 3)
+
+
+def test_projection_handles_nonfinite_and_offscreen_points():
+    packet = sample_packet()
+    packet['left_fit'] = np.array([np.nan, 1e30])
+    result = render_view(packet, 'overlay', {})
+    assert result.shape == (480, 640, 3)
+
+
+def test_viewer_queue_never_waits_when_full():
+    viewer = LiveViewer.__new__(LiveViewer)
+    viewer.frames = queue.Queue(maxsize=2)
+    for _ in range(1000):
+        viewer.submit(sample_packet(False))
+    assert viewer.frames.qsize() == 2
+
+
+def test_invalid_frame_keeps_bev_and_masks():
+    result = LanePipeline(LanePipelineConfig()).process(np.zeros((480, 640, 3), np.uint8))
+    assert not result.valid and result.target_bev_xy is None
+    assert result.bev_image.shape == (480, 640, 3)
+    assert result.binary_image.shape == (480, 640)
+
+
+def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
+    path = Path(__file__).parents[1] / 'jetracer_ros2' / 'lane_following_node.py'
+    tree = ast.parse(path.read_text())
+    original = next(n for n in tree.body if isinstance(n, ast.ClassDef))
+    names = {'__init__', '_declare_parameters', '_pipeline_config', '_publish_command',
+             '_watchdog_callback', '_safe_stop', '_reset_steering'}
+    methods = [n for n in original.body if isinstance(n, ast.FunctionDef) and n.name in names]
+
+    class FakeNode:
+        def __init__(self, name):
+            self.params = {'publish_commands': False}
+            self.topics, self.sent = [], []
+
+        def declare_parameter(self, name, value):
+            self.params.setdefault(name, value)
+
+        def get_parameter(self, name):
+            return SimpleNamespace(value=self.params[name])
+
+        def create_publisher(self, msg, name, qos):
+            self.topics.append(name)
+            return SimpleNamespace(publish=lambda msg: self.sent.append((name, msg)))
+
+        def create_subscription(self, *args):
+            pass
+
+        def create_timer(self, *args):
+            pass
+
+        def get_logger(self):
+            return SimpleNamespace(info=lambda text: None)
+
+        def get_clock(self):
+            return SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=1000000000))
+
+        def _warn(self, *args):
+            pass
+
+        def _mode_callback(self, *args):
+            pass
+
+        _image_callback = _camera_info_callback = _mode_callback
+
+    definition = ast.ClassDef(name='TestNode', bases=[ast.Name(id='FakeNode', ctx=ast.Load())],
+                              keywords=[], body=methods, decorator_list=[])
+    scope = dict(FakeNode=FakeNode, np=np, LanePipeline=LanePipeline, LanePipelineConfig=LanePipelineConfig,
+                 Twist=object, Vector3Stamped=object, CompressedImage=object, CameraInfo=object,
+                 Bool=object, String=object, qos_profile_sensor_data=object())
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[definition], type_ignores=[])), str(path), 'exec'), scope)
+    node = scope['TestNode']()
+    assert 'inference/cmd_vel' not in node.topics and '/cmd_vel' not in node.topics
+    node._publish_command(object())
+    node._watchdog_callback()
+    node._safe_stop('test')
+    assert node.sent == []
+
+
+def test_launch_arguments_override_defaults_and_viewer_closes_on_shutdown():
+    import os
+    path = Path(__file__).parents[1] / 'jetracer_ros2' / 'lane_following_node.py'
+    main = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+    calls = []
+
+    class Shutdown(Exception):
+        pass
+
+    def spin(node):
+        raise Shutdown()
+
+    node = SimpleNamespace(close_viewer=lambda: calls.append('close'), destroy_node=lambda: calls.append('destroy'))
+    scope = dict(os=os, sys=SimpleNamespace(argv=['lane_following_node']),
+                 get_package_share_directory=lambda _: '/share', LaneFollowingNode=lambda: node,
+                 ExternalShutdownException=Shutdown,
+                 rclpy=SimpleNamespace(init=lambda **kw: calls.append(kw['args']), spin=spin, ok=lambda: False))
+    exec(compile(ast.Module(body=[main], type_ignores=[]), str(path), 'exec'), scope)
+    args = ['--ros-args', '-p', 'publish_commands:=false', '-p', 'live_debug_enabled:=true']
+    scope['main'](args)
+    assert calls[0][-len(args):] == args
+    assert calls[0].index('--params-file') < calls[0].index('-p')
+    assert calls[1:] == ['close', 'destroy']
