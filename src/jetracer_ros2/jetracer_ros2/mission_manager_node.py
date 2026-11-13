@@ -97,10 +97,12 @@ class MissionManagerNode(Node):
         event = msg.data.strip().upper()
         if self.fork.event(event):
             if self.fork.active:
-                if self.fork.direction is None:
+                if self.fork.mode is None:
                     self.cmd_pub.publish(Twist())
+                    self.get_logger().warn(
+                        'fork held: direction or physical lane position unconfirmed')
                 else:
-                    self.lane_mode_pub.publish(String(data=self.fork.direction))
+                    self.lane_mode_pub.publish(String(data=self.fork.mode))
             elif event == 'FORK_EXIT':
                 self.lane_mode_pub.publish(String(data='center'))
             return
@@ -207,7 +209,7 @@ class MissionManagerNode(Node):
         self.cmd_pub.publish(Twist())
 
     def _control_tick(self):
-        if self.fork.active and self.fork.direction is None:
+        if self.fork.active and self.fork.mode is None:
             self.cmd_pub.publish(Twist())
             return
         if self._blocked:
