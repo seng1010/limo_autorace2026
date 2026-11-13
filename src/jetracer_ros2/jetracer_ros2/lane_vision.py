@@ -36,6 +36,7 @@ class GroundLookahead:
                 or max_near_clamp_m < 0 or edge_margin_m < 0):
             raise ValueError('invalid metric edge allowance')
         self.matrix = cv2.getPerspectiveTransform(np.float32(bird_corners), ground)
+        self.inverse_matrix = cv2.getPerspectiveTransform(ground, np.float32(bird_corners))
         self.offset, self.distance, self.scale = offset, distance, lateral_scale
         self.max_near_clamp_m = max_near_clamp_m
         self.edge_margin_m = edge_margin_m
@@ -50,6 +51,16 @@ class GroundLookahead:
         if not np.all(np.isfinite([lateral, forward])) or forward <= 0:
             raise ValueError('BEV point outside forward ground range')
         return float(lateral), forward
+
+    def project_ground_point(self, lateral, forward_from_rear):
+        """Project a rear-axle ground target into BEV for the existing ROI guard."""
+        if not np.all(np.isfinite([lateral, forward_from_rear])):
+            raise ValueError('non-finite ground point')
+        point = np.float32([[[lateral, forward_from_rear - self.offset]]])
+        x, y = cv2.perspectiveTransform(point, self.inverse_matrix)[0, 0]
+        if not np.all(np.isfinite([x, y])):
+            raise ValueError('ground target cannot be projected into BEV')
+        return float(x), float(y)
 
     def evaluate(self, fit, lo, hi):
         x, heading, y, _ = self.evaluate_target(fit, lo, hi)

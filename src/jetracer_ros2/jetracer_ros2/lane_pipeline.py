@@ -80,7 +80,8 @@ class LanePipelineConfig:
     yellow_curve_min_span: float = 0.20
     curve_nearest_max_forward_m: float = 1.05
     curve_left_near_max_forward_m: float = 1.05
-    curve_left_center_clearance_ratio: float = 0.15
+    curve_lane_width_m: float = 0.52  # Measured yellow-to-yellow track width.
+    curve_right_min_clearance_m: float = 0.13  # Provisional center-to-right-paint guard.
 
 
 @dataclass
@@ -130,6 +131,9 @@ class LanePipeline:
         self._yellow_curve_hold = 0
         self._yellow_curve_side = ''
         self._yellow_curve_outer_missing = False
+        self._yellow_curve_right_points = None
+        self._yellow_curve_binary = None
+        self._curve_right_clearance_failed = False
         self._matrix, self._inverse_matrix = self._perspective_matrices()
         self.ground = (GroundLookahead(
             self._normalized_points(config.dst_points), config.bev_ground_points_m,
@@ -144,6 +148,9 @@ class LanePipeline:
         self._yellow_curve_hold = 0
         self._yellow_curve_side = ''
         self._yellow_curve_outer_missing = False
+        self._yellow_curve_right_points = None
+        self._yellow_curve_binary = None
+        self._curve_right_clearance_failed = False
 
     def _yellow_curve_mask(self, bird: np.ndarray, tracking_mode: str) -> Optional[np.ndarray]:
         """Return yellow-only paint when a connected solid yellow curve exists.
@@ -155,6 +162,8 @@ class LanePipeline:
         if not (self.config.detect_yellow and self.config.yellow_curve_priority):
             return None
         self._yellow_curve_outer_missing = False
+        self._yellow_curve_right_points = None
+        self._yellow_curve_binary = None
         hls = cv2.cvtColor(bird, cv2.COLOR_BGR2HLS)
         h, l, s = cv2.split(hls)
         yellow = np.uint8(
@@ -164,6 +173,7 @@ class LanePipeline:
         kernel = np.ones((max(1, self.config.morphology_kernel),) * 2, np.uint8)
         yellow = cv2.morphologyEx(yellow, cv2.MORPH_OPEN, kernel)
         yellow = cv2.morphologyEx(yellow, cv2.MORPH_CLOSE, kernel)
+        self._yellow_curve_binary = yellow
         if cv2.countNonZero(yellow) < self.config.fit_min_points:
             # Brief occlusion must not immediately hand control to the bright
             # white mat edge. An empty yellow-only frame safely stops instead.
@@ -191,12 +201,14 @@ class LanePipeline:
                 confirmed_sides.append((
                     mode, fit, xs.size, float(np.polyval(fit, np.max(ys))),
                     float(np.polyval(fit, np.min(ys)) - np.polyval(fit, np.max(ys))),
-                    reversal))
+                    reversal, ys, xs))
         if confirmed_sides:
             by_side = {candidate[0]: candidate for candidate in confirmed_sides}
             distinct = ('left' in by_side and 'right' in by_side
                         and by_side['right'][3] - by_side['left'][3]
                         >= 0.5 * self._expected_width())
+            if distinct:
+                self._yellow_curve_right_points = (by_side['right'][6], by_side['right'][7])
             clockwise = any(candidate[4] > 20 and not candidate[5]
                             for candidate in confirmed_sides)
             if distinct and clockwise:
@@ -368,7 +380,19 @@ class LanePipeline:
                 (color_binary == 0) if color_binary is not None else True
             )
             debug[gradient_only] = (255, 100, 0)
-        histogram = np.sum(binary[binary.shape[0] // 2:, :] > 0, axis=0)
+        # On a tight yellow bend, the lower-half histogram is dominated by
+        # the distant portion of the arc and can seed the LEFT tracker on the
+        # RIGHT paint. Seed from the bottom fifth, then follow all windows.
+        seed_top = binary.shape[0] // 2
+        if binary is self._yellow_curve_binary:
+            bottom_histogram = np.sum(binary[int(binary.shape[0] * .8):, :] > 0, axis=0)
+            split = binary.shape[1] // 2
+            lower_left = self._histogram_peak(bottom_histogram, 0, split)
+            lower_right = self._histogram_peak(bottom_histogram, split, binary.shape[1])
+            if (lower_left is not None and lower_right is not None
+                    and lower_right - lower_left >= .5 * self._expected_width()):
+                seed_top = int(binary.shape[0] * .8)
+        histogram = np.sum(binary[seed_top:, :] > 0, axis=0)
         midpoint = binary.shape[1] // 2
         bottom_y = self.config.height * 0.92
 
@@ -784,11 +808,11 @@ class LanePipeline:
         return zigzag, float(score), direction_changes, center_points
 
     def _left_curve_window_target(self, left_y, left_x, right_fit, right_y):
-        """Clockwise curve: near observed left paint sets center, far paint previews bend.
+        """Use measured near tangent and far bend, not the whole-lane cubic fit.
 
-        The second/third windows at either end avoid clipped extrema while
-        retaining a genuinely distant preview. This is deliberately separate
-        from the zigzag detector and its slow-zone policy.
+        The near pair defines the current straight/tangent and a normal-offset
+        lane center. Only excess far displacement beyond that tangent creates
+        right-turn preview. Zigzag detection is intentionally unchanged.
         """
         if self.ground is None or self.config.windows < 6:
             return None
@@ -811,34 +835,67 @@ class LanePipeline:
                                 (self.config.windows - 4, self.config.windows - 3)))
         if far_pair is None or near_pair is None:
             return None
-        far_left = np.mean(far_pair, axis=0)
-        near_left = np.mean(near_pair, axis=0)
-        width = self._expected_width()
-        targets = []
-        for boundary_x, row in (far_left, near_left):
-            center_x = float(boundary_x + width * .5)
-            if not self._target_within_bev(center_x, row):
-                return None
-            if right_y.size:
-                clearance = self.config.curve_left_center_clearance_ratio * width
-                if center_x >= float(np.polyval(right_fit, row)) - clearance:
-                    return None
-            targets.append((center_x, float(row)))
         try:
-            far_lateral, far_forward = self.ground.project_bev_point(*targets[0])
-            near_lateral, near_forward = self.ground.project_bev_point(*targets[1])
+            near_world = [self.ground.project_bev_point(*point) for point in near_pair]
+            far_world = [self.ground.project_bev_point(*point) for point in far_pair]
         except ValueError:
             return None
+        near_lateral, near_forward = np.mean(near_world, axis=0)
+        far_lateral, far_forward = np.mean(far_world, axis=0)
         if (far_forward <= near_forward + .10
                 or near_forward > self.config.curve_left_near_max_forward_m):
             return None
-        preview = float(np.arctan2(far_lateral - near_lateral,
-                                   far_forward - near_forward))
-        if preview <= .03:  # A right-curve preview must agree with rightward paint motion.
+        near_slope = ((near_world[0][0] - near_world[1][0])
+                      / (near_world[0][1] - near_world[1][1]))
+        width_m = float(self.config.curve_lane_width_m)
+        if not np.isfinite(near_slope) or width_m <= 0:
             return None
-        return near_lateral, near_forward, targets[1], preview
+        normal = 0.5 * width_m / np.hypot(1.0, near_slope)
+        center_lateral = float(near_lateral + normal)
+        center_forward = float(near_forward - near_slope * normal)
+        # A visible right boundary is clearance evidence, not proof that the
+        # car touches it. Do not follow its polynomial as a steering target.
+        right_points = self._yellow_curve_right_points
+        near_left_x, near_row = np.mean(near_pair, axis=0)
+        if right_points is None and self._yellow_curve_binary is not None:
+            row = int(np.clip(round(near_row), 0, self.config.height - 1))
+            strip = self._yellow_curve_binary[max(0, row - 5):row + 6]
+            candidates = np.flatnonzero(np.count_nonzero(strip, axis=0) >= 3)
+            candidates = candidates[candidates > near_left_x + .4 * self._expected_width()]
+            if candidates.size >= 5:
+                # A same-row yellow cluster is enough for a clearance check;
+                # the right sliding tracker need not follow the whole arc.
+                right_points = (np.full(candidates.size, near_row), candidates)
+        if right_points is None and right_y.size:
+            right_points = (right_y, np.polyval(right_fit, right_y))
+        if right_points is not None:
+            ys, xs = right_points
+            mask = np.abs(ys - near_row) < step
+            if np.count_nonzero(mask) >= max(8, self.config.recenter_min_pixels):
+                try:
+                    right_lateral, _ = self.ground.project_bev_point(
+                        float(np.median(xs[mask])), float(np.median(ys[mask])))
+                except ValueError:
+                    return None
+                if right_lateral - center_lateral < self.config.curve_right_min_clearance_m:
+                    self._curve_right_clearance_failed = True
+                    return None
+        try:
+            center_bev = self.ground.project_ground_point(center_lateral, center_forward)
+        except ValueError:
+            return None
+        if not self._target_within_bev(*center_bev):
+            return None
+        delta_forward = far_forward - near_forward
+        far_excess = far_lateral - (near_lateral + near_slope * delta_forward)
+        # A corner that starts after a straight has positive excess. On exit,
+        # excess falls to zero, so the preview releases instead of bending the
+        # entry straight with a whole-lane high-order polynomial.
+        preview = float(np.arctan2(max(0.0, far_excess), delta_forward))
+        return center_lateral, center_forward, center_bev, preview
 
     def process(self, image: np.ndarray, tracking_mode: str = 'auto') -> LaneResult:
+        self._curve_right_clearance_failed = False
         tracking_mode = tracking_mode if tracking_mode in ('auto', 'both', 'left', 'right') else 'auto'
         if image is None or image.size == 0:
             return LaneResult(
@@ -1078,6 +1135,15 @@ class LanePipeline:
             if (self.ground is not None and yellow_curve_priority_active and not zigzag
                 and curve_turn == 'right' and left_type == 'yellow/solid/curve'
                 and confidence >= 0.70) else None)
+        if self._curve_right_clearance_failed:
+            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+                              binary_image=binary, color_binary_image=color_binary,
+                              gradient_binary_image=gradient_binary,
+                              reason='right curve boundary clearance too small',
+                              tracking_mode=tracking_mode, confidence=confidence,
+                              curve_heading_span=curve_span, curve_turn=curve_turn,
+                              left_type=left_type, right_type=right_type,
+                              yellow_curve_priority_active=yellow_curve_priority_active)
         observed_nearest = False
         fixed_row_missing = recovered and not (
             float(observed_ys.min()) <= y_eval <= float(observed_ys.max()))

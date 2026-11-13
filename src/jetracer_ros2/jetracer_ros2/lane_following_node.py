@@ -144,7 +144,8 @@ class LaneFollowingNode(Node):
             'curve_recovery_speed': 0.12,
             'curve_nearest_max_forward_m': 1.05,
             'curve_left_near_max_forward_m': 1.05,
-            'curve_left_center_clearance_ratio': 0.15,
+            'curve_lane_width_m': 0.52,
+            'curve_right_min_clearance_m': 0.13,
             'curve_left_preview_gain': 0.50,
             'curve_left_preview_max_rad': 0.16,
             'right_curve_min_steer_rad': 0.10,
@@ -197,11 +198,12 @@ class LaneFollowingNode(Node):
             'low_light_enabled': True,
             'low_light_max_gain': 3.0,
             'preview_y_ratio': 0.76,
-            'metric_lookahead_enabled': False,
+            'metric_lookahead_enabled': True,
             'lookahead_distance_m': 0.40,
             'camera_forward_offset_m': 0.184,
             'metric_lateral_scale_m': 0.30,
-            'bev_ground_points_m': [0.0] * 8,
+            'bev_ground_points_m': [-0.24, 1.326, 0.24, 1.326,
+                                    0.22, 0.421, -0.22, 0.421],
             'metric_max_near_clamp_m': 0.25,
             'metric_edge_margin_m': 0.02,
             'target_roi_margin_px': 20.0,
@@ -228,7 +230,8 @@ class LaneFollowingNode(Node):
             yellow_curve_min_span=p('yellow_curve_min_span'),
             curve_nearest_max_forward_m=p('curve_nearest_max_forward_m'),
             curve_left_near_max_forward_m=p('curve_left_near_max_forward_m'),
-            curve_left_center_clearance_ratio=p('curve_left_center_clearance_ratio'),
+            curve_lane_width_m=p('curve_lane_width_m'),
+            curve_right_min_clearance_m=p('curve_right_min_clearance_m'),
             width=p('image_width'), height=p('image_height'),
             src_points=tuple(p('bev_src')), dst_points=tuple(p('bev_dst')),
             detect_white=p('detect_white'),
@@ -368,6 +371,12 @@ class LaneFollowingNode(Node):
             self._last_valid_cmd = cmd
             self._last_valid_ns = now_ns
             self._last_valid_curve = curve_detected and result.confidence >= 0.70
+        elif result.reason in ('right curve boundary clearance too small',
+                               'outer left curve not observed'):
+            # A measured boundary hazard must not enter the brief blind-curve
+            # command hold. Publish zero immediately instead.
+            self._reset_steering()
+            self._warn(f'lane safety stop: {result.reason}')
         elif (self._last_valid_cmd is not None and self._last_valid_curve
               and 0 <= (now_ns - self._last_valid_ns) / 1e9 <= min(
                   0.8, max(0.0, self.get_parameter('curve_recovery_sec').value))):

@@ -51,6 +51,8 @@ def _partial_right_yellow_curve(max_forward_m=1.05):
     config.bev_ground_points_m = (-.32, .9, .32, .9, .32, .421, -.32, .421)
     config.camera_forward_offset_m = .184
     config.lane_width_px = 270.0
+    config.curve_lane_width_m = .27
+    config.curve_right_min_clearance_m = .07
     config.curve_nearest_max_forward_m = max_forward_m
     config.low_light_enabled = False
     image = np.zeros((480, 640, 3), np.uint8)
@@ -68,6 +70,8 @@ def _observed_left_clockwise_curve(include_right=False):
     config.bev_ground_points_m = (-.32, .9, .32, .9, .32, .421, -.32, .421)
     config.camera_forward_offset_m = .184
     config.lane_width_px = 270.0
+    config.curve_lane_width_m = .27
+    config.curve_right_min_clearance_m = .07
     config.low_light_enabled = False
     image = np.zeros((480, 640, 3), np.uint8)
     ys = np.arange(48, 436)
@@ -85,8 +89,40 @@ def test_clockwise_curve_prefers_observed_outer_left_line_and_early_preview():
         assert result.valid and result.recovered_side == 'left'
         assert result.curve_turn == 'right' and not result.zigzag
         assert result.curve_left_target_active
-        assert result.curve_left_preview_rad > .03
+        # This synthetic arc is already unwinding at the far end. The local
+        # straight/curve split must not invent extra entry-steering demand.
+        assert result.curve_left_preview_rad == 0.0
         assert .6 < result.target_forward_m <= config.curve_left_near_max_forward_m
+
+
+def test_straight_entry_preserves_near_tangent_and_previews_far_right_bend():
+    config, image = _observed_left_clockwise_curve()
+    image[:] = 0
+    ys = np.arange(48, 436)
+    left = 115 + .002 * np.maximum(250 - ys, 0) ** 2
+    cv2.polylines(image, [np.int32(np.column_stack((left, ys))).reshape(-1, 1, 2)],
+                  False, (0, 255, 255), 12)
+    result = LanePipeline(config).process(image)
+    assert result.valid, result.reason
+    assert result.curve_left_target_active
+    assert result.curve_left_preview_rad > .03
+    # Local near-row center must remain beside the observed straight, rather
+    # than inherit the global cubic's bend before the corner actually starts.
+    assert abs(result.target_lateral_m - (-.32 + 250 * .001)) < .07
+
+
+def test_visible_right_paint_only_stops_when_measured_clearance_is_small():
+    config, image = _observed_left_clockwise_curve()
+    ys = np.arange(48, 436)
+    left = 350 - .001 * ys ** 2
+    for gap, expected_valid in ((270, True), (170, False)):
+        painted = image.copy()
+        cv2.polylines(painted, [np.int32(np.column_stack((left + gap, ys))).reshape(-1, 1, 2)],
+                      False, (0, 255, 255), 12)
+        result = LanePipeline(config).process(painted)
+        assert result.valid == expected_valid, (gap, result.reason)
+        if not expected_valid:
+            assert result.reason == 'right curve boundary clearance too small'
 
 
 def test_clockwise_curve_requires_near_and_far_observed_windows():

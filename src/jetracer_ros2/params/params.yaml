@@ -53,7 +53,8 @@ lane_following_node:
     curve_recovery_speed: 0.12       # 곡선 유실 시 마지막 조향 유지, 최대 0.12 m/s
     curve_nearest_max_forward_m: 1.05 # 노란 우곡선의 관측 최근접점을 쓸 수 있는 후축 기준 최대 거리
     curve_left_near_max_forward_m: 1.05 # 우곡선 왼쪽선 아래 2~3번째 창 목표의 후축 기준 상한
-    curve_left_center_clearance_ratio: 0.15 # 오른쪽 선도 보일 때 경계 여유/차선 폭
+    curve_lane_width_m: 0.52        # 사용자 실측 노란선 간 폭. 바깥선의 법선 방향으로 중심경로 생성
+    curve_right_min_clearance_m: 0.13 # 중심 목표~오른쪽 선 최소 여유(차체 폭 실측 전 임시값)
     curve_left_preview_gain: 0.50     # 왼쪽선 위 2~3번째 창의 선행 우조향 비율
     curve_left_preview_max_rad: 0.16  # 선행 우조향 추가량 상한
     right_curve_min_steer_rad: 0.10  # 연속 확인된 우곡선의 최소 우조향; 직선/좌회전에는 미적용
@@ -105,7 +106,7 @@ lane_following_node:
     low_light_enabled: true
     low_light_max_gain: 3.0          # 색상 유지 밝기 증폭 상한. 검은 영역은 제외
     # 네 ROI 모서리의 실측 추정값. 실제 주행 전 명령 없는 디버거에서 확인한다.
-    metric_lookahead_enabled: false   # launch 인자가 덮어씀: all_in_node 기본 true, 끄려면 metric_ackermann:=false
+    metric_lookahead_enabled: true    # 기본은 실측 지면 좌표+아커만; 비교 시 metric_ackermann:=false
     lookahead_distance_m: 0.40        # 요청 목표. 보이지 않으면 허용 범위 안에서 가장 가까운 관측점 사용
     camera_forward_offset_m: 0.184  # 공식 LIMO ROS2 URDF 명목값(0.100+0.084m); LIMO Pro 실차에서 확인
     metric_lateral_scale_m: 0.30    # 횡오차 정규화 거리, 실제 트랙에 맞춰 보정
