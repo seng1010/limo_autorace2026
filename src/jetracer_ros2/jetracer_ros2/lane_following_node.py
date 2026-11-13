@@ -23,7 +23,6 @@ from sensor_msgs.msg import CameraInfo, CompressedImage
 from std_msgs.msg import Bool, String
 
 from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
-from jetracer_ros2.lane_attributes import scale_steering
 from jetracer_ros2.lane_steering import (
     reference_side, tracking_error, curve_release_target, limited_steering,
     right_curve_metric_target,
@@ -31,7 +30,7 @@ from jetracer_ros2.lane_steering import (
 )
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 from jetracer_ros2.live_debug_view import LiveViewer
-from jetracer_ros2.lane_ackermann import target_to_inner_angle
+from jetracer_ros2.lane_ackermann import target_to_inner_angle, metric_target_ready
 from jetracer_ros2.lane_recovery import (
     Pose2D, snapshot_path, recovery_target, right_boundary_clearance,
 )
@@ -384,7 +383,10 @@ class LaneFollowingNode(Node):
 
         now_ns = self.get_clock().now().nanoseconds
         self._update_zigzag(yellow_zigzag_evidence(result), now_ns)
-        usable = result.valid and result.confidence >= self.get_parameter('minimum_confidence').value
+        has_metric_target = metric_target_ready(
+            result.target_lateral_m, result.target_forward_m)
+        usable = (result.valid and has_metric_target
+                  and result.confidence >= self.get_parameter('minimum_confidence').value)
         right_curve = bool(
             usable and self._mode == 'center' and result.yellow_curve_priority_active
             and result.curve_turn == 'right' and not result.zigzag
@@ -410,6 +412,7 @@ class LaneFollowingNode(Node):
         cmd = Twist()
         control_state = 'STOP'
         control_reason = (result.reason if not result.valid else
+                          'metric target unavailable' if not has_metric_target else
                           'confidence below minimum')
         recovery = self._recovery_target(now_ns) if not usable else None
         inner_curve_recovery = bool(
@@ -426,33 +429,25 @@ class LaneFollowingNode(Node):
         if usable:
             control_state = 'TRACK'
             control_reason = 'validated lane path'
-            error = self._mode_error(result)
             max_angle = float(self.get_parameter('max_steer_angle').value)
-            if result.target_lateral_m is not None:
-                # Ground calibration enabled: steer from the rear axle to a
-                # measured metric target, without adding image-space gains.
-                target_steering = target_to_inner_angle(
-                    result.target_lateral_m, result.target_forward_m,
-                    self.get_parameter('ackermann_wheelbase_m').value,
-                    self.get_parameter('ackermann_track_m').value,
-                    max_angle) / max_angle
-                if right_curve:
-                    target_steering = right_curve_metric_target(
-                        target_steering, result.curve_heading_span, max_angle,
-                        self.get_parameter('right_curve_min_steer_rad').value,
-                        self.get_parameter('right_curve_span_gain').value,
-                        self._right_curve_hits >= self.get_parameter('right_curve_confirm_frames').value)
-                    if result.curve_left_target_active:
-                        target_steering = left_curve_preview_target(
-                            target_steering, result.curve_left_preview_rad, max_angle,
-                            self.get_parameter('curve_left_preview_gain').value,
-                            self.get_parameter('curve_left_preview_max_rad').value)
-            else:
-                raw_steering = float(np.clip(-error, -1.0, 1.0))
-                target_steering = self._curve_steering_target(raw_steering)
-                target_steering = scale_steering(
-                    target_steering, 1.0 + self._curve_weight * (
-                        self.get_parameter('steering_gain').value - 1.0))
+            # A valid metric point is the sole steering input. Never silently
+            # switch to an image-pixel controller when calibration fails.
+            target_steering = target_to_inner_angle(
+                result.target_lateral_m, result.target_forward_m,
+                self.get_parameter('ackermann_wheelbase_m').value,
+                self.get_parameter('ackermann_track_m').value,
+                max_angle) / max_angle
+            if right_curve:
+                target_steering = right_curve_metric_target(
+                    target_steering, result.curve_heading_span, max_angle,
+                    self.get_parameter('right_curve_min_steer_rad').value,
+                    self.get_parameter('right_curve_span_gain').value,
+                    self._right_curve_hits >= self.get_parameter('right_curve_confirm_frames').value)
+                if result.curve_left_target_active:
+                    target_steering = left_curve_preview_target(
+                        target_steering, result.curve_left_preview_rad, max_angle,
+                        self.get_parameter('curve_left_preview_gain').value,
+                        self.get_parameter('curve_left_preview_max_rad').value)
             steering = self._rate_limit_steering(target_steering, now_ns)
             self._held_steering = steering
             curve_detected = (
@@ -478,6 +473,10 @@ class LaneFollowingNode(Node):
                     and not result.zigzag and self._odom_is_fresh(now_ns)):
                 self._recovery_snapshot = snapshot_path(
                     result.ground_path, self._odom_pose, now_ns, self._odom_distance_m)
+        elif result.valid and not has_metric_target:
+            self._reset_steering()
+            control_state = 'SAFETY_STOP'
+            self._warn('lane safety stop: metric target unavailable')
         elif result.reason in ('right curve boundary clearance too small',
                                'outer left curve not observed') and not inner_curve_recovery:
             # A measured boundary hazard must not enter the brief blind-curve

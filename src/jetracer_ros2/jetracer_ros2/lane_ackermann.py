@@ -6,6 +6,12 @@ The image x-axis points right; ROS positive yaw/steering points left.
 import math
 
 
+def metric_target_ready(lateral_m, forward_m):
+    return (lateral_m is not None and forward_m is not None
+            and math.isfinite(lateral_m) and math.isfinite(forward_m)
+            and forward_m > 0)
+
+
 def target_to_inner_angle(lateral_right_m, forward_from_rear_m,
                           wheelbase_m=0.20, track_m=0.172,
                           maximum_inner_angle_rad=0.42):
