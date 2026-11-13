@@ -82,3 +82,5 @@ def test_offscreen_reconstructed_center_is_rejected(monkeypatch):
     result = pipeline.process(image)
     assert not result.valid
     assert result.reason == 'center target outside measured BEV road area'
+    assert (result.observation_state, result.path_state, result.policy_state) == (
+        'accepted', 'rejected', 'not_evaluated')

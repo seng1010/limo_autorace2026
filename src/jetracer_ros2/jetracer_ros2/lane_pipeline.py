@@ -87,6 +87,12 @@ class LanePipelineConfig:
 @dataclass
 class LaneResult:
     valid: bool
+    # Diagnostic stages only. ``valid`` remains the existing drive gate.
+    # accepted means an observed boundary survived pixel/geometry checks,
+    # not that its colour or side identity is guaranteed correct.
+    observation_state: str = 'not_evaluated'
+    path_state: str = 'not_evaluated'
+    policy_state: str = 'not_evaluated'
     lateral_error: float = 0.0
     heading_error: float = 0.0
     confidence: float = 0.0
@@ -899,7 +905,8 @@ class LanePipeline:
         tracking_mode = tracking_mode if tracking_mode in ('auto', 'both', 'left', 'right') else 'auto'
         if image is None or image.size == 0:
             return LaneResult(
-                valid=False, reason='empty image', tracking_mode=tracking_mode,
+                valid=False, observation_state='rejected',
+                reason='empty image', tracking_mode=tracking_mode,
             )
 
         resized = cv2.resize(image, (self.config.width, self.config.height))
@@ -964,7 +971,8 @@ class LanePipeline:
 
         if left_fit is None and right_fit is None:
             return LaneResult(
-                valid=False, debug_image=debug, bev_image=bird, binary_image=binary,
+                valid=False, observation_state='rejected',
+                debug_image=debug, bev_image=bird, binary_image=binary,
                 color_binary_image=color_binary,
                 gradient_binary_image=gradient_binary,
                 reason='not enough lane pixels', tracking_mode=tracking_mode,
@@ -1002,7 +1010,8 @@ class LanePipeline:
                     candidates.append((jump, -points, side, cand_left, cand_right, self._expected_width()))
                 if not candidates:
                     return LaneResult(
-                        valid=False, debug_image=debug, bev_image=bird, binary_image=binary,
+                        valid=False, observation_state='rejected',
+                        debug_image=debug, bev_image=bird, binary_image=binary,
                         color_binary_image=color_binary,
                         gradient_binary_image=gradient_binary,
                         reason='lane geometry sanity check failed',
@@ -1034,7 +1043,8 @@ class LanePipeline:
             if (not self._jump_ok(left_fit, right_fit)
                     and not self._strong_single_line(only_ratio, only_y, only_points)):
                 return LaneResult(
-                    valid=False, debug_image=debug, bev_image=bird, binary_image=binary,
+                    valid=False, observation_state='rejected',
+                    debug_image=debug, bev_image=bird, binary_image=binary,
                     color_binary_image=color_binary,
                     gradient_binary_image=gradient_binary,
                     reason='lane geometry sanity check failed',
@@ -1088,7 +1098,8 @@ class LanePipeline:
         center_x = 0.5 * (np.polyval(left_fit, y_eval) + np.polyval(right_fit, y_eval))
         if not np.isfinite(center_x):
             self.reset()
-            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+            return LaneResult(valid=False, observation_state='accepted',
+                              path_state='rejected', debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
                               reason='center target is not finite', tracking_mode=tracking_mode,
@@ -1136,7 +1147,8 @@ class LanePipeline:
                 and curve_turn == 'right' and left_type == 'yellow/solid/curve'
                 and confidence >= 0.70) else None)
         if self._curve_right_clearance_failed:
-            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+            return LaneResult(valid=False, observation_state='accepted',
+                              policy_state='blocked', debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
                               reason='right curve boundary clearance too small',
@@ -1157,7 +1169,8 @@ class LanePipeline:
             and left_type != 'yellow/solid/curve')
         if (yellow_curve_priority_active and self._yellow_curve_outer_missing
                 or inner_only_clockwise):
-            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+            return LaneResult(valid=False, observation_state='accepted',
+                              policy_state='blocked', debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
                               reason='outer left curve not observed',
@@ -1167,7 +1180,8 @@ class LanePipeline:
                               yellow_curve_priority_active=True)
         if fixed_row_missing and left_curve_target is None and not curve_recovery_allowed:
             self.reset()
-            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+            return LaneResult(valid=False, observation_state='accepted',
+                              path_state='rejected', debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
                               reason='one-side target outside observed lane rows',
@@ -1202,7 +1216,8 @@ class LanePipeline:
                     except ValueError as recovery_error:
                         error = recovery_error
                 if target_lateral_m is None:
-                    return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+                    return LaneResult(valid=False, observation_state='accepted',
+                                      path_state='rejected', debug_image=debug, bev_image=bird,
                                       binary_image=binary, color_binary_image=color_binary,
                                       gradient_binary_image=gradient_binary, reason=str(error),
                                       confidence=confidence, curve_heading_span=curve_span,
@@ -1225,7 +1240,8 @@ class LanePipeline:
         # manual recording). Confidence alone must not make it driveable.
         if not self._target_within_bev(center_x, y_eval):
             self.reset()
-            return LaneResult(valid=False, debug_image=debug, bev_image=bird,
+            return LaneResult(valid=False, observation_state='accepted',
+                              path_state='rejected', debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
                               gradient_binary_image=gradient_binary,
                               reason='center target outside measured BEV road area',
@@ -1272,6 +1288,9 @@ class LanePipeline:
                 debug[-120:, -160:] = cv2.resize(roi_view, (160, 120))
         return LaneResult(
             valid=True,
+            observation_state='accepted',
+            path_state='accepted',
+            policy_state='allowed',
             curve_heading_span=curve_span,
             curve_turn=curve_turn,
             curve_nearest_observation=observed_nearest,

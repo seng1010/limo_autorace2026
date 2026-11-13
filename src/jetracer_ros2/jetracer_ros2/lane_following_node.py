@@ -325,7 +325,8 @@ class LaneFollowingNode(Node):
 
         cmd = Twist()
         control_state = 'STOP'
-        control_reason = result.reason
+        control_reason = (result.reason if not result.valid else
+                          'confidence below minimum')
         if usable:
             control_state = 'TRACK'
             control_reason = 'validated lane path'
@@ -423,6 +424,8 @@ class LaneFollowingNode(Node):
             self.get_logger().info(
                 f'lane type(est): L={result.left_type} R={result.right_type} '
                 f'confidence={result.confidence:.2f} usable={usable} '
+                f'observation={result.observation_state} path={result.path_state} '
+                f'policy={result.policy_state} '
                 f'control_state={control_state} control_reason={control_reason} '
                 f'curve_turn={result.curve_turn} nearest_observed={result.curve_nearest_observation} '
                 f'left_curve_target={result.curve_left_target_active} '
@@ -441,6 +444,8 @@ class LaneFollowingNode(Node):
                 received_mono=time.monotonic(), source_stamp_ns=msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec,
                 commands_enabled=self.commands_enabled, valid=bool(result.valid), usable=bool(usable),
                 confidence=float(result.confidence), reason=result.reason, mode=self._mode,
+                observation_state=result.observation_state, path_state=result.path_state,
+                policy_state=result.policy_state,
                 control_state=control_state, control_reason=control_reason,
                 reference=reference_side(result), left_type=result.left_type, right_type=result.right_type,
                 lateral=float(result.lateral_error), heading_rad=float(result.heading_error),

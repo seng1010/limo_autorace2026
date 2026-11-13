@@ -123,6 +123,8 @@ def test_visible_right_paint_only_stops_when_measured_clearance_is_small():
         assert result.valid == expected_valid, (gap, result.reason)
         if not expected_valid:
             assert result.reason == 'right curve boundary clearance too small'
+            assert (result.observation_state, result.path_state, result.policy_state) == (
+                'accepted', 'not_evaluated', 'blocked')
 
 
 def test_clockwise_curve_requires_near_and_far_observed_windows():
@@ -157,6 +159,8 @@ def test_inner_right_curve_is_not_used_when_outer_left_is_missing():
         assert result.left_type == 'unobserved'
         assert result.right_type == 'yellow/solid/curve'
         assert not result.curve_nearest_observation
+        assert (result.observation_state, result.path_state, result.policy_state) == (
+            'accepted', 'not_evaluated', 'blocked')
 
 
 def test_inner_only_curve_stops_even_without_yellow_priority_filter():
@@ -170,6 +174,8 @@ def test_inner_only_curve_stops_even_without_yellow_priority_filter():
 def test_detects_two_curved_lanes():
     result = LanePipeline(_identity_config()).process(_synthetic_lane())
     assert result.valid
+    assert (result.observation_state, result.path_state, result.policy_state) == (
+        'accepted', 'accepted', 'allowed')
     assert result.confidence > 0.5
     assert abs(result.lateral_error) < 0.25
 
@@ -217,6 +223,8 @@ def test_rejects_empty_scene():
     )
     assert not result.valid
     assert result.confidence == 0.0
+    assert (result.observation_state, result.path_state, result.policy_state) == (
+        'rejected', 'not_evaluated', 'not_evaluated')
 
 
 def test_detects_zigzag_for_slow_driving():
