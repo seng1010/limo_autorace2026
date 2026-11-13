@@ -138,6 +138,8 @@ class LanePipeline:
         self._previous_width: Optional[float] = None
         self._yellow_curve_hold = 0
         self._yellow_curve_side = ''
+        self._yellow_curve_left_latched = False
+        self._yellow_curve_exit_frames = 0
         self._yellow_curve_outer_missing = False
         self._yellow_curve_right_points = None
         self._yellow_curve_binary = None
@@ -149,12 +151,15 @@ class LanePipeline:
             config.metric_lateral_scale_m, config.metric_max_near_clamp_m,
             config.metric_edge_margin_m) if config.metric_lookahead_enabled else None)
 
-    def reset(self) -> None:
+    def reset(self, preserve_curve_lock: bool = False) -> None:
         self._previous_left = None
         self._previous_right = None
         self._previous_width = None
         self._yellow_curve_hold = 0
-        self._yellow_curve_side = ''
+        self._yellow_curve_side = (
+            'left' if preserve_curve_lock and self._yellow_curve_left_latched else '')
+        self._yellow_curve_left_latched &= preserve_curve_lock
+        self._yellow_curve_exit_frames = 0
         self._yellow_curve_outer_missing = False
         self._yellow_curve_right_points = None
         self._yellow_curve_binary = None
@@ -185,11 +190,16 @@ class LanePipeline:
         if cv2.countNonZero(yellow) < self.config.fit_min_points:
             # Brief occlusion must not immediately hand control to the bright
             # white mat edge. An empty yellow-only frame safely stops instead.
+            if self._yellow_curve_left_latched:
+                self._yellow_curve_exit_frames = 0
+                self._yellow_curve_outer_missing = True
+                return yellow
             if self._yellow_curve_hold:
                 self._yellow_curve_hold -= 1
                 return yellow
             return None
         confirmed_sides = []
+        left_exit_evidence = False
         # Anchor each side independently: a tight curve can cross the image
         # midpoint, and AUTO would split one yellow line into two short tracks.
         modes = (tracking_mode,) if tracking_mode in ('left', 'right') else ('left', 'right')
@@ -199,17 +209,36 @@ class LanePipeline:
             if xs.size < self.config.fit_min_points or not self._coverage_ok(ys):
                 continue
             fit = np.polyfit(ys, xs, self.config.polynomial_degree)
+            sampled_x = np.polyval(fit, np.linspace(np.min(ys), np.max(ys), 12))
+            steps = np.diff(sampled_x)
+            reversal = bool(np.any(steps > self.config.zigzag_min_step_px)
+                            and np.any(steps < -self.config.zigzag_min_step_px))
+            if mode == 'left' and self._yellow_curve_left_latched:
+                lane_type = classify_lane(bird, fit, ys, self.config, zigzag=reversal)
+                span = measured_heading_span(fit, ys, self.config.height)
+                left_exit_evidence = (
+                    lane_type in ('yellow/solid/zigzag', 'yellow/dashed/zigzag')
+                    and float(np.ptp(sampled_x)) >= self.config.zigzag_min_span_px
+                ) or (
+                    lane_type == 'yellow/solid/straight'
+                    and span < self.config.yellow_curve_min_span * 0.5
+                )
             if (measured_heading_span(fit, ys, self.config.height)
                     >= self.config.yellow_curve_min_span
                     and classify_lane(bird, fit, ys, self.config) == 'yellow/solid/curve'):
-                sampled_x = np.polyval(fit, np.linspace(np.min(ys), np.max(ys), 12))
-                steps = np.diff(sampled_x)
-                reversal = bool(np.any(steps > self.config.zigzag_min_step_px)
-                                and np.any(steps < -self.config.zigzag_min_step_px))
                 confirmed_sides.append((
                     mode, fit, xs.size, float(np.polyval(fit, np.max(ys))),
                     float(np.polyval(fit, np.min(ys)) - np.polyval(fit, np.max(ys))),
                     reversal, ys, xs))
+        if self._yellow_curve_left_latched:
+            self._yellow_curve_exit_frames = (
+                self._yellow_curve_exit_frames + 1 if left_exit_evidence else 0)
+            if self._yellow_curve_exit_frames >= 2:
+                self._yellow_curve_left_latched = False
+                self._yellow_curve_exit_frames = 0
+                self._yellow_curve_hold = 0
+                self._yellow_curve_side = ''
+                return None
         if confirmed_sides:
             by_side = {candidate[0]: candidate for candidate in confirmed_sides}
             distinct = ('left' in by_side and 'right' in by_side
@@ -233,7 +262,17 @@ class LanePipeline:
                 self._yellow_curve_side = self._assign_side(best[1], best[0])
             self._yellow_curve_outer_missing = clockwise and self._yellow_curve_side != 'left'
             self._yellow_curve_hold = 3
-        elif self._yellow_curve_hold:
+            if self._yellow_curve_side == 'left' and clockwise:
+                self._yellow_curve_left_latched = True
+        if self._yellow_curve_left_latched:
+            # A temporary loss of the outer yellow line must not re-enable
+            # the right window or let a white mat edge take over the curve.
+            self._yellow_curve_side = 'left'
+            self._yellow_curve_outer_missing |= not any(
+                candidate[0] == 'left' and candidate[4] > 20 and not candidate[5]
+                for candidate in confirmed_sides)
+            return yellow
+        if not confirmed_sides and self._yellow_curve_hold:
             self._yellow_curve_hold -= 1
             self._yellow_curve_outer_missing = True
         return yellow if self._yellow_curve_hold else None
@@ -1099,7 +1138,7 @@ class LanePipeline:
         y_eval = self.config.height * self.config.lookahead_y_ratio
         center_x = 0.5 * (np.polyval(left_fit, y_eval) + np.polyval(right_fit, y_eval))
         if not np.isfinite(center_x):
-            self.reset()
+            self.reset(preserve_curve_lock=True)
             return LaneResult(valid=False, observation_state='accepted',
                               path_state='rejected', debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
@@ -1195,7 +1234,7 @@ class LanePipeline:
                               yellow_curve_priority_active=True, zigzag=zigzag,
                               right_ground_boundary=tuple(right_ground_boundary))
         if fixed_row_missing and left_curve_target is None and not curve_recovery_allowed:
-            self.reset()
+            self.reset(preserve_curve_lock=True)
             return LaneResult(valid=False, observation_state='accepted',
                               path_state='rejected', debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
@@ -1255,7 +1294,7 @@ class LanePipeline:
         # target outside the measured BEV road area (seen at the fork in the
         # manual recording). Confidence alone must not make it driveable.
         if not self._target_within_bev(center_x, y_eval):
-            self.reset()
+            self.reset(preserve_curve_lock=True)
             return LaneResult(valid=False, observation_state='accepted',
                               path_state='rejected', debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,

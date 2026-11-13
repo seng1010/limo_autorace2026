@@ -14,7 +14,7 @@ def metric_target_ready(lateral_m, forward_m):
 
 def target_to_inner_angle(lateral_right_m, forward_from_rear_m,
                           wheelbase_m=0.20, track_m=0.172,
-                          maximum_inner_angle_rad=0.42):
+                          maximum_inner_angle_rad=math.radians(27.0)):
     values = (lateral_right_m, forward_from_rear_m, wheelbase_m,
               track_m, maximum_inner_angle_rad)
     if (not all(math.isfinite(value) for value in values)

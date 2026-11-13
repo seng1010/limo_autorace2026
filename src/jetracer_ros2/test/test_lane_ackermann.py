@@ -17,7 +17,7 @@ def test_metric_target_uses_rear_axle_curvature_and_ros_direction():
 
 
 def test_inner_angle_clamped_and_bad_calibration_rejected():
-    assert target_to_inner_angle(0.4, 0.1) == pytest.approx(-0.42)
+    assert target_to_inner_angle(0.4, 0.1) == pytest.approx(-math.radians(27))
     for lateral, forward in ((float('nan'), .4), (.1, 0), (.1, -.2)):
         with pytest.raises(ValueError):
             target_to_inner_angle(lateral, forward)

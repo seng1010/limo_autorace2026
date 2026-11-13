@@ -72,6 +72,61 @@ def test_yellow_priority_does_not_remove_white_straight_or_parking_lane():
     assert result.right_type.startswith('white')
 
 
+def test_outer_curve_keeps_right_window_off_until_straight_is_confirmed():
+    cfg = LanePipelineConfig(
+        src_points=(0,0,1,0,1,1,0,1),
+        dst_points=(0,0,1,0,1,1,0,1),
+        detect_yellow=True, lane_width_px=360.0, fit_min_points=80)
+    pipeline = LanePipeline(cfg)
+    curve = np.zeros((480, 640, 3), np.uint8)
+    ys = np.arange(328, 480)
+    xs = 290 + .005 * (479 - ys) ** 2
+    cv2.polylines(curve, [np.int32(np.column_stack((xs, ys))).reshape(-1, 1, 2)],
+                  False, (0, 255, 255), 10)
+    assert pipeline._yellow_curve_mask(curve, 'auto') is not None
+    assert pipeline._yellow_curve_left_latched
+
+    # Repeated missing frames may clear old fits, but must not re-enable the
+    # opposing window or the white mat edge while the curve state is locked.
+    missing = np.zeros_like(curve)
+    cv2.line(missing, (90, 0), (90, 479), (255, 255, 255), 11)
+    for _ in range(6):
+        pipeline.reset(preserve_curve_lock=True)
+        result = pipeline.process(missing)
+        assert not result.valid and result.yellow_curve_priority_active
+        assert pipeline._yellow_curve_side == 'left'
+        assert not result.binary_image[:, 90].any()
+
+    straight = np.zeros_like(curve)
+    cv2.line(straight, (290, 0), (290, 479), (0, 255, 255), 10)
+    assert pipeline._yellow_curve_mask(straight, 'auto') is not None
+    assert pipeline._yellow_curve_left_latched
+    assert pipeline._yellow_curve_mask(straight, 'auto') is None
+    assert not pipeline._yellow_curve_left_latched
+
+
+def test_outer_curve_releases_right_window_on_confirmed_yellow_zigzag():
+    cfg = LanePipelineConfig(
+        src_points=(0,0,1,0,1,1,0,1),
+        dst_points=(0,0,1,0,1,1,0,1),
+        detect_yellow=True, lane_width_px=360.0, fit_min_points=80)
+    pipeline = LanePipeline(cfg)
+    curve = np.zeros((480, 640, 3), np.uint8)
+    ys = np.arange(328, 480)
+    xs = 290 + .005 * (479 - ys) ** 2
+    cv2.polylines(curve, [np.int32(np.column_stack((xs, ys))).reshape(-1, 1, 2)],
+                  False, (0, 255, 255), 10)
+    assert pipeline._yellow_curve_mask(curve, 'auto') is not None
+    assert pipeline._yellow_curve_left_latched
+
+    zigzag = np.zeros_like(curve)
+    points = np.array([(290, 479), (370, 350), (260, 220), (340, 0)], np.int32)
+    cv2.polylines(zigzag, [points], False, (0, 255, 255), 10)
+    assert pipeline._yellow_curve_mask(zigzag, 'auto') is not None
+    assert pipeline._yellow_curve_mask(zigzag, 'auto') is None
+    assert not pipeline._yellow_curve_left_latched
+
+
 def test_offscreen_reconstructed_center_is_rejected(monkeypatch):
     cfg = LanePipelineConfig(src_points=(0,0,1,0,1,1,0,1),
                              dst_points=(0,0,1,0,1,1,0,1))

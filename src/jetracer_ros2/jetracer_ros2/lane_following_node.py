@@ -140,7 +140,7 @@ class LaneFollowingNode(Node):
             'preview_heading_gain': 0.25,
             'right_reference_gain': 1.0,
             'status_log_interval_sec': 1.0,
-            'max_steer_angle': 0.42,
+            'max_steer_angle': 0.47123889803846897,  # 27 degrees
             'ackermann_wheelbase_m': 0.20,
             'ackermann_track_m': 0.172,
             'curve_enter_error': 0.55,
@@ -406,7 +406,7 @@ class LaneFollowingNode(Node):
             if reset_after > 0 and self._invalid_frames % reset_after == 0:
                 # 이전 차선 기준이 오래되면 급변 검사(max_fit_jump_px)에 계속 걸려
                 # 영영 복구하지 못하므로, 연속 실패 시 기준을 초기화한다.
-                self.pipeline.reset()
+                self.pipeline.reset(preserve_curve_lock=True)
                 self._warn(f'lane lost for {self._invalid_frames} frames, pipeline reset')
 
         cmd = Twist()
