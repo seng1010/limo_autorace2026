@@ -8,7 +8,7 @@ M3 (보행자 표지판 정지) 판단은 ``m3_pedestrian.PedestrianStopMission`
 이 노드는 입력(정지선 거리, odom 속도·이동거리, YOLO 이벤트)을 모아 매 주기 넘긴다.
 
 테스트용: ``ros2 run jetracer_ros2 mission_manager_node --ros-args -p start_mission:=M3``
-디버그:   ``/mission_manager/debug/state`` (String) — 현재 미션·상태·정지선 거리·속도
+디버그:   ``/mission_manager/debug/state`` (String) — 현재 미션·상태·정지선 거리·속도 (모든 미션, 20 Hz)
 """
 
 import os
@@ -295,10 +295,15 @@ class MissionManagerNode(Node):
         return decision.speed_limit
 
     def _control_tick(self):
+        now = self.get_clock().now().nanoseconds
+        if self._active != 'M3':          # M3는 _m3_tick 안에서 상태까지 같이 발행
+            line = self._fresh_stop_line(now)
+            line_text = f'{line:.3f}' if line is not None else 'none'
+            self._debug(f'{"blocked" if self._blocked else "run"} line={line_text} '
+                        f'v={self._measured_speed(now):.3f}')
         if self._blocked:
             self._publish(Twist())
             return
-        now = self.get_clock().now().nanoseconds
         speed_limit = None
         if self._active == 'M3':
             speed_limit = self._m3_tick(now)
@@ -349,7 +354,12 @@ class MissionManagerNode(Node):
             process.terminate()
 
     def destroy_node(self):
-        self.cmd_pub.publish(Twist())
+        # Ctrl+C 로 이미 통신이 내려간 뒤면 정지 명령 발행이 실패하므로 무시한다
+        try:
+            if rclpy.ok():
+                self.cmd_pub.publish(Twist())
+        except Exception:  # noqa: BLE001
+            pass
         for name in list(self._processes):
             self._stop_process(name)
         return super().destroy_node()
