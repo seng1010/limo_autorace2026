@@ -232,6 +232,7 @@ class LaneFollowingNode(Node):
             'metric_edge_margin_m': 0.02,
             'target_roi_margin_px': 20.0,
             'yellow_curve_priority': True,
+            'observed_outer_curve_entry_enabled': False,
             'yellow_curve_min_span': 0.20,
         }
         for name, default in values.items():
@@ -251,6 +252,7 @@ class LaneFollowingNode(Node):
             metric_edge_margin_m=p('metric_edge_margin_m'),
             target_roi_margin_px=p('target_roi_margin_px'),
             yellow_curve_priority=p('yellow_curve_priority'),
+            observed_outer_curve_entry_enabled=p('observed_outer_curve_entry_enabled'),
             yellow_curve_min_span=p('yellow_curve_min_span'),
             curve_nearest_max_forward_m=p('curve_nearest_max_forward_m'),
             curve_left_near_max_forward_m=p('curve_left_near_max_forward_m'),

@@ -127,6 +127,31 @@ def test_outer_curve_releases_right_window_on_confirmed_yellow_zigzag():
     assert not pipeline._yellow_curve_left_latched
 
 
+def test_observed_mild_outer_bend_does_not_count_as_missing_during_latch():
+    cfg = LanePipelineConfig(
+        src_points=(0, 0, 1, 0, 1, 1, 0, 1),
+        dst_points=(0, 0, 1, 0, 1, 1, 0, 1),
+        detect_yellow=True, lane_width_px=360.0, fit_min_points=80,
+        observed_outer_curve_entry_enabled=True)
+    pipeline = LanePipeline(cfg)
+    strong = np.zeros((480, 640, 3), np.uint8)
+    ys = np.arange(328, 480)
+    xs = 290 + .005 * (479 - ys) ** 2
+    cv2.polylines(strong, [np.int32(np.column_stack((xs, ys))).reshape(-1, 1, 2)],
+                  False, (0, 255, 255), 10)
+    assert pipeline._yellow_curve_mask(strong, 'auto') is not None
+    assert pipeline._yellow_curve_left_latched
+
+    mild = np.zeros_like(strong)
+    ys = np.arange(120, 480)
+    xs = 290 + .0002 * (479 - ys) ** 2
+    cv2.polylines(mild, [np.int32(np.column_stack((xs, ys))).reshape(-1, 1, 2)],
+                  False, (0, 255, 255), 10)
+    assert pipeline._yellow_curve_mask(mild, 'auto') is not None
+    assert pipeline._yellow_curve_left_observed
+    assert not pipeline._yellow_curve_outer_missing
+
+
 def test_offscreen_reconstructed_center_is_rejected(monkeypatch):
     cfg = LanePipelineConfig(src_points=(0,0,1,0,1,1,0,1),
                              dst_points=(0,0,1,0,1,1,0,1))

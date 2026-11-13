@@ -7,6 +7,7 @@ substitute for camera/odometry measurements on the vehicle.
 import cv2
 import numpy as np
 import pytest
+from dataclasses import replace
 
 from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
 
@@ -88,7 +89,7 @@ def test_line_starting_above_bottom_windows_is_not_connected():
     assert left_y.size == right_y.size == 0
 
 
-def test_right_curve_entry_blocks_even_with_observed_straight_left():
+def test_right_curve_entry_uses_independently_observed_straight_left():
     config = LanePipelineConfig(
         src_points=(0, 0, 1, 0, 1, 1, 0, 1),
         dst_points=(0, 0, 1, 0, 1, 1, 0, 1),
@@ -96,7 +97,7 @@ def test_right_curve_entry_blocks_even_with_observed_straight_left():
         bev_ground_points_m=(-.32, .9, .32, .9, .32, .421, -.32, .421),
         camera_forward_offset_m=.184, lane_width_px=270.0,
         curve_lane_width_m=.27, curve_right_min_clearance_m=.07,
-        low_light_enabled=False,
+        low_light_enabled=False, observed_outer_curve_entry_enabled=True,
     )
     image = np.zeros((480, 640, 3), np.uint8)
     ys = np.arange(190, 436)
@@ -104,12 +105,44 @@ def test_right_curve_entry_blocks_even_with_observed_straight_left():
     cv2.polylines(image, [np.int32(np.column_stack((right_x, ys))).reshape(-1, 1, 2)],
                   False, (0, 255, 255), 12)
     cv2.line(image, (100, 90), (100, 435), (0, 255, 255), 12)
+    legacy = LanePipeline(replace(config, observed_outer_curve_entry_enabled=False)).process(image)
+    assert not legacy.valid and legacy.reason == 'outer left curve not observed'
     pipeline = LanePipeline(config)
     result = pipeline.process(image)
-    # The independent pre-mask search sees the left paint, but auto search is
-    # forced to right and the policy interprets its missing fit as unsafe.
+    # Pre-mask search preserves the left observation even though the right
+    # boundary alone satisfies the curve classifier.
     left_y, left_x, _, _, _ = pipeline._sliding_window_points(
         pipeline._yellow_curve_binary, tracking_mode='left')
     assert left_x.size >= config.fit_min_points
     assert pipeline._coverage_ok(left_y)
+    assert pipeline._yellow_curve_left_observed
+    assert result.valid, result.reason
+    assert result.recovered_side == 'left'
+    left_only = np.zeros_like(image)
+    cv2.line(left_only, (100, 90), (100, 435), (0, 255, 255), 12)
+    continued = pipeline.process(left_only)
+    assert continued.valid, continued.reason
+    assert continued.recovered_side == 'left'
+
+
+def test_pre_mask_hint_alone_cannot_authorize_inner_only_curve():
+    config = LanePipelineConfig(
+        src_points=(0, 0, 1, 0, 1, 1, 0, 1),
+        dst_points=(0, 0, 1, 0, 1, 1, 0, 1),
+        detect_yellow=True, yellow_curve_priority=False,
+        metric_lookahead_enabled=True,
+        bev_ground_points_m=(-.32, .9, .32, .9, .32, .421, -.32, .421),
+        camera_forward_offset_m=.184, lane_width_px=270.0,
+        curve_lane_width_m=.27, curve_right_min_clearance_m=.07,
+        low_light_enabled=False, observed_outer_curve_entry_enabled=True,
+    )
+    image = np.zeros((480, 640, 3), np.uint8)
+    ys = np.arange(190, 436)
+    xs = 560 - .003 * (ys - 190) ** 2
+    cv2.polylines(image, [np.int32(np.column_stack((xs, ys))).reshape(-1, 1, 2)],
+                  False, (0, 255, 255), 12)
+    pipeline = LanePipeline(config)
+    pipeline._yellow_curve_left_observed = True  # stale pre-mask history
+    result = pipeline.process(image)
+    assert not result.valid
     assert result.reason == 'outer left curve not observed'

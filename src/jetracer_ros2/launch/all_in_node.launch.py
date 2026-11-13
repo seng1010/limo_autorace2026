@@ -17,6 +17,8 @@ def generate_launch_description():
         # The measured ground ROI now drives the bounded curve recovery path.
         # Operators can still compare the legacy pixel controller with false.
         DeclareLaunchArgument('metric_ackermann', default_value='true'),
+        DeclareLaunchArgument('near_clamp_m', default_value='0.30'),
+        DeclareLaunchArgument('outer_curve_entry', default_value='false'),
         DeclareLaunchArgument('fork_default', default_value='stop', choices=['stop', 'left', 'right']),
         Node(
             package='jetracer_ros2',
@@ -29,7 +31,11 @@ def generate_launch_description():
             executable='lane_following_node',
             parameters=[{'live_debug_enabled': ParameterValue(LaunchConfiguration('debug_view'), value_type=bool),
                          'metric_lookahead_enabled': ParameterValue(
-                             LaunchConfiguration('metric_ackermann'), value_type=bool)}],
+                             LaunchConfiguration('metric_ackermann'), value_type=bool),
+                         'metric_max_near_clamp_m': ParameterValue(
+                             LaunchConfiguration('near_clamp_m'), value_type=float),
+                         'observed_outer_curve_entry_enabled': ParameterValue(
+                             LaunchConfiguration('outer_curve_entry'), value_type=bool)}],
             output='screen',
         ),
         Node(
