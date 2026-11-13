@@ -72,12 +72,13 @@ src/jetracer_ros2/
 |---|---|---|
 | `mission_obstacle_avoid_node` | LiDAR로 앞의 정차 LIMO 감지, 차선 변경 방향 결정 | M7 |
 | `mission_cone_avoid_node` | LiDAR로 양쪽 라바콘 사이 경로 추종 (차선 무시) | M8 |
-| `mission_traffic_light_node` | YOLO 신호등 결과 + 정지선 거리로 신호 상태 확정 | M1 |
+| `mission_traffic_light_node` | 신호 색만 판단: YOLO 모든 박스 중 가장 큰 신호등 + 박스 안 HSV 불빛 확인 + 연속 프레임 (`traffic_light_logic.py`). 정지·출발은 manager | M1 |
 | `mission_parking_node` | LiDAR로 빈칸 탐색 → 전진 → 회전 후진 → 직진 후진 (odom 기준 T자 주차) | M4 |
 
 ### 별도 노드 없이 `mission_manager_node`에서 처리
 
 - **M2 갈림길**: YOLO `sign_a` / `sign_b` → `lane_following_node` 모드를 `left` / `right`로 전환
+- **M1 신호등** (`m1_traffic_light.py`): 신호등(아무 색)을 본 뒤 나오는 정지선에서 판단 → 적·황·unknown이면 정지선 앞 정밀 정지 후 녹색 대기, 녹색 확정되면 바로 출발 / 도착 때 녹색이면 서지 않고 통과 (통과 중 적·황으로 바뀌면 정지) → `m1_done_distance_m` 이동하면 M4. 녹색이 `m1_max_wait_sec`(30초) 안 오면 출발, 신호등을 못 보면 `m1_max_approach_distance_m` 뒤 건너뜀. YOLO 없이 테스트할 땐 `-p m1_trigger:=light_or_line`
 - **M3 보행자** (`m3_pedestrian.py`): YOLO `pedestrian`을 본 뒤(M3 시작 전에 봐도 인정, 1.5 m 안) 나오는 정지선 → 정지선 앞까지 감속·정밀 정지(앞바퀴 기준, `stop_approach.py`) → odom으로 완전정지 확인 후 `m3_hold_sec`(3.5초) 대기 → 출발 → `m3_done_distance_m` 이동하면 자동으로 M7. 표지판을 못 보면 서지 않고 `m3_max_approach_distance_m`(1.5 m) 뒤 M3를 건너뜀. YOLO 없이 테스트할 땐 `-p m3_trigger:=sign_or_line`
 - **M5 서행**: YOLO `slow_sign` → `slow_speed`로 감속
 
@@ -114,9 +115,9 @@ src/jetracer_ros2/
 
 | 토픽 | 타입 | 발행 | 구독 | 내용 |
 |---|---|---|---|---|
-| `mission/yolo_event` | `std_msgs/String` | `yolo_detection_node` | manager, traffic_light | 여러 프레임 연속으로 확인된 객체 하나 (아래 값) |
-| `perception/detections` | `std_msgs/String` (JSON) | `yolo_detection_node` | (없음, 디버그용) | 한 프레임에 보인 객체 전부 |
-| `mission/stop_line_distance` | `std_msgs/Float32` | `stop_line_node` | manager, traffic_light, lane(M6) | **앞바퀴**→정지선 거리 [m] (정지선 앞에 서야 하므로 앞바퀴 기준. `reference_wheel: rear`로 전환 가능). 선이 카메라 사각지대로 사라져도 odom으로 계속 추정, 선을 지나치거나 없으면 `-1.0` |
+| `mission/yolo_event` | `std_msgs/String` | `yolo_detection_node` | manager | 여러 프레임 연속으로 확인된 객체 하나 (아래 값) |
+| `perception/detections` | `std_msgs/String` (JSON) | `yolo_detection_node` | traffic_light | 한 프레임에 보인 객체 전부 |
+| `mission/stop_line_distance` | `std_msgs/Float32` | `stop_line_node` | manager, lane(M6) | **앞바퀴**→정지선 거리 [m] (정지선 앞에 서야 하므로 앞바퀴 기준. `reference_wheel: rear`로 전환 가능). 선이 카메라 사각지대로 사라져도 odom으로 계속 추정, 선을 지나치거나 없으면 `-1.0` |
 | `mission/stop_line_detected` | `std_msgs/Bool` | `stop_line_node` | (없음) | 거리 값이 유효한지 (화면 검출 또는 odom 추적) |
 
 `mission/yolo_event` 값: `traffic_red`, `traffic_yellow`, `traffic_green`, `sign_a`, `sign_b`, `pedestrian`, `slow_sign`, `parking_sign`
@@ -143,7 +144,7 @@ YOLO 학습 클래스 이름은 위 값 그대로 쓰는 것을 권장합니다.
 |---|---|---|---|---|
 | `mission/active` | `std_msgs/String` | manager | debug | 현재 미션 (`M5` … `M4`) |
 | `mission/lane_mode` | `std_msgs/String` | manager | `lane_following_node` | `center` / `left` / `right` / `heading_hold` |
-| `mission/traffic_light_state` | `std_msgs/String` | `mission_traffic_light_node` | manager | `red` / `yellow` / `green` |
+| `mission/traffic_light_state` | `std_msgs/String` | `mission_traffic_light_node` | manager | `red` / `yellow` / `green` / `unknown`(신호등 안 보임) |
 | `mission/obstacle_avoid/state` | `std_msgs/String` | `mission_obstacle_avoid_node` | manager | `change_left` / `change_right` / `stop` / `clear` |
 | `mission/cone/state` | `std_msgs/String` | `mission_cone_avoid_node` | manager | `tracking` / `lost` / `emergency_stop` |
 | `mission/parking/start` | `std_msgs/Bool` | manager | `mission_parking_node` | `true`면 주차 시작 |

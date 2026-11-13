@@ -123,7 +123,6 @@ mission_manager_node:
     normal_speed: 0.25
     slow_speed: 0.12
     command_timeout_sec: 0.40
-    stop_line_distance_m: 0.35        # M1 (m1-traffic-light 에서 정밀 정지로 교체 예정)
     auto_start_mission_nodes: true
     start_mission: 'M5'               # 테스트: --ros-args -p start_mission:=M3
     odom_topic: '/odom'
@@ -143,17 +142,35 @@ mission_manager_node:
     m3_sign_valid_distance_m: 1.5     # 표지판 본 뒤 이 거리 안에 나온 정지선만 인정
     m3_max_approach_distance_m: 1.5   # M3 시작 후 못 서고 이만큼 가면 M3 건너뜀 (0 = 끄기)
                                       # = M3 시작 지점(M6 끝)~횡단보도 정지선 거리 + 0.5 m. 트랙에서 재서 조정
+    # M1 신호등 (m1_traffic_light.py). 신호 색은 mission_traffic_light_node 가 판단
+    m1_trigger: 'light'               # 대회용: 신호등 본 뒤 정지선에서 판단
+                                      # YOLO 없이 테스트: --ros-args -p m1_trigger:=light_or_line
+    m1_line_arm_distance_m: 0.80      # 정지선이 이 거리 안이면 정지/통과 판단
+    m1_light_valid_distance_m: 2.0    # 신호등 본 뒤 이 거리 안의 정지선만 인정
+    m1_stop_on_green_arrival: false   # true: 녹색에 도착해도 일단 정지 후 출발
+    m1_stop_switch_min_m: 0.15        # 녹색 통과 중 적·황으로 바뀌면 이 거리 이상 남았을 때만 정지
+    m1_max_wait_sec: 30.0             # 녹색 안 보이면 이 시간 뒤 출발 (나머지 미션 보호, 0 = 끄기)
+    m1_done_distance_m: 0.50          # 출발/통과 후 이만큼 가면 M1 완료 -> M4
+    m1_max_approach_distance_m: 2.0   # M1 시작 후 판단 못 하고 이만큼 가면 M1 건너뜀 (트랙 보고 조정)
     m3_hold_sec: 3.5                  # 완전정지 확인 후 대기 (규정 3초 이상)
     m3_done_distance_m: 0.50          # 출발 후 이만큼 가면 M3 완료 -> M7
 
 mission_traffic_light_node:
   ros__parameters:
-    yolo_event_topic: 'mission/yolo_event'
-    stop_line_topic: 'mission/stop_line_distance'
-    output_topic: 'mission/traffic_light_state'
-    stop_distance_m: 0.35
-    require_stop_line: true
-    confirm_events: 2
+    # 신호 색만 판단 (정지·출발은 매니저). traffic_light_logic.py
+    detections_topic: 'perception/detections'   # YOLO 모든 박스 (최고점 1개만 나오는 yolo_event 아님)
+    image_topic: '/camera/color/image_raw/compressed'
+    output_topic: 'mission/traffic_light_state' # red / yellow / green / unknown
+    publish_rate_hz: 10.0
+    image_max_age_sec: 0.3
+    min_confidence: 0.45
+    min_area_ratio: 0.0005            # 박스 면적/화면. 너무 작은(먼) 신호등 무시
+    verify_hsv: true                  # 박스 안 불빛 색을 HSV로 다시 확인 (광고 모니터·오분류 거르기)
+    min_lit_ratio: 0.04               # 박스 안 그 색 불빛 픽셀 비율 최소
+    lit_value_min: 150
+    lit_saturation_min: 90
+    confirm_frames: 3                 # 같은 색 연속 N번이면 확정
+    lost_timeout_sec: 1.0             # 신호등이 이 시간 안 보이면 unknown
 
 mission_obstacle_avoid_node:
   ros__parameters:

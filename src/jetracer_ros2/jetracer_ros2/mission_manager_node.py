@@ -4,8 +4,9 @@ Mission order: M5 -> M6 -> M3 -> M7 -> M2 -> M8 -> M1 -> M4.
 Always-on perception nodes publish proposals or events.  This node selects one
 command source, applies mission speed/stop constraints, and owns ``/cmd_vel``.
 
-M3 (보행자 표지판 정지) 판단은 ``m3_pedestrian.PedestrianStopMission`` 이 하고,
-이 노드는 입력(정지선 거리, odom 속도·이동거리, YOLO 이벤트)을 모아 매 주기 넘긴다.
+M3 (보행자 표지판 정지) 판단은 ``m3_pedestrian.PedestrianStopMission``,
+M1 (신호등) 판단은 ``m1_traffic_light.TrafficLightMission`` 이 하고, 이 노드는 입력
+(정지선 거리, odom 속도·이동거리, YOLO 이벤트, 신호등 색)을 모아 매 주기 넘긴다.
 
 테스트용: ``ros2 run jetracer_ros2 mission_manager_node --ros-args -p start_mission:=M3``
 디버그:   ``/mission_manager/debug/state`` (String) — 현재 미션·상태·정지선 거리·속도 (모든 미션, 20 Hz)
@@ -23,6 +24,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
 
+from jetracer_ros2.m1_traffic_light import M1Config, TrafficLightMission
 from jetracer_ros2.m3_pedestrian import M3Config, PedestrianStopMission
 from jetracer_ros2.stop_approach import (
     FullStopDetector, StopApproachConfig, StopApproachController)
@@ -52,7 +54,6 @@ class MissionManagerNode(Node):
             'normal_speed': 0.25,
             'slow_speed': 0.12,
             'command_timeout_sec': 0.40,
-            'stop_line_distance_m': 0.35,
             'auto_start_mission_nodes': True,
             'start_mission': 'M5',                  # 테스트할 때 M3 등으로 바로 시작
             'odom_topic': '/odom',
@@ -70,6 +71,15 @@ class MissionManagerNode(Node):
             'm3_line_arm_distance_m': 0.80,
             'm3_sign_valid_distance_m': 1.5,
             'm3_max_approach_distance_m': 1.5,
+            # M1
+            'm1_trigger': 'light',
+            'm1_line_arm_distance_m': 0.80,
+            'm1_light_valid_distance_m': 2.0,
+            'm1_stop_on_green_arrival': False,
+            'm1_stop_switch_min_m': 0.15,
+            'm1_max_wait_sec': 30.0,
+            'm1_done_distance_m': 0.50,
+            'm1_max_approach_distance_m': 2.0,
             'm3_hold_sec': 3.5,
             'm3_done_distance_m': 0.50,
         }
@@ -87,8 +97,8 @@ class MissionManagerNode(Node):
         self._last_cmd_ns = {'lane': 0, 'cone': 0, 'parking': 0}
         self._slow = False
         self._blocked = False
-        self._at_stop_line = False
         self._traffic = 'unknown'
+        self._last_light_s = None         # 신호등(아무 색)을 마지막으로 본 odom 위치
         self._obstacle_seen = False
         self._processes = {}
         self._stop_line_m = None
@@ -110,7 +120,17 @@ class MissionManagerNode(Node):
                      max_approach_distance_m=p('m3_max_approach_distance_m'),
                      hold_sec=p('m3_hold_sec'), done_distance_m=p('m3_done_distance_m')),
             approach, FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
-        self._m3_last_state = ''
+        self._m1 = TrafficLightMission(
+            M1Config(trigger=p('m1_trigger'),
+                     line_arm_distance_m=p('m1_line_arm_distance_m'),
+                     light_valid_distance_m=p('m1_light_valid_distance_m'),
+                     stop_on_green_arrival=p('m1_stop_on_green_arrival'),
+                     stop_switch_min_m=p('m1_stop_switch_min_m'),
+                     max_wait_sec=p('m1_max_wait_sec'),
+                     done_distance_m=p('m1_done_distance_m'),
+                     max_approach_distance_m=p('m1_max_approach_distance_m')),
+            approach, FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
+        self._mission_last_state = ''
 
         self.cmd_pub = self.create_publisher(
             Twist, self.get_parameter('output_topic').value, 10)
@@ -182,14 +202,11 @@ class MissionManagerNode(Node):
         distance = msg.data
         self._stop_line_m = float(distance) if distance >= 0.0 else None
         self._stop_line_ns = self.get_clock().now().nanoseconds
-        self._at_stop_line = 0.0 <= distance <= self.get_parameter('stop_line_distance_m').value
 
     def _traffic_callback(self, msg):
-        if self._active != 'M1':
-            return
         self._traffic = msg.data
-        if msg.data == 'green' and self._at_stop_line:
-            self._advance('green traffic light at stop line')
+        if msg.data in ('red', 'yellow', 'green'):
+            self._last_light_s = self._odom.s
 
     def _obstacle_callback(self, msg):
         if self._active != 'M7':
@@ -234,11 +251,12 @@ class MissionManagerNode(Node):
     def _enter_mission(self, mission, initial=False):
         self._slow = False
         self._blocked = False
-        self._at_stop_line = False
         self._traffic = 'unknown'
         self._obstacle_seen = False
         if mission == 'M3':
             self._m3.reset()
+        if mission == 'M1':
+            self._m1.reset()
         self.lane_mode_pub.publish(String(data='center'))
         self.active_pub.publish(String(data=mission))
         process = DYNAMIC_NODE.get(mission)
@@ -279,31 +297,46 @@ class MissionManagerNode(Node):
     def _debug(self, text):
         self.debug_pub.publish(String(data=f'{self._active} {text}'))
 
+    def _report(self, decision, stop_line, speed, done_text, skip_text, extra=''):
+        """미션 판단 결과 공통 처리: 상태 로그, 디버그 토픽, 완료 시 다음 미션.
+        속도 제한(None=평소, 0=정지)을 돌려준다."""
+        if decision.state != self._mission_last_state:
+            self.get_logger().info(
+                f'{self._active} 상태: {self._mission_last_state or "-"} -> {decision.state}'
+                + (f' (정지선 {stop_line:.3f} m)' if stop_line is not None else '') + extra)
+            self._mission_last_state = decision.state
+        line_text = f'{stop_line:.3f}' if stop_line is not None else 'none'
+        self._debug(f'{decision.state} line={line_text} v={speed:.3f}{extra}')
+        if decision.done:
+            self._mission_last_state = ''
+            if decision.skipped:
+                self.get_logger().warn(skip_text)
+                self._advance(f'{self._active} skipped')
+            else:
+                self._advance(done_text)
+            return None
+        return decision.speed_limit
+
     def _m3_tick(self, now_ns):
-        """M3 판단. 속도 제한(None=평소, 0=정지)을 돌려주고, 끝나면 다음 미션으로."""
         stop_line = self._fresh_stop_line(now_ns)
         speed = self._measured_speed(now_ns)
         decision = self._m3.update(now_ns / 1e9, stop_line, speed, self._odom.s,
                                    last_sign_s=self._last_pedestrian_s)
-        if decision.state != self._m3_last_state:
-            self.get_logger().info(f'M3 상태: {self._m3_last_state or "-"} -> {decision.state}'
-                                   + (f' (정지선 {stop_line:.3f} m)' if stop_line is not None else ''))
-            self._m3_last_state = decision.state
-        line_text = f'{stop_line:.3f}' if stop_line is not None else 'none'
-        self._debug(f'{decision.state} line={line_text} v={speed:.3f}')
-        if decision.done:
-            self._m3_last_state = ''
-            if decision.skipped:
-                self.get_logger().warn('M3 보행자 표지판을 못 보고 구간을 지나침 — M3 건너뜀')
-                self._advance('M3 skipped (표지판 미인식)')
-            else:
-                self._advance('M3 정지·3초 대기·출발 완료')
-            return None
-        return decision.speed_limit
+        return self._report(decision, stop_line, speed, 'M3 정지·3초 대기·출발 완료',
+                            'M3 보행자 표지판을 못 보고 구간을 지나침 — M3 건너뜀')
+
+    def _m1_tick(self, now_ns):
+        stop_line = self._fresh_stop_line(now_ns)
+        speed = self._measured_speed(now_ns)
+        decision = self._m1.update(now_ns / 1e9, stop_line, speed, self._odom.s,
+                                   self._traffic, last_light_s=self._last_light_s)
+        return self._report(decision, stop_line, speed, 'M1 신호등 통과 완료',
+                            'M1 신호등을 못 보고 구간을 지나침 — M1 건너뜀',
+                            extra=f' light={self._traffic}')
 
     def _control_tick(self):
         now = self.get_clock().now().nanoseconds
-        if self._active != 'M3':          # M3는 _m3_tick 안에서 상태까지 같이 발행
+        if self._active not in ('M1', 'M3'):   # M1·M3는 _report 에서 상태까지 같이 발행
             line = self._fresh_stop_line(now)
             line_text = f'{line:.3f}' if line is not None else 'none'
             self._debug(f'{"blocked" if self._blocked else "run"} line={line_text} '
@@ -312,14 +345,11 @@ class MissionManagerNode(Node):
             self._publish(Twist())
             return
         speed_limit = None
-        if self._active == 'M3':
-            speed_limit = self._m3_tick(now)
+        if self._active in ('M1', 'M3'):
+            speed_limit = self._m1_tick(now) if self._active == 'M1' else self._m3_tick(now)
             if speed_limit == 0.0:
                 self._publish(Twist())
                 return
-        if self._active == 'M1' and self._at_stop_line and self._traffic != 'green':
-            self._publish(Twist())
-            return
         source = 'cone' if self._active == 'M8' else ('parking' if self._active == 'M4' else 'lane')
         age = (now - self._last_cmd_ns[source]) / 1e9 if self._last_cmd_ns[source] else float('inf')
         if age > self.get_parameter('command_timeout_sec').value:
