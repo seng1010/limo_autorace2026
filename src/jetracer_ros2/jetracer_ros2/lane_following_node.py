@@ -140,6 +140,7 @@ class LaneFollowingNode(Node):
             'preview_heading_gain': 0.25,
             'right_reference_gain': 1.0,
             'status_log_interval_sec': 1.0,
+            'timing_log_enabled': False,
             'max_steer_angle': 0.47123889803846897,  # 27 degrees
             'ackermann_wheelbase_m': 0.20,
             'ackermann_track_m': 0.172,
@@ -366,20 +367,25 @@ class LaneFollowingNode(Node):
         self.mode_state_pub.publish(String(data=self._mode))
 
     def _image_callback(self, msg: CompressedImage):
+        timing_log_enabled = bool(self.get_parameter('timing_log_enabled').value)
+        started_perf_ns = time.perf_counter_ns() if timing_log_enabled else 0
         self._last_image_ns = self.get_clock().now().nanoseconds
         image = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
+        decoded_perf_ns = time.perf_counter_ns() if timing_log_enabled else 0
         if image is None:
             self._safe_stop('image decode failed')
             return
         raw_image = image
         if self._camera_matrix is not None and self._distortion is not None:
             image = cv2.undistort(image, self._camera_matrix, self._distortion)
+        prepared_perf_ns = time.perf_counter_ns() if timing_log_enabled else 0
         try:
             tracking_mode = self._mode if self._mode in ('left', 'right') else 'auto'
             result = self.pipeline.process(image, tracking_mode=tracking_mode)
         except (cv2.error, ValueError, TypeError, np.linalg.LinAlgError) as error:
             self._safe_stop(f'lane processing failed: {error}')
             return
+        processed_perf_ns = time.perf_counter_ns() if timing_log_enabled else 0
 
         now_ns = self.get_clock().now().nanoseconds
         self._update_zigzag(yellow_zigzag_evidence(result), now_ns)
@@ -531,6 +537,24 @@ class LaneFollowingNode(Node):
             self._reset_steering()
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
         self._publish_command(cmd)
+        if timing_log_enabled:
+            published_perf_ns = time.perf_counter_ns()
+            source_stamp_ns = (msg.header.stamp.sec * 1_000_000_000
+                               + msg.header.stamp.nanosec)
+            image_age_ms = ((self.get_clock().now().nanoseconds - source_stamp_ns) / 1e6
+                            if source_stamp_ns > 0 else float('nan'))
+            self.get_logger().info(
+                'lane_timing '
+                f'age_ms={image_age_ms:.1f} '
+                f'decode_ms={(decoded_perf_ns - started_perf_ns) / 1e6:.1f} '
+                f'undistort_ms={(prepared_perf_ns - decoded_perf_ns) / 1e6:.1f} '
+                f'pipeline_ms={(processed_perf_ns - prepared_perf_ns) / 1e6:.1f} '
+                f'control_ms={(published_perf_ns - processed_perf_ns) / 1e6:.1f} '
+                f'target=({result.target_lateral_m},{result.target_forward_m}) '
+                f'confidence={result.confidence:.2f} curve_turn={result.curve_turn} '
+                f'angle_cmd_deg={math.degrees(self._applied_steering * self.get_parameter("max_steer_angle").value):+.1f} '
+                f'state={control_state} reason={control_reason!r} '
+                f'v={cmd.linear.x:.3f} omega={cmd.angular.z:.3f}')
         interval = float(self.get_parameter('status_log_interval_sec').value)
         if interval > 0 and (now_ns - self._last_status_ns) / 1e9 >= interval:
             self._last_status_ns = now_ns

@@ -34,6 +34,7 @@ lane_following_node:
     preview_heading_gain: 0.25      # 확인된 곡선에서만 전방 방향 변화 보정
     right_reference_gain: 1.0        # 실제 오른쪽 선 하나로 복원한 중심경로 오차 보정
     status_log_interval_sec: 1.0     # 선 종류 추정/confidence/명령 로그 주기. 0=끄기
+    timing_log_enabled: false         # 실차 구간별 지연/입력 나이/최종 명령 계측 (매 프레임 INFO)
     max_steer_angle: 0.47123889803846897  # 27 deg; below limo_base 28 deg clamp
     ackermann_wheelbase_m: 0.20    # LIMO Pro 공식 휠베이스; limo_base와 대조
     ackermann_track_m: 0.172       # 현재 limo_base 역변환 코드의 값과 일치시킬 것
