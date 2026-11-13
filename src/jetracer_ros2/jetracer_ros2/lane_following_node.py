@@ -324,7 +324,11 @@ class LaneFollowingNode(Node):
                 self._warn(f'lane lost for {self._invalid_frames} frames, pipeline reset')
 
         cmd = Twist()
+        control_state = 'STOP'
+        control_reason = result.reason
         if usable:
+            control_state = 'TRACK'
+            control_reason = 'validated lane path'
             error = self._mode_error(result)
             max_angle = float(self.get_parameter('max_steer_angle').value)
             if result.target_lateral_m is not None:
@@ -376,6 +380,7 @@ class LaneFollowingNode(Node):
             # A measured boundary hazard must not enter the brief blind-curve
             # command hold. Publish zero immediately instead.
             self._reset_steering()
+            control_state = 'SAFETY_STOP'
             self._warn(f'lane safety stop: {result.reason}')
         elif (self._last_valid_cmd is not None and self._last_valid_curve
               and 0 <= (now_ns - self._last_valid_ns) / 1e9 <= min(
@@ -385,18 +390,24 @@ class LaneFollowingNode(Node):
                                 self.get_parameter('curve_recovery_speed').value))
             cmd.linear.x = speed
             cmd.angular.z = self._omega(self._held_steering, speed)
+            control_state = 'CURVE_HOLD'
+            control_reason = 'brief curve detection gap'
         elif self._mode == 'heading_hold' and abs(self._held_steering) > 1e-3:
             self._held_steering *= self.get_parameter('heading_hold_decay').value
             self._applied_steering = self._held_steering
             self._last_steering_ns = now_ns
             cmd.linear.x = self.get_parameter('zigzag_speed').value
             cmd.angular.z = self._omega(self._held_steering, cmd.linear.x)
+            control_state = 'HEADING_HOLD'
+            control_reason = 'heading_hold mode with invalid lane'
         elif (self._last_valid_cmd is not None
               and (now_ns - self._last_valid_ns) / 1e9 <= self.get_parameter('invalid_hold_sec').value):
             # 반사·그림자 등으로 잠깐 놓친 프레임은 마지막 명령을 유지해 덜컥거림을 막는다.
             # Even a brief blind interval must not retain the 0.70 m/s cruise.
             cmd.linear.x = min(0.12, self._last_valid_cmd.linear.x)
             cmd.angular.z = self._omega(self._held_steering, cmd.linear.x)
+            control_state = 'BRIEF_HOLD'
+            control_reason = 'brief lane detection gap'
         else:
             self._reset_steering()
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
@@ -412,6 +423,7 @@ class LaneFollowingNode(Node):
             self.get_logger().info(
                 f'lane type(est): L={result.left_type} R={result.right_type} '
                 f'confidence={result.confidence:.2f} usable={usable} '
+                f'control_state={control_state} control_reason={control_reason} '
                 f'curve_turn={result.curve_turn} nearest_observed={result.curve_nearest_observation} '
                 f'left_curve_target={result.curve_left_target_active} '
                 f'left_curve_preview={result.curve_left_preview_rad} '
@@ -429,6 +441,7 @@ class LaneFollowingNode(Node):
                 received_mono=time.monotonic(), source_stamp_ns=msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec,
                 commands_enabled=self.commands_enabled, valid=bool(result.valid), usable=bool(usable),
                 confidence=float(result.confidence), reason=result.reason, mode=self._mode,
+                control_state=control_state, control_reason=control_reason,
                 reference=reference_side(result), left_type=result.left_type, right_type=result.right_type,
                 lateral=float(result.lateral_error), heading_rad=float(result.heading_error),
                 shape_span=float(result.curve_heading_span), curve_weight=float(self._curve_weight),

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from jetracer_ros2.live_debug_view import LiveViewer, render_view, render_grid, path_layers, VIEW_NAMES
+from jetracer_ros2.live_debug_view import LiveViewer, render_view, render_grid, path_layers, status_text, VIEW_NAMES
 from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
 from jetracer_ros2.driving_profile import ZigzagTracker
 
@@ -31,6 +31,21 @@ def test_projection_uses_actual_pipeline_transform():
     result = render_view(packet, 'overlay', dict(roi=False))
     assert np.any(result != 0)
     assert not packet['camera'].any()  # Rendering must not mutate inference buffers.
+
+
+def test_status_separates_lane_validity_from_control_decision():
+    packet = sample_packet(valid=False)
+    packet['state'].update(
+        commands_enabled=True, mode='center', usable=False, confidence=0.89,
+        left_type='unobserved', right_type='yellow/solid/curve', lateral=0.0,
+        heading_rad=0.0, shape_span=0.516, curve_weight=0.0,
+        curve_control=False, angle_cmd_deg=0.0, lane_v=0.0, lane_omega=0.0,
+        lookahead='unavailable', reason='outer left curve not observed',
+        control_state='SAFETY_STOP', control_reason='outer left curve not observed')
+    status = status_text(packet)
+    assert 'confidence=0.89' in status
+    assert 'control state: SAFETY_STOP' in status
+    assert 'control reason: outer left curve not observed' in status
 
 
 def test_invalid_result_does_not_show_old_path():

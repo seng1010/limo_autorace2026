@@ -115,6 +115,8 @@ def status_text(packet):
         'COMMAND OUTPUT: ' + ('ENABLED' if s['commands_enabled'] else 'OFF (manual inspection)'),
         f"mode={s['mode']} reference={s['reference']}",
         f"valid={s['valid']} usable={s['usable']}",
+        f"control state: {s.get('control_state', 'unknown')}",
+        f"control reason: {s.get('control_reason', 'unknown')}",
         f"confidence={s['confidence']:.2f}",
         f"L: {s['left_type']}", f"R: {s['right_type']}",
         f"lateral error: {s['lateral']:+.3f}",
