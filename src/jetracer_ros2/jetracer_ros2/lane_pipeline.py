@@ -73,7 +73,7 @@ class LanePipelineConfig:
     camera_forward_offset_m: float = 0.0
     metric_lateral_scale_m: float = 0.30
     bev_ground_points_m: Tuple[float, ...] = (0.0,) * 8
-    metric_max_near_clamp_m: float = 0.25
+    metric_max_near_clamp_m: float = 0.30
     metric_edge_margin_m: float = 0.02
     target_roi_margin_px: float = 20.0
     yellow_curve_priority: bool = True
@@ -1233,7 +1233,8 @@ class LanePipeline:
                               left_type=left_type, right_type=right_type,
                               yellow_curve_priority_active=True, zigzag=zigzag,
                               right_ground_boundary=tuple(right_ground_boundary))
-        if fixed_row_missing and left_curve_target is None and not curve_recovery_allowed:
+        if (self.ground is None and fixed_row_missing and left_curve_target is None
+                and not curve_recovery_allowed):
             self.reset(preserve_curve_lock=True)
             return LaneResult(valid=False, observation_state='accepted',
                               path_state='rejected', debug_image=debug, bev_image=bird,
@@ -1255,8 +1256,6 @@ class LanePipeline:
                 if left_curve_target is not None:
                     target_lateral_m, target_forward_m, (center_x, y_eval), _ = left_curve_target
                     heading_error = float(np.arctan(-np.polyval(np.polyder(center_fit), y_eval)))
-                elif fixed_row_missing:
-                    raise ValueError('fixed target outside observed curve rows')
                 else:
                     target_lateral_m, heading_error, y_eval, target_forward_m = (
                         self.ground.evaluate_target(center_fit, observed_ys.min(), observed_ys.max()))

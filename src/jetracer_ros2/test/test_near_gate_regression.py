@@ -39,15 +39,16 @@ def _paint_straight(offset_m=0.0, sides=(-1, 1), near_m=0.45):
     return pipeline, image
 
 
-def test_centered_two_sided_straight_reaches_target_distance_gate():
+def test_centered_two_sided_straight_uses_nearest_observed_target():
     pipeline, image = _paint_straight()
     result = pipeline.process(image)
-    # Both boundaries reach fitting; fixed_row_missing is not this failure.
+    # Both boundaries reach fitting; the target must be observed, not a
+    # polynomial extrapolation into the camera's blind near-field.
     assert result.observation_state == 'accepted'
     assert result.left_type != 'unobserved'
     assert result.right_type != 'unobserved'
-    assert not result.valid
-    assert result.reason == 'lookahead too close to or outside observed ground range'
+    assert result.valid
+    assert result.target_forward_m == pytest.approx(.679, abs=.02)
 
 
 @pytest.mark.parametrize('offset_m', (-0.10, -0.06, -0.02, 0.02, 0.06, 0.10))
@@ -59,11 +60,19 @@ def test_straight_offsets_keep_observed_boundaries(offset_m):
     assert result.observation_state == 'accepted'
 
 
-def test_one_sided_short_observation_reaches_fixed_row_gate():
+def test_one_sided_short_observation_uses_metric_range_instead_of_fixed_row():
+    pipeline, image = _paint_straight(sides=(-1,), near_m=0.68)
+    result = pipeline.process(image)
+    assert result.valid, result.reason
+    assert result.recovered_side == 'left'
+    assert result.target_forward_m == pytest.approx(.695, abs=.02)
+
+
+def test_one_sided_line_still_stops_when_metric_target_is_too_far():
     pipeline, image = _paint_straight(sides=(-1,), near_m=0.78)
     result = pipeline.process(image)
     assert not result.valid
-    assert result.reason == 'one-side target outside observed lane rows'
+    assert result.reason == 'lookahead too close to or outside observed ground range'
 
 
 def test_line_starting_above_bottom_windows_is_not_connected():

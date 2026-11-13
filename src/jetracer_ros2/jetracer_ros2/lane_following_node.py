@@ -228,7 +228,7 @@ class LaneFollowingNode(Node):
             'metric_lateral_scale_m': 0.30,
             'bev_ground_points_m': [-0.24, 1.326, 0.24, 1.326,
                                     0.22, 0.421, -0.22, 0.421],
-            'metric_max_near_clamp_m': 0.25,
+            'metric_max_near_clamp_m': 0.30,
             'metric_edge_margin_m': 0.02,
             'target_roi_margin_px': 20.0,
             'yellow_curve_priority': True,
