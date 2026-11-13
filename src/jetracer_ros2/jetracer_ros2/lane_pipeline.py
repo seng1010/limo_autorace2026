@@ -123,6 +123,7 @@ class LaneResult:
     curve_nearest_observation: bool = False
     curve_left_target_active: bool = False
     curve_left_preview_rad: Optional[float] = None
+    ground_path: Tuple[Tuple[float, float], ...] = ()  # (lateral right, forward), near to far
 
 
 class LanePipeline:
@@ -1250,6 +1251,22 @@ class LanePipeline:
                               left_type=left_type, right_type=right_type,
                               yellow_curve_priority_active=yellow_curve_priority_active)
 
+        # Keep an observed-range metric path for optional bounded recovery.
+        # This is diagnostic data only until the odometry feature is enabled.
+        ground_path = []
+        if self.ground is not None:
+            for row in np.linspace(float(observed_ys.max()), float(observed_ys.min()), 24):
+                x = float(np.polyval(center_fit, row))
+                if not self._target_within_bev(x, row):
+                    continue
+                try:
+                    lateral, forward = self.ground.project_bev_point(x, row)
+                except ValueError:
+                    continue
+                if (forward <= self.config.curve_nearest_max_forward_m
+                        and (not ground_path or forward > ground_path[-1][1] + 1e-4)):
+                    ground_path.append((lateral, forward))
+
         cv2.circle(debug, (int(center_x), int(y_eval)), 7, (0, 255, 0), -1)
         cv2.putText(
             debug,
@@ -1296,6 +1313,7 @@ class LanePipeline:
             curve_nearest_observation=observed_nearest,
             curve_left_target_active=left_curve_target is not None,
             curve_left_preview_rad=(left_curve_target[3] if left_curve_target is not None else None),
+            ground_path=tuple(ground_path),
             preview_heading_error=preview_heading,
             lookahead_description=lookahead_description,
             target_lateral_m=target_lateral_m,

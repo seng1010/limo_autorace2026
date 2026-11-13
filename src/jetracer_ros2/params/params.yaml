@@ -51,6 +51,13 @@ lane_following_node:
     invalid_hold_sec: 0.25            # 차선 놓쳤을 때 마지막 명령 유지 시간 [s]
     curve_recovery_sec: 0.50         # 신뢰도 0.70 이상 확인된 곡선 유실만 연결, 최대 0.8초
     curve_recovery_speed: 0.12       # 곡선 유실 시 마지막 조향 유지, 최대 0.12 m/s
+    odom_recovery_enabled: false     # 실차 일괄 검증 전에는 비활성. true 시 검증 경로를 /odom으로 갱신
+    odom_topic: '/odom'
+    odom_max_age_sec: 0.20           # 갱신이 끊긴 오도메트리로는 복구하지 않음
+    odom_max_speed_m_s: 1.0         # 순간 위치 점프/비현실적 변위 거부
+    odom_max_yaw_rate_rad_s: 3.0     # 비현실적 방위 점프 거부
+    odom_recovery_max_distance_m: 0.06 # 잔여 경로 절반과 이 절대 거리 중 먼저 도달하면 정지
+    odom_recovery_min_forward_m: 0.15 # 후축 앞에 남은 경로점이 없으면 정지
     curve_nearest_max_forward_m: 1.05 # 노란 우곡선의 관측 최근접점을 쓸 수 있는 후축 기준 최대 거리
     curve_left_near_max_forward_m: 1.05 # 우곡선 왼쪽선 아래 2~3번째 창 목표의 후축 기준 상한
     curve_lane_width_m: 0.52        # 사용자 실측 노란선 간 폭. 바깥선의 법선 방향으로 중심경로 생성

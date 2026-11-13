@@ -7,6 +7,7 @@ This node never publishes ``/cmd_vel``.  It publishes a proposed command on
 import os
 import sys
 import time
+import math
 from typing import Optional
 
 import cv2
@@ -14,6 +15,7 @@ import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist, Vector3Stamped
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
@@ -30,6 +32,7 @@ from jetracer_ros2.lane_steering import (
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 from jetracer_ros2.live_debug_view import LiveViewer
 from jetracer_ros2.lane_ackermann import target_to_inner_angle
+from jetracer_ros2.lane_recovery import Pose2D, snapshot_path, recovery_target
 from jetracer_ros2.driving_profile import (
     ZigzagTracker, select_speed, yellow_zigzag_evidence,
 )
@@ -65,6 +68,13 @@ class LaneFollowingNode(Node):
         self._last_valid_ns = 0
         self._last_valid_curve = False
         self._right_curve_hits = 0
+        self._odom_pose = None
+        self._odom_distance_m = 0.0
+        self._odom_last_stamp_ns = 0
+        self._odom_last_arrival_ns = 0
+        self._odom_frame_id = None
+        self._odom_ready = False
+        self._recovery_snapshot = None
 
         self.commands_enabled = self.get_parameter('publish_commands').value
         self.cmd_pub = (self.create_publisher(Twist, self.get_parameter('output_topic').value, 10)
@@ -91,6 +101,10 @@ class LaneFollowingNode(Node):
         self.image_sub = self.create_subscription(
             CompressedImage, self.get_parameter('image_topic').value,
             self._image_callback, qos_profile_sensor_data)
+        if self.get_parameter('odom_recovery_enabled').value:
+            self.odom_sub = self.create_subscription(
+                Odometry, self.get_parameter('odom_topic').value,
+                self._odom_callback, qos_profile_sensor_data)
         if self.get_parameter('use_camera_info').value:
             self.camera_info_sub = self.create_subscription(
                 CameraInfo, self.get_parameter('camera_info_topic').value,
@@ -142,6 +156,13 @@ class LaneFollowingNode(Node):
             'invalid_hold_sec': 0.25,
             'curve_recovery_sec': 0.50,
             'curve_recovery_speed': 0.12,
+            'odom_recovery_enabled': False,  # Enable only after the batch vehicle tests.
+            'odom_topic': '/odom',
+            'odom_max_age_sec': 0.20,
+            'odom_max_speed_m_s': 1.0,
+            'odom_max_yaw_rate_rad_s': 3.0,
+            'odom_recovery_max_distance_m': 0.06,
+            'odom_recovery_min_forward_m': 0.15,
             'curve_nearest_max_forward_m': 1.05,
             'curve_left_near_max_forward_m': 1.05,
             'curve_lane_width_m': 0.52,
@@ -270,6 +291,66 @@ class LaneFollowingNode(Node):
             self._camera_matrix = np.asarray(msg.k, dtype=np.float64).reshape(3, 3)
             self._distortion = np.asarray(msg.d, dtype=np.float64)
 
+    def _odom_callback(self, msg: Odometry):
+        position, orientation = msg.pose.pose.position, msg.pose.pose.orientation
+        values = (position.x, position.y, orientation.x, orientation.y,
+                  orientation.z, orientation.w)
+        stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        if (not all(math.isfinite(v) for v in values)
+                or stamp_ns <= self._odom_last_stamp_ns
+                or not msg.header.frame_id
+                or (self._odom_frame_id is not None
+                    and msg.header.frame_id != self._odom_frame_id)):
+            self._odom_ready = False
+            self._recovery_snapshot = None
+            return
+        norm = math.sqrt(sum(v * v for v in values[2:]))
+        if norm < 1e-6:
+            self._odom_ready = False
+            self._recovery_snapshot = None
+            return
+        qx, qy, qz, qw = (v / norm for v in values[2:])
+        yaw = math.atan2(2.0 * (qw * qz + qx * qy),
+                         1.0 - 2.0 * (qy * qy + qz * qz))
+        pose = Pose2D(position.x, position.y, yaw)
+        if self._odom_pose is not None:
+            elapsed = (stamp_ns - self._odom_last_stamp_ns) / 1e9
+            step = math.hypot(pose.x - self._odom_pose.x, pose.y - self._odom_pose.y)
+            yaw_step = math.atan2(math.sin(pose.yaw - self._odom_pose.yaw),
+                                  math.cos(pose.yaw - self._odom_pose.yaw))
+            if (elapsed <= 0
+                    or step > self.get_parameter('odom_max_speed_m_s').value * elapsed + 0.01
+                    or abs(yaw_step) >
+                    self.get_parameter('odom_max_yaw_rate_rad_s').value * elapsed + 0.05):
+                self._odom_ready = False
+                self._recovery_snapshot = None
+                self._odom_pose = pose
+                self._odom_last_stamp_ns = stamp_ns
+                return
+            self._odom_distance_m += step
+        self._odom_pose = pose
+        self._odom_frame_id = msg.header.frame_id
+        self._odom_last_stamp_ns = stamp_ns
+        self._odom_last_arrival_ns = self.get_clock().now().nanoseconds
+        self._odom_ready = True
+
+    def _odom_is_fresh(self, now_ns):
+        return (self._odom_ready and self._odom_pose is not None
+                and 0 <= (now_ns - self._odom_last_arrival_ns) / 1e9
+                <= self.get_parameter('odom_max_age_sec').value)
+
+    def _recovery_target(self, now_ns):
+        if (not self.get_parameter('odom_recovery_enabled').value
+                or self._mode != 'center' or self._recovery_snapshot is None
+                or not self._odom_is_fresh(now_ns)):
+            return None
+        return recovery_target(
+            self._recovery_snapshot, self._odom_pose, self._odom_distance_m,
+            now_ns, min(0.8, self.get_parameter('curve_recovery_sec').value),
+            self.get_parameter('odom_recovery_max_distance_m').value,
+            self.get_parameter('lookahead_distance_m').value,
+            self.get_parameter('odom_recovery_min_forward_m').value)
+
     def _mode_callback(self, msg: String):
         mode = msg.data.strip().lower()
         if mode not in VALID_MODES:
@@ -327,6 +408,7 @@ class LaneFollowingNode(Node):
         control_state = 'STOP'
         control_reason = (result.reason if not result.valid else
                           'confidence below minimum')
+        recovery = self._recovery_target(now_ns) if not usable else None
         if usable:
             control_state = 'TRACK'
             control_reason = 'validated lane path'
@@ -376,6 +458,12 @@ class LaneFollowingNode(Node):
             self._last_valid_cmd = cmd
             self._last_valid_ns = now_ns
             self._last_valid_curve = curve_detected and result.confidence >= 0.70
+            self._recovery_snapshot = None
+            if (self.get_parameter('odom_recovery_enabled').value
+                    and self._mode == 'center' and self._last_valid_curve
+                    and not result.zigzag and self._odom_is_fresh(now_ns)):
+                self._recovery_snapshot = snapshot_path(
+                    result.ground_path, self._odom_pose, now_ns, self._odom_distance_m)
         elif result.reason in ('right curve boundary clearance too small',
                                'outer left curve not observed'):
             # A measured boundary hazard must not enter the brief blind-curve
@@ -383,7 +471,22 @@ class LaneFollowingNode(Node):
             self._reset_steering()
             control_state = 'SAFETY_STOP'
             self._warn(f'lane safety stop: {result.reason}')
+        elif recovery is not None:
+            max_angle = float(self.get_parameter('max_steer_angle').value)
+            target_steering = target_to_inner_angle(
+                recovery.lateral_m, recovery.forward_m,
+                self.get_parameter('ackermann_wheelbase_m').value,
+                self.get_parameter('ackermann_track_m').value, max_angle) / max_angle
+            steering = self._rate_limit_steering(target_steering, now_ns)
+            self._held_steering = steering
+            speed = min(0.12, self.get_parameter('curve_recovery_speed').value)
+            cmd.linear.x = speed
+            cmd.angular.z = self._omega(steering, speed)
+            control_state = 'PATH_RECOVERY'
+            control_reason = (f'odom progress={recovery.progress_m:.3f}m '
+                              f'remaining={recovery.remaining_m:.3f}m')
         elif (self._last_valid_cmd is not None and self._last_valid_curve
+              and not self.get_parameter('odom_recovery_enabled').value
               and 0 <= (now_ns - self._last_valid_ns) / 1e9 <= min(
                   0.8, max(0.0, self.get_parameter('curve_recovery_sec').value))):
             # Short detection gap only; camera watchdog still stops stale input.
@@ -402,6 +505,7 @@ class LaneFollowingNode(Node):
             control_state = 'HEADING_HOLD'
             control_reason = 'heading_hold mode with invalid lane'
         elif (self._last_valid_cmd is not None
+              and not self.get_parameter('odom_recovery_enabled').value
               and (now_ns - self._last_valid_ns) / 1e9 <= self.get_parameter('invalid_hold_sec').value):
             # 반사·그림자 등으로 잠깐 놓친 프레임은 마지막 명령을 유지해 덜컥거림을 막는다.
             # Even a brief blind interval must not retain the 0.70 m/s cruise.
@@ -584,6 +688,7 @@ class LaneFollowingNode(Node):
         self._last_steering_ns = 0
         self._last_valid_cmd = None
         self._last_valid_ns = 0
+        self._recovery_snapshot = None
 
     def _update_zigzag(self, detected, now_ns):
         self._zigzag_active = self._zigzag_tracker.update(
