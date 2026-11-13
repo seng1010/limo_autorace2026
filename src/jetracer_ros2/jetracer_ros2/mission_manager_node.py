@@ -66,8 +66,10 @@ class MissionManagerNode(Node):
             'full_stop_speed': 0.01,
             'full_stop_sec': 0.3,
             # M3
-            'm3_trigger': 'sign_or_line',
+            'm3_trigger': 'sign',
             'm3_line_arm_distance_m': 0.80,
+            'm3_sign_valid_distance_m': 1.5,
+            'm3_max_approach_distance_m': 1.5,
             'm3_hold_sec': 3.5,
             'm3_done_distance_m': 0.50,
         }
@@ -96,7 +98,7 @@ class MissionManagerNode(Node):
         self._odom_ns = 0
         self._odom_warned = False
         self._last_out_speed = 0.0
-        self._pedestrian_seen = False
+        self._last_pedestrian_s = None    # 보행자 표지판을 마지막으로 본 odom 위치 (미션 무관)
         approach = StopApproachController(StopApproachConfig(
             approach_start_m=p('approach_start_m'), gain=p('approach_gain'),
             creep_speed=p('approach_creep_speed'), max_speed=p('normal_speed'),
@@ -104,6 +106,8 @@ class MissionManagerNode(Node):
         self._m3 = PedestrianStopMission(
             M3Config(trigger=p('m3_trigger'),
                      line_arm_distance_m=p('m3_line_arm_distance_m'),
+                     sign_valid_distance_m=p('m3_sign_valid_distance_m'),
+                     max_approach_distance_m=p('m3_max_approach_distance_m'),
                      hold_sec=p('m3_hold_sec'), done_distance_m=p('m3_done_distance_m')),
             approach, FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
         self._m3_last_state = ''
@@ -160,8 +164,9 @@ class MissionManagerNode(Node):
         event = msg.data
         if self._active == 'M5' and event == 'slow_sign':
             self._slow = True
-        elif self._active == 'M3' and event == 'pedestrian':
-            self._pedestrian_seen = True
+        if event == 'pedestrian':
+            # M3 직전(M6 구간)에서 먼저 보일 수 있어서 미션과 상관없이 위치를 기억
+            self._last_pedestrian_s = self._odom.s
         elif self._active == 'M2' and event in ('sign_a', 'sign_b'):
             self.lane_mode_pub.publish(String(data='left' if event == 'sign_a' else 'right'))
         elif self._active == 'M4' and event == 'parking_sign':
@@ -232,7 +237,6 @@ class MissionManagerNode(Node):
         self._at_stop_line = False
         self._traffic = 'unknown'
         self._obstacle_seen = False
-        self._pedestrian_seen = False
         if mission == 'M3':
             self._m3.reset()
         self.lane_mode_pub.publish(String(data='center'))
@@ -280,8 +284,7 @@ class MissionManagerNode(Node):
         stop_line = self._fresh_stop_line(now_ns)
         speed = self._measured_speed(now_ns)
         decision = self._m3.update(now_ns / 1e9, stop_line, speed, self._odom.s,
-                                   pedestrian_seen=self._pedestrian_seen)
-        self._pedestrian_seen = False
+                                   last_sign_s=self._last_pedestrian_s)
         if decision.state != self._m3_last_state:
             self.get_logger().info(f'M3 상태: {self._m3_last_state or "-"} -> {decision.state}'
                                    + (f' (정지선 {stop_line:.3f} m)' if stop_line is not None else ''))
@@ -290,7 +293,11 @@ class MissionManagerNode(Node):
         self._debug(f'{decision.state} line={line_text} v={speed:.3f}')
         if decision.done:
             self._m3_last_state = ''
-            self._advance('M3 정지·3초 대기·출발 완료')
+            if decision.skipped:
+                self.get_logger().warn('M3 보행자 표지판을 못 보고 구간을 지나침 — M3 건너뜀')
+                self._advance('M3 skipped (표지판 미인식)')
+            else:
+                self._advance('M3 정지·3초 대기·출발 완료')
             return None
         return decision.speed_limit
 

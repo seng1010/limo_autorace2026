@@ -137,8 +137,12 @@ mission_manager_node:
     full_stop_speed: 0.01             # odom |v| 이하이면 정지로 봄 [m/s]
     full_stop_sec: 0.3                # 그 상태가 이만큼 유지되면 '완전정지' 확인
     # M3 보행자 표지판 정지
-    m3_trigger: 'sign_or_line'        # 'sign_or_line' | 'sign'(표지판 필수) | 'line'
+    m3_trigger: 'sign'                # 대회용: 표지판 본 뒤 정지선에서만 정지
+                                      # YOLO 없이 테스트: --ros-args -p m3_trigger:=sign_or_line
     m3_line_arm_distance_m: 0.80      # 정지선이 이 거리 안이면 감속·정지 시작
+    m3_sign_valid_distance_m: 1.5     # 표지판 본 뒤 이 거리 안에 나온 정지선만 인정
+    m3_max_approach_distance_m: 1.5   # M3 시작 후 못 서고 이만큼 가면 M3 건너뜀 (0 = 끄기)
+                                      # = M3 시작 지점(M6 끝)~횡단보도 정지선 거리 + 0.5 m. 트랙에서 재서 조정
     m3_hold_sec: 3.5                  # 완전정지 확인 후 대기 (규정 3초 이상)
     m3_done_distance_m: 0.50          # 출발 후 이만큼 가면 M3 완료 -> M7
 

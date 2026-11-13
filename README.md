@@ -78,7 +78,7 @@ src/jetracer_ros2/
 ### 별도 노드 없이 `mission_manager_node`에서 처리
 
 - **M2 갈림길**: YOLO `sign_a` / `sign_b` → `lane_following_node` 모드를 `left` / `right`로 전환
-- **M3 보행자** (`m3_pedestrian.py`): YOLO `pedestrian` 또는 정지선 → 정지선 앞까지 감속·정밀 정지(앞바퀴 기준, `stop_approach.py`) → odom으로 완전정지 확인 후 `m3_hold_sec`(3.5초) 대기 → 출발 → `m3_done_distance_m` 이동하면 자동으로 M7
+- **M3 보행자** (`m3_pedestrian.py`): YOLO `pedestrian`을 본 뒤(M3 시작 전에 봐도 인정, 1.5 m 안) 나오는 정지선 → 정지선 앞까지 감속·정밀 정지(앞바퀴 기준, `stop_approach.py`) → odom으로 완전정지 확인 후 `m3_hold_sec`(3.5초) 대기 → 출발 → `m3_done_distance_m` 이동하면 자동으로 M7. 표지판을 못 보면 서지 않고 `m3_max_approach_distance_m`(1.5 m) 뒤 M3를 건너뜀. YOLO 없이 테스트할 땐 `-p m3_trigger:=sign_or_line`
 - **M5 서행**: YOLO `slow_sign` → `slow_speed`로 감속
 
 ### 개발·디버그용

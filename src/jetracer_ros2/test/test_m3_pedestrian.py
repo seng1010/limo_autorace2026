@@ -34,16 +34,16 @@ def test_full_stop_needs_hold_time():
 
 # ---- 차량 시뮬레이션으로 전체 흐름 ------------------------------------------------ #
 
-def _simulate(mission, start_distance=1.2, sign_at=None, dt=0.05, lag=0.15,
-              line_visible=lambda d: True, until=40.0):
-    """1차 지연 차량 모델. 거리 = 기준 바퀴(앞바퀴) -> 정지선."""
+def _simulate(mission, start_distance=1.2, sign_s=0.0, dt=0.05, lag=0.15,
+              line_visible=lambda d: True, until=60.0):
+    """1차 지연 차량 모델. 거리 = 앞바퀴 -> 정지선, s = 출발 후 이동거리.
+    sign_s: 보행자 표지판을 본 위치 (None = 못 봄, 음수 = M3 시작 전에 봄)."""
     t, v, s = 0.0, 0.0, 0.0
     log = []
     while t < until:
         d = start_distance - s
         visible = d >= -0.10 and line_visible(d)
-        decision = mission.update(t, d if visible else None, v, s,
-                                  pedestrian_seen=(sign_at is not None and abs(t - sign_at) < dt / 2))
+        decision = mission.update(t, d if visible else None, v, s, last_sign_s=sign_s)
         target = 0.25 if decision.speed_limit is None else min(0.25, decision.speed_limit)
         v += (target - v) * min(1.0, dt / lag)
         if abs(v) < 1e-4:
@@ -76,13 +76,30 @@ def test_never_moves_during_hold():
     assert all(b <= a for a, b in zip(hold_v, hold_v[1:]))  # 다시 가속하지 않음
 
 
-def test_sign_trigger_requires_sign():
-    mission = _mission(trigger='sign')
-    log = _simulate(mission, until=6.0)                  # 표지판 없음 -> 정지 안 함
-    assert all(state == 'approach' for _, state, _, _ in log)
+def test_default_needs_sign_and_skips_without_it():
+    """표지판을 못 보면 정지선이 있어도 서지 않고, 일정 거리 뒤 M3를 건너뜀."""
+    log = _simulate(_mission(), sign_s=None)
+    states = {state for _, state, _, _ in log}
+    assert 'stopping' not in states and 'hold' not in states
+    assert log[-1][1] == 'skipped'
 
-    log = _simulate(_mission(trigger='sign'), sign_at=0.5)
+
+def test_sign_seen_before_m3_still_counts():
+    """M6 구간(M3 시작 전)에서 본 표지판도 인정."""
+    log = _simulate(_mission(), sign_s=-0.5)
+    assert 'hold' in {state for _, state, _, _ in log}
+
+
+def test_old_sign_is_ignored():
+    """표지판을 너무 오래 전에 봤으면 그 뒤의 정지선은 무시."""
+    log = _simulate(_mission(), sign_s=-2.0)
+    assert 'hold' not in {state for _, state, _, _ in log}
+
+
+def test_line_only_mode_for_testing_without_yolo():
+    log = _simulate(_mission(trigger='sign_or_line'), sign_s=None)
     assert log[-1][1] == 'done'
+    assert 'hold' in {state for _, state, _, _ in log}
 
 
 def test_blind_zone_line_lost_means_stop():
@@ -96,7 +113,7 @@ def test_ignores_sign_after_go():
     mission = _mission()
     log = _simulate(mission)
     assert log[-1][1] == 'done'
-    decision = mission.update(100.0, 0.3, 0.2, 10.0, pedestrian_seen=True)
+    decision = mission.update(100.0, 0.3, 0.2, 10.0, last_sign_s=9.9)
     assert decision.done                                  # 다시 서지 않음
 
 
