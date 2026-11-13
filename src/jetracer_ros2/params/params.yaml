@@ -86,8 +86,10 @@ stop_line_node:
     # 보정표: scripts/calibrate_stop_line.py 결과를 붙여넣기 (소수점 꼭 포함)
     # 보정표 자체는 **앞바퀴 기준**, rear 이면 wheelbase_m 를 더해서 발행
     # 2개 미만이면 보정 전 -> 아래 distance_scale_m 선형식 사용 (예전과 동일, offset 없음)
-    lut_rows: [0.0]                   # 정지선 아래 가장자리 행 비율 (0=위, 1=아래)
-    lut_distances_m: [0.0]
+    # 2026-11-13 실차 보정: scripts/calibrate_stop_line.py, odom bag 3개 (이동 0.97~1.00 m)
+    #   bag 간 오차 ±2 cm. 보이는 범위: 앞바퀴 기준 약 0.26 ~ 0.53 m, 0.26 m 안쪽은 카메라 사각지대
+    lut_rows: [0.6583, 0.6865, 0.7188, 0.7479, 0.8052, 0.8594, 0.9292, 0.9833]
+    lut_distances_m: [0.5257, 0.4795, 0.4506, 0.4187, 0.3765, 0.3396, 0.3039, 0.2679]
     distance_scale_m: 1.6
     # 사각지대: 선이 화면에서 사라지면 /odom 이동거리로 남은 거리 계속 추정
     use_odom_tracking: true
