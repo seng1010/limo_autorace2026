@@ -1,8 +1,8 @@
-"""정지선 검출 -> 판정 기준 바퀴(기본 뒷바퀴)까지 거리 발행 (M1, M3 공용).
+"""정지선 검출 -> 기준 바퀴(기본 앞바퀴)까지 거리 발행 (M1, M3 공용).
 
 발행
   mission/stop_line_distance  Float32  기준 바퀴 -> 정지선 거리 [m], 없으면 -1.0
-                                       (규정집 v3: 뒷바퀴. reference_wheel 로 front/rear 선택)
+                                       (정지선 앞에 서야 하므로 앞바퀴. reference_wheel 로 rear 전환 가능)
   mission/stop_line_detected  Bool     거리 값이 유효한지 (화면 검출 또는 odom 추적)
   /stop_line/debug/compressed          디버그 이미지 (거리, 출처, 행 비율 표시)
   /stop_line/debug/row_ratio  Float32  정지선 아래 가장자리 행 비율 (보정용, 없으면 -1.0)
@@ -51,7 +51,7 @@ class StopLineNode(Node):
             'distance_scale_m': 1.6,
             'lut_rows': [0.0],               # 2개 미만 = 보정 전
             'lut_distances_m': [0.0],
-            'reference_wheel': 'rear',       # 규정집 v3 판정 기준점 = 뒷바퀴
+            'reference_wheel': 'front',      # 정지선 앞 정지 (v3 뒷바퀴 = 진입·통과·시간 카운트로 해석)
             'wheelbase_m': 0.20,             # 앞바퀴 축 -> 뒷바퀴 축 거리
             'use_odom_tracking': True,
             'blind_track_max_m': 0.8,

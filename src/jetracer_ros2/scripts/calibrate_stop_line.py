@@ -2,7 +2,7 @@
 """rosbag 으로 정지선 보정표(lut_rows, lut_distances_m) 만들기 — 자 없이 odom 을 자로 쓴다.
 
 보정표는 **앞바퀴 기준**으로 만든다 (앞바퀴가 선에 닿는 순간이 눈으로 보기 쉬움).
-판정 기준인 뒷바퀴 거리는 stop_line_node 가 wheelbase_m 을 더해서 낸다.
+reference_wheel: rear 로 쓰면 stop_line_node 가 wheelbase_m 을 더해서 낸다.
 
 녹화 방법 (차에서)
   1. 정지선이 화면에 보이도록 약 60 cm 앞에 차를 둔다 (stop_line_node 는 꺼도 됨)
@@ -144,7 +144,7 @@ def main():
     lut_rows, lut_dists = fit_row_distance_table(all_samples, args.points)
     if blind:
         print(f'\n카메라 사각지대(앞바퀴 기준): 약 {np.mean(blind):.3f} m '
-              f'(이 안쪽은 odom 추적. 뒷바퀴 기준이면 이 값 + wheelbase_m 이 '
+              f'(이 안쪽은 odom 추적. rear 기준이면 이 값 + wheelbase_m 이 '
               f'blind_track_max_m 보다 작아야 함)')
     print('\n# params.yaml stop_line_node 에 붙여넣기')
     print('    lut_rows: [' + ', '.join(f'{r:.4f}' for r in lut_rows) + ']')

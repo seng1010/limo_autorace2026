@@ -79,8 +79,9 @@ stop_line_node:
     minimum_width_ratio: 0.42
     minimum_area_ratio: 0.018
     # 발행 거리 = 판정 기준 바퀴 -> 정지선 가까운 쪽 가장자리 [m]
-    # 규정집 v3(11/12) III-아: 판정 기준점 = 뒷바퀴 (이전 초안은 앞바퀴)
-    reference_wheel: 'rear'           # 'rear' | 'front'
+    # 정지선 앞에 서야 하므로 앞바퀴 기준 (앞바퀴가 정지선을 넘으면 안 됨).
+    # 규정집 v3 III-아 '뒷바퀴'는 진입·통과·시간 카운트 판정으로 해석 (팀 결정 11/13)
+    reference_wheel: 'front'          # 'front' | 'rear'(정지선 위치까지 뒷바퀴 기준일 때)
     wheelbase_m: 0.20                 # 앞-뒤 바퀴 축 거리 (LIMO 사양 200 mm, 실측 권장)
     # 보정표: scripts/calibrate_stop_line.py 결과를 붙여넣기 (소수점 꼭 포함)
     # 보정표 자체는 **앞바퀴 기준**, rear 이면 wheelbase_m 를 더해서 발행
@@ -90,7 +91,7 @@ stop_line_node:
     distance_scale_m: 1.6
     # 사각지대: 선이 화면에서 사라지면 /odom 이동거리로 남은 거리 계속 추정
     use_odom_tracking: true
-    blind_track_max_m: 0.8            # 이 거리(기준 바퀴) 안에서 놓친 선만 추적. 뒷바퀴 기준은 사각지대+축간거리라 0.8
+    blind_track_max_m: 0.8            # 이 거리(기준 바퀴) 안에서 놓친 선만 추적. rear로 바꿔도 되게 0.8
     blind_pass_margin_m: 0.10         # 선을 이만큼 지나치면 추적 종료 -> -1.0
     blind_jump_tolerance_m: 0.15      # 추적 중 이보다 먼 선이 보이면 다른 선으로 보고 무시
     publish_debug: true

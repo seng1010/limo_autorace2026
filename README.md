@@ -63,7 +63,7 @@ src/jetracer_ros2/
 |---|---|---|
 | `mission_manager_node` | 전체 상태머신. 미션 순서 진행, 주행 명령 선택, 속도·정지 제어, `/cmd_vel` 단독 발행 | 전체 |
 | `lane_following_node` | 차선 검출(`lane_pipeline.py`) → 조향. 모드: `center` / `left` / `right` / `heading_hold`, 지그재그 구간 자동 감지 | 기본 주행, M2, M5, M6, M7 |
-| `stop_line_node` | 카메라 하단 가로선(흰/노랑 선택) 검출, 판정 기준 바퀴(규정집 v3: 뒷바퀴)→정지선 거리 추정. 사각지대는 odom으로 추적 | M1, M3 |
+| `stop_line_node` | 카메라 하단 가로선(흰/노랑 선택) 검출, 앞바퀴→정지선 거리 추정 (`reference_wheel`로 뒷바퀴 기준 전환 가능). 사각지대는 odom으로 추적 | M1, M3 |
 | `yolo_detection_node` | YOLO 하나로 신호등 색, A/B, 보행자, 서행, 주차 표지판 인식. 광고 모니터 영역 제외 | M1, M2, M3, M4, M5 |
 
 ### 미션 구간에서만 실행 (manager가 켜고 끔)
@@ -116,7 +116,7 @@ src/jetracer_ros2/
 |---|---|---|---|---|
 | `mission/yolo_event` | `std_msgs/String` | `yolo_detection_node` | manager, traffic_light | 여러 프레임 연속으로 확인된 객체 하나 (아래 값) |
 | `perception/detections` | `std_msgs/String` (JSON) | `yolo_detection_node` | (없음, 디버그용) | 한 프레임에 보인 객체 전부 |
-| `mission/stop_line_distance` | `std_msgs/Float32` | `stop_line_node` | manager, traffic_light, lane(M6) | **뒷바퀴**→정지선 거리 [m] (규정집 v3 판정 기준점, `reference_wheel`로 변경 가능). 선이 카메라 사각지대로 사라져도 odom으로 계속 추정, 선을 지나치거나 없으면 `-1.0` |
+| `mission/stop_line_distance` | `std_msgs/Float32` | `stop_line_node` | manager, traffic_light, lane(M6) | **앞바퀴**→정지선 거리 [m] (정지선 앞에 서야 하므로 앞바퀴 기준. `reference_wheel: rear`로 전환 가능). 선이 카메라 사각지대로 사라져도 odom으로 계속 추정, 선을 지나치거나 없으면 `-1.0` |
 | `mission/stop_line_detected` | `std_msgs/Bool` | `stop_line_node` | (없음) | 거리 값이 유효한지 (화면 검출 또는 odom 추적) |
 
 `mission/yolo_event` 값: `traffic_red`, `traffic_yellow`, `traffic_green`, `sign_a`, `sign_b`, `pedestrian`, `slow_sign`, `parking_sign`
