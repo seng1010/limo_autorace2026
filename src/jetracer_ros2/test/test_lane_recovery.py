@@ -2,7 +2,10 @@
 
 import math
 
-from jetracer_ros2.lane_recovery import Pose2D, snapshot_path, recovery_target
+from jetracer_ros2.lane_recovery import (
+    Pose2D, RecoveryTarget, snapshot_path, recovery_target,
+    right_boundary_clearance,
+)
 
 
 def test_odom_motion_moves_stored_target_back_in_vehicle_frame():
@@ -39,3 +42,12 @@ def test_invalid_path_and_path_behind_vehicle_cannot_recover():
     snapshot = snapshot_path(((0, .2), (0, .8)), Pose2D(0, 0, 0), 0, 0)
     assert recovery_target(snapshot, Pose2D(1, 0, 0), .01,
                            100_000_000, .50, .06, .40, .15) is None
+
+
+def test_inner_curve_needs_measured_boundary_and_clearance():
+    target = RecoveryTarget(.10, .40, .01, .05)
+    boundary = ((.24, .20), (.24, .60))
+    assert right_boundary_clearance(target, boundary, .13)
+    assert not right_boundary_clearance(target, boundary, .15)
+    assert not right_boundary_clearance(target, ((.24, .20),), .13)
+    assert not right_boundary_clearance(target, ((.24, .50), (.24, .80)), .13)

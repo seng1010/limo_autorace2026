@@ -124,6 +124,7 @@ class LaneResult:
     curve_left_target_active: bool = False
     curve_left_preview_rad: Optional[float] = None
     ground_path: Tuple[Tuple[float, float], ...] = ()  # (lateral right, forward), near to far
+    right_ground_boundary: Tuple[Tuple[float, float], ...] = ()
 
 
 class LanePipeline:
@@ -1170,6 +1171,19 @@ class LanePipeline:
             and left_type != 'yellow/solid/curve')
         if (yellow_curve_priority_active and self._yellow_curve_outer_missing
                 or inner_only_clockwise):
+            right_ground_boundary = []
+            if self.ground is not None and measured_right_fit is not None and right_y.size:
+                for row in np.linspace(float(right_y.max()), float(right_y.min()), 24):
+                    x = float(np.polyval(measured_right_fit, row))
+                    if not self._target_within_bev(x, row):
+                        continue
+                    try:
+                        lateral, forward = self.ground.project_bev_point(x, row)
+                    except ValueError:
+                        continue
+                    if (not right_ground_boundary
+                            or forward > right_ground_boundary[-1][1] + 1e-4):
+                        right_ground_boundary.append((lateral, forward))
             return LaneResult(valid=False, observation_state='accepted',
                               policy_state='blocked', debug_image=debug, bev_image=bird,
                               binary_image=binary, color_binary_image=color_binary,
@@ -1178,7 +1192,8 @@ class LanePipeline:
                               tracking_mode=tracking_mode, confidence=confidence,
                               curve_heading_span=curve_span, curve_turn=curve_turn,
                               left_type=left_type, right_type=right_type,
-                              yellow_curve_priority_active=True)
+                              yellow_curve_priority_active=True, zigzag=zigzag,
+                              right_ground_boundary=tuple(right_ground_boundary))
         if fixed_row_missing and left_curve_target is None and not curve_recovery_allowed:
             self.reset()
             return LaneResult(valid=False, observation_state='accepted',

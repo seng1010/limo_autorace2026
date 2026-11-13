@@ -82,3 +82,19 @@ def recovery_target(snapshot: PathSnapshot, pose: Pose2D, odometer_m: float,
     # extension or a point behind the rear axle.
     lateral, forward = next((p for p in local if p[1] >= lookahead_m), local[-1])
     return RecoveryTarget(lateral, forward, progress, limit - progress)
+
+
+def right_boundary_clearance(target: RecoveryTarget, right_boundary, minimum_m: float):
+    """Check a target against the *observed* right boundary at the same range.
+
+    Missing/short observations are not extrapolated into a pass.
+    """
+    if (not math.isfinite(minimum_m) or minimum_m <= 0 or len(right_boundary) < 2
+            or not all(math.isfinite(v) for point in right_boundary for v in point)):
+        return False
+    for near, far in zip(right_boundary, right_boundary[1:]):
+        if near[1] <= target.forward_m <= far[1] and far[1] > near[1]:
+            ratio = (target.forward_m - near[1]) / (far[1] - near[1])
+            boundary_lateral = near[0] + ratio * (far[0] - near[0])
+            return boundary_lateral - target.lateral_m >= minimum_m
+    return False

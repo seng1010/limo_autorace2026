@@ -58,6 +58,7 @@ lane_following_node:
     odom_max_yaw_rate_rad_s: 3.0     # 비현실적 방위 점프 거부
     odom_recovery_max_distance_m: 0.06 # 잔여 경로 절반과 이 절대 거리 중 먼저 도달하면 정지
     odom_recovery_min_forward_m: 0.15 # 후축 앞에 남은 경로점이 없으면 정지
+    inner_curve_recovery_enabled: false # 우곡선 외측선 유실 시 우측 실선·여유를 재확인한 경우만 저속 복구
     curve_nearest_max_forward_m: 1.05 # 노란 우곡선의 관측 최근접점을 쓸 수 있는 후축 기준 최대 거리
     curve_left_near_max_forward_m: 1.05 # 우곡선 왼쪽선 아래 2~3번째 창 목표의 후축 기준 상한
     curve_lane_width_m: 0.52        # 사용자 실측 노란선 간 폭. 바깥선의 법선 방향으로 중심경로 생성

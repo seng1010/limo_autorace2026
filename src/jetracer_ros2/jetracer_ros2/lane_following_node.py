@@ -32,7 +32,9 @@ from jetracer_ros2.lane_steering import (
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 from jetracer_ros2.live_debug_view import LiveViewer
 from jetracer_ros2.lane_ackermann import target_to_inner_angle
-from jetracer_ros2.lane_recovery import Pose2D, snapshot_path, recovery_target
+from jetracer_ros2.lane_recovery import (
+    Pose2D, snapshot_path, recovery_target, right_boundary_clearance,
+)
 from jetracer_ros2.driving_profile import (
     ZigzagTracker, select_speed, yellow_zigzag_evidence,
 )
@@ -163,6 +165,7 @@ class LaneFollowingNode(Node):
             'odom_max_yaw_rate_rad_s': 3.0,
             'odom_recovery_max_distance_m': 0.06,
             'odom_recovery_min_forward_m': 0.15,
+            'inner_curve_recovery_enabled': False,
             'curve_nearest_max_forward_m': 1.05,
             'curve_left_near_max_forward_m': 1.05,
             'curve_lane_width_m': 0.52,
@@ -409,6 +412,17 @@ class LaneFollowingNode(Node):
         control_reason = (result.reason if not result.valid else
                           'confidence below minimum')
         recovery = self._recovery_target(now_ns) if not usable else None
+        inner_curve_recovery = bool(
+            recovery is not None
+            and self.get_parameter('inner_curve_recovery_enabled').value
+            and result.reason == 'outer left curve not observed'
+            and result.curve_turn == 'right'
+            and result.right_type == 'yellow/solid/curve'
+            and result.confidence >= 0.70
+            and not result.zigzag
+            and right_boundary_clearance(
+                recovery, result.right_ground_boundary,
+                self.get_parameter('curve_right_min_clearance_m').value))
         if usable:
             control_state = 'TRACK'
             control_reason = 'validated lane path'
@@ -465,7 +479,7 @@ class LaneFollowingNode(Node):
                 self._recovery_snapshot = snapshot_path(
                     result.ground_path, self._odom_pose, now_ns, self._odom_distance_m)
         elif result.reason in ('right curve boundary clearance too small',
-                               'outer left curve not observed'):
+                               'outer left curve not observed') and not inner_curve_recovery:
             # A measured boundary hazard must not enter the brief blind-curve
             # command hold. Publish zero immediately instead.
             self._reset_steering()
@@ -482,7 +496,8 @@ class LaneFollowingNode(Node):
             speed = min(0.12, self.get_parameter('curve_recovery_speed').value)
             cmd.linear.x = speed
             cmd.angular.z = self._omega(steering, speed)
-            control_state = 'PATH_RECOVERY'
+            control_state = ('INNER_CURVE_RECOVERY' if inner_curve_recovery
+                             else 'PATH_RECOVERY')
             control_reason = (f'odom progress={recovery.progress_m:.3f}m '
                               f'remaining={recovery.remaining_m:.3f}m')
         elif (self._last_valid_cmd is not None and self._last_valid_curve
