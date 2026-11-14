@@ -67,6 +67,8 @@ lane_following_node:
     curve_left_preview_gain: 0.50     # 왼쪽선 위 2~3번째 창의 선행 우조향 비율
     curve_left_preview_max_rad: 0.16  # 선행 우조향 추가량 상한
     right_curve_min_steer_rad: 0.10  # 연속 확인된 우곡선의 최소 우조향; 직선/좌회전에는 미적용
+    right_curve_floor_enabled: true  # false: PP가 요구하는 반대방향 복귀 조향도 보존
+    curve_preview_enabled: true      # 추가 우조향 Preview 독립 비교 스위치
     right_curve_span_gain: 0.20      # 관측 곡률 span에 따른 추가 조향, max_steer_angle 이내
     right_curve_confirm_frames: 2   # 단발 노이즈에는 강제 우조향하지 않음
     reset_after_invalid_frames: 5     # 연속 N프레임 실패 시 이전 차선 기준 초기화

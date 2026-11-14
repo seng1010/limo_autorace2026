@@ -181,6 +181,8 @@ class LaneFollowingNode(Node):
             'curve_left_preview_gain': 0.50,
             'curve_left_preview_max_rad': 0.16,
             'right_curve_min_steer_rad': 0.10,
+            'right_curve_floor_enabled': True,
+            'curve_preview_enabled': True,
             'right_curve_span_gain': 0.20,
             'right_curve_confirm_frames': 2,
             'reset_after_invalid_frames': 5,
@@ -502,12 +504,14 @@ class LaneFollowingNode(Node):
                     target_steering, result.curve_heading_span, max_angle,
                     self.get_parameter('right_curve_min_steer_rad').value,
                     self.get_parameter('right_curve_span_gain').value,
-                    self._right_curve_hits >= self.get_parameter('right_curve_confirm_frames').value)
+                    self._right_curve_hits >= self.get_parameter('right_curve_confirm_frames').value,
+                    enabled=self.get_parameter('right_curve_floor_enabled').value)
                 if result.curve_left_target_active:
                     target_steering = left_curve_preview_target(
                         target_steering, result.curve_left_preview_rad, max_angle,
                         self.get_parameter('curve_left_preview_gain').value,
-                        self.get_parameter('curve_left_preview_max_rad').value)
+                        self.get_parameter('curve_left_preview_max_rad').value,
+                        enabled=self.get_parameter('curve_preview_enabled').value)
             steering = self._rate_limit_steering(target_steering, now_ns)
             self._held_steering = steering
             curve_detected = (

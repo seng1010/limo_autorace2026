@@ -41,7 +41,7 @@ def limited_steering(previous, target, dt, attack, release, reversal):
 
 
 def right_curve_metric_target(target, span, max_angle, minimum_angle, span_gain,
-                              confirmed):
+                              confirmed, enabled=True):
     """Keep a measured clockwise curve from commanding a counter-turn.
 
     Negative is right steering. The floor is applied only after consecutive
@@ -49,14 +49,19 @@ def right_curve_metric_target(target, span, max_angle, minimum_angle, span_gain,
     """
     if not math.isfinite(target) or not math.isfinite(span) or max_angle <= 0:
         return 0.0
+    if not enabled:
+        return target
     if not confirmed:
         return min(0.0, target)
     floor = min(max_angle, max(0.0, minimum_angle) + max(0.0, span_gain) * max(0.0, span))
     return max(-1.0, min(target, -floor / max_angle))
 
 
-def left_curve_preview_target(target, preview_rad, max_angle, gain, max_preview_rad):
+def left_curve_preview_target(target, preview_rad, max_angle, gain, max_preview_rad,
+                              enabled=True):
     """Anticipate a measured right bend of the outer left line, with a hard cap."""
+    if not enabled:
+        return target
     if (not all(math.isfinite(v) for v in
                 (target, preview_rad, max_angle, gain, max_preview_rad))
             or max_angle <= 0 or gain < 0 or max_preview_rad < 0

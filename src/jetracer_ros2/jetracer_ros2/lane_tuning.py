@@ -25,6 +25,8 @@ _group('Target / curve', float, {'lookahead_distance_m': (.3, 1.2),
     'metric_max_near_clamp_m': (0, .30), 'metric_edge_margin_m': (0, .05),
     'yellow_curve_min_span': (.1, .6), 'minimum_confidence': (.48, .95)})
 _group('Target / curve', bool, {'observed_outer_curve_entry_enabled': (0, 1)})
+_group('Speed / steering (calculated only)', bool, {
+    'right_curve_floor_enabled': (0, 1), 'curve_preview_enabled': (0, 1)})
 _group('Speed / steering (calculated only)', float, {'normal_speed': (0, .7),
     'curve_speed': (0, .3), 'zigzag_speed': (0, .18),
     'max_steer_angle': (.05, math.radians(27)), 'steering_attack_rate': (.1, 4),

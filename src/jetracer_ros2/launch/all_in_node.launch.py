@@ -15,7 +15,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('debug_view', default_value='false'),
         # The measured ground ROI now drives the bounded curve recovery path.
-        # Operators can still compare the legacy pixel controller with false.
+        # False is inspection-only: no metric target means no autonomous motion.
         DeclareLaunchArgument('metric_ackermann', default_value='true'),
         DeclareLaunchArgument('near_clamp_m', default_value='0.30'),
         DeclareLaunchArgument('outer_curve_entry', default_value='false'),
