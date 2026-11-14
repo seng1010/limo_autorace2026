@@ -92,8 +92,11 @@ def test_planner_goes_to_goal_lane_only_when_it_is_empty():
 
 def test_two_lane_move_through_empty_middle_lane():
     far = T.LIDAR_MAX
-    plan = T.Planner().update(2, T.LANE_CENTER[2], [far, 1.3, 1.2], [far, 1.3, 1.2], goal=None)
+    plan = T.Planner().update(2, T.LANE_CENTER[2], [far, 1.6, 1.0], [far, 1.6, 1.0], goal=None)
     assert plan.target == 0
+    # 가운데 차로가 1.3 m 밖에 안 비었으면 가로지르지 않는다 (가로지르는 데 약 1.4 m 필요)
+    plan = T.Planner().update(2, T.LANE_CENTER[2], [far, 1.3, 1.0], [far, 1.3, 1.0], goal=None)
+    assert plan.target == 2
 
 
 def test_steering_points_toward_target_lane():
@@ -168,3 +171,38 @@ def test_yellow_wall_overrides_steering_even_when_position_is_wrong():
     seen = dict(th=-math.radians(30), lines=[(0.24, 300, 1.0)], score=1.0, n=1000)
     out = tl.step_obs(seen, (0.01, 0.0, 0.0), None)
     assert out.wall is not None and out.steer == -T.MAX_STEER
+
+
+def test_outer_solid_line_keeps_position_from_sliding_one_lane():
+    # 11/15 04:21 실차: 가운데 차로에서 왼쪽을 볼 때 왼쪽 점선(+0.41)과 바깥 흰 실선(+1.03)이 보였다.
+    # 실선을 점선으로 치면 '오른쪽 차로'(-0.63)가 가장 잘 맞아 위치가 한 차로 밀렸다
+    seen = dict(th=-math.radians(24), lines=[(0.41, 120, 0.0)], edges=[(1.03, 290)], score=1.0, n=1000)
+    road = T.RoadState()
+    road.update(obs(-0.13))
+    for _ in range(30):
+        road.predict(0.0, 0.0)
+        road.update(seen)
+    assert abs(road.c - (-0.13)) < 0.08 and road.lane == 1
+    # 위치를 전혀 모를 때도 실선과 맞는 쪽을 고른다
+    fresh = T.RoadState()
+    fresh.update(seen)
+    assert fresh.c is not None and fresh.lane == 1
+
+
+def test_short_yellow_piece_is_not_used_as_outer_line():
+    # 섬 꼭짓점의 짧은 노란 조각(-0.19)을 오른쪽 바깥 선으로 쓰면 오른쪽 차로로 착각한다
+    seen = dict(th=-math.radians(24), lines=[(-0.19, 53, 1.0), (0.41, 120, 0.0)], short={-0.19},
+                score=1.0, n=1000)
+    road = T.RoadState()
+    road.update(obs(-0.13))
+    for _ in range(30):
+        road.predict(0.0, 0.0)
+        road.update(seen)
+    assert road.lane == 1
+
+
+def test_heading_is_limited():
+    left = T.limit_heading(math.radians(20), -math.radians(50))     # 왼쪽으로 50도 틀어진 채 더 왼쪽으로 꺾으려 함
+    assert left < -math.radians(10)
+    assert T.limit_heading(math.radians(20), -math.radians(20)) == math.radians(20)
+    assert T.limit_heading(-math.radians(20), math.radians(50)) > math.radians(10)

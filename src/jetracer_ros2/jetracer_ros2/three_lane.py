@@ -39,6 +39,14 @@ FIT_FMAX = 1.9
 WHITE_POS = (0.27, -0.27)
 YELLOW_POS = (0.80, -0.80)
 LANE_CENTER = (0.535, 0.0, -0.535)          # 차로 0, 1, 2
+FIX_MIN_SCORE = 60.0                        # 선으로 위치를 맞췄다고 볼 최소 점수 (흰 조각 하나로는 못 넘는다)
+EDGE_POS = 0.88                             # 바깥 흰 실선의 위치 (바깥 노란 선 0.80 ~ 매트 가장자리 0.97 의 가운데)
+EDGE_TOL = 0.35
+EDGE_MIN_POINTS = 100
+YELLOW_MIN_SPAN = 0.60                      # 바깥 노란 실선은 길게 보인다. 이보다 짧은 노란 조각은 위치 맞추기에 쓰지 않는다
+SOLID_MIN_SPAN = 0.60                       # 흰 선이 이 길이 이상 보이는데
+SOLID_MAX_GAP = 0.10                        # 끊긴 곳이 이보다 짧으면 실선 (점선은 0.14~0.22 m 씩 끊김, 실선은 0.05 이하)
+HEADING_MAX = math.radians(42.0)            # 차로를 옮길 때 도로 방향에서 이 각도 넘게 틀지 않는다
 WALL_MARGIN = 0.17                          # 노란 선과 차 가운데 사이 최소 거리 (차 반폭 0.11 + 여유)
 WALL_RADIUS = 0.62                          # 나란해지는 데 쓰는 회전 반경 (실측 최소 0.50~0.53 에 여유)
 WALL_LAG_M = 0.08                           # 조향이 먹기 전에 가는 거리
@@ -60,8 +68,8 @@ ROAD_HALF = 0.83                            # 이보다 바깥의 점은 도로 
 # 판단
 BLOCK_DIST = 1.35                           # 내 차로 앞 장애물이 이보다 가까우면 옮길 차로를 찾는다
 MIN_START = 0.80                            # 앞 장애물이 이보다 가까우면 옮기기 시작하지 않는다 (옮기는 데 약 0.7 m 필요)
-TRANSIT_CLEAR = 1.10                        # 두 칸 옮길 때 가로지르는 가운데 차로에 필요한 빈 거리
-FAR_CLEAR = 1.90                            # 두 칸 옮길 때 도착 차로에 필요한 빈 거리
+TRANSIT_CLEAR = 1.40                        # 두 칸 옮길 때 가로지르는 가운데 차로에 필요한 빈 거리
+FAR_CLEAR = 2.20                            # 두 칸 옮길 때 도착 차로에 필요한 빈 거리
 SIDE_CLEAR = 1.05                           # 옮길 차로는 옆~앞 이 거리까지 비어 있어야 한다
 SIDE_BEHIND = -0.10                         # 옆 차로 확인을 시작하는 위치 (라이다보다 뒤 -). 지나친 장애물은 곧 시야(좌우 110도)에서 사라진다
 GAIN_MIN = 0.45                             # 옮길 차로가 내 차로보다 이만큼은 더 비어 있어야 한다
@@ -105,6 +113,7 @@ class LineFitter:
         """반환: None 또는 dict(th, lines=[(u, n, yellow_ratio)], score)."""
         yellow, white = self.masks(image, tune)
         pts = []
+        white_full = yellow_full = None
         for mask, is_yellow in ((yellow, 1.0), (white, 0.0)):
             py, px = np.nonzero(mask)
             if len(px) == 0:
@@ -113,6 +122,10 @@ class LineFitter:
             f = F1 - (py + 0.5) * RES
             keep = f < FIT_FMAX
             pts.append(np.stack([x[keep], f[keep], np.full(int(keep.sum()), is_yellow)], 1))
+            if not is_yellow:
+                white_full = (x[keep], f[keep])
+            else:
+                yellow_full = (x[keep], f[keep])
         if not pts:
             return None
         P = np.concatenate(pts)
@@ -121,7 +134,7 @@ class LineFitter:
         if len(P) > 3000:
             P = P[self._rng.choice(len(P), 3000, replace=False)]
         if th_prior is None:
-            angles = np.arange(-math.radians(50), math.radians(50) + 1e-6, math.radians(2.0))
+            angles = np.arange(-math.radians(80), math.radians(80) + 1e-6, math.radians(2.0))
         else:
             angles = np.arange(th_prior - math.radians(16), th_prior + math.radians(16) + 1e-6, math.radians(2.0))
         bins = np.arange(-1.6, 1.6001, 0.02)
@@ -155,10 +168,35 @@ class LineFitter:
             if sel.sum() < 12:
                 continue
             lines.append((float(u[sel].mean()), int(sel.sum()), float(P[sel, 2].mean())))
+        # 끊김 없이 이어진 흰 선은 차로 점선이 아니다 (트랙 매트 가장자리의 흰 띠 등). 점선으로 착각하면
+        # 위치가 한 차로씩 밀린다 (11/15 04:21 실차: 왼쪽 바깥의 흰 띠를 점선으로 보고 오른쪽 차로라고 착각)
+        edges = []
+        if white_full is not None and len(white_full[0]):
+            uw = -white_full[0] * math.cos(th) - white_full[1] * math.sin(th)
+            tw = -white_full[0] * math.sin(th) + white_full[1] * math.cos(th)
+            kept = []
+            for line in lines:
+                if line[2] <= 0.3:
+                    t = np.sort(tw[np.abs(uw - line[0]) < 0.04])
+                    if t.size >= 10 and t[-1] - t[0] >= SOLID_MIN_SPAN and float(np.diff(t).max()) < SOLID_MAX_GAP:
+                        edges.append((line[0], line[1]))
+                        continue
+                kept.append(line)
+            lines = kept
         if not lines:
             return None
-        return dict(th=float(th), lines=sorted(lines), score=score / float(len(P)) ** 2, n=len(P),
-                    yellow_xy=P[P[:, 2] > 0.5, :2])
+        lines = sorted(lines)
+        short = set()                                  # 짧은 노란 조각 (갈림길 섬 꼭짓점 등): 바깥 선이 아니다
+        if yellow_full is not None and len(yellow_full[0]):
+            uy = -yellow_full[0] * math.cos(th) - yellow_full[1] * math.sin(th)
+            ty = -yellow_full[0] * math.sin(th) + yellow_full[1] * math.cos(th)
+            for line in lines:
+                if line[2] >= 0.7:
+                    t = ty[np.abs(uy - line[0]) < 0.04]
+                    if t.size < 10 or float(t.max() - t.min()) < YELLOW_MIN_SPAN:
+                        short.add(line[0])
+        return dict(th=float(th), lines=lines, score=score / float(len(P)) ** 2, n=len(P),
+                    yellow_xy=P[P[:, 2] > 0.5, :2], edges=sorted(edges), short=short)
 
 
 def _shrink(u):
@@ -167,7 +205,7 @@ def _shrink(u):
     return math.copysign(FAR_U + (abs(u) - FAR_U) / FAR_SHRINK, u)
 
 
-def _match_score(c, lines, c_prior=None):
+def _match_score(c, lines, c_prior=None, skip=()):
     """c_prior 가 있으면, 그 위치에서 봤을 때 도로 안쪽(|위치| < ISLAND_INSIDE)에 나란히 있는 노란 선 두 줄은 쓰지 않는다.
     갈림길 섬 테두리(노란색)를 바깥 노란 선으로 착각해 위치가 반대편으로 넘어가는 것을 막는다 (11/15 3번 주행)."""
     island = set()
@@ -178,7 +216,7 @@ def _match_score(c, lines, c_prior=None):
                 island.add(a)
     total = 0.0
     for u, n, yellow_ratio in lines:
-        if u in island:
+        if u in island or u in skip:
             continue
         pos = c + _shrink(u)
         if yellow_ratio >= 0.7:
@@ -226,14 +264,27 @@ class RoadState:
             window = 0.16 + 0.25 * min(self.blind_m, 0.6)
             candidates = np.arange(self.c - window, self.c + window + 1e-6, 0.02)
             prior = self.c
-        scores = np.array([_match_score(float(c), lines, prior) for c in candidates])
+        skip = obs.get('short', ())
+        # 바깥쪽에 길게 이어진 흰 실선(멀리서 희게 보이는 바깥 노란 선, 또는 매트 가장자리 흰 띠)은
+        # 도로 가장자리 근처에 있다 -> 그와 맞지 않는 위치는 후보에서 뺀다 (차로 하나씩 밀리는 착각 방지)
+        for u, n in obs.get('edges', ()):
+            if n < EDGE_MIN_POINTS or not 0.5 <= abs(u) <= 1.4:
+                continue
+            c_edge = math.copysign(EDGE_POS, u) - _shrink(u)
+            ok = np.abs(candidates - c_edge) <= EDGE_TOL
+            if ok.any():
+                candidates = candidates[ok]
+            else:                                   # 지금 위치가 가장자리와 안 맞음 -> 가장자리 기준으로 다시 찾는다
+                candidates = np.arange(c_edge - EDGE_TOL, c_edge + EDGE_TOL + 1e-6, 0.02)
+                prior = None
+        scores = np.array([_match_score(float(c), lines, prior, skip) for c in candidates])
         k = int(np.argmax(scores))
-        if scores[k] < 40.0:
+        if scores[k] < FIX_MIN_SCORE:
             return
         # 가장 잘 맞는 c 주변을 가중 평균
         near = np.abs(candidates - candidates[k]) <= 0.041
         c = float((candidates[near] * scores[near]).sum() / scores[near].sum())
-        if self.c is None or self.blind_m > 1.2:
+        if self.c is None or self.blind_m > 1.2 or prior is None:
             self.c = c
         else:
             self.c += 0.6 * (c - self.c)
@@ -349,6 +400,17 @@ def steer_to_lane(c, th, target, lookahead=LOOKAHEAD):
     return math.copysign(min(math.atan(WHEELBASE / inside_radius), MAX_STEER), left)
 
 
+def limit_heading(steer, th):
+    """도로 방향에서 HEADING_MAX 넘게 틀어지지 않게 한다. 넘었으면 넘은 만큼 되돌리는 조향을 최소로 건다.
+    (위치를 잘못 알고 계속 한쪽으로 꺾어 도로와 60도까지 틀어진 적이 있다 - 11/15 04:21)"""
+    heading = -th                                       # 차가 도로보다 왼쪽을 보면 +
+    over = abs(heading) - HEADING_MAX
+    if over <= 0.0:
+        return steer
+    back = min(MAX_STEER, math.radians(4.0) + 2.0 * over)
+    return min(steer, -back) if heading > 0.0 else max(steer, back)
+
+
 def yellow_wall(lines, th_obs):
     """노란 선은 벽: 3차선에서 넘어도 되는 것은 흰 점선뿐이다 (노란 선 = 바깥 선 또는 섬 테두리).
     노란 선에 닿기 전에 나란해질 수 없을 만큼 가까워지면, 위치 추정과 상관없이 그 선 반대쪽으로 꺾는다.
@@ -457,6 +519,7 @@ class ThreeLane:
         out.speed, out.state, out.reason = plan.speed, plan.state, plan.reason
         out.steer = steer_to_lane(self.road.c, self.road.th, plan.target,
                                   LOOKAHEAD_CHANGE if plan.state == 'CHANGE' else LOOKAHEAD)
+        out.steer = limit_heading(out.steer, self.road.th)
         if wall is not None:
             out.steer = wall[0]
             out.reason = (out.reason + ' | ' if out.reason else '') + out.wall_text
