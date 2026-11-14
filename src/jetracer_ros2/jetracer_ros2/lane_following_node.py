@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import math
+import queue
 from typing import Optional
 
 import cv2
@@ -17,6 +18,9 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist, Vector3Stamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rcl_interfaces.msg import SetParametersResult
+from jetracer_ros2.lane_tuning import SPECS, validate_changes
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, CompressedImage
@@ -78,6 +82,8 @@ class LaneFollowingNode(Node):
         self._recovery_snapshot = None
 
         self.commands_enabled = self.get_parameter('publish_commands').value
+        self._applying_debug_parameters = False
+        self.add_on_set_parameters_callback(self._guard_tuning_parameters)
         self.cmd_pub = (self.create_publisher(Twist, self.get_parameter('output_topic').value, 10)
                         if self.commands_enabled else None)
         self.viewer = None
@@ -85,7 +91,8 @@ class LaneFollowingNode(Node):
         self._actual_cmd_time = 0.0
         if self.get_parameter('live_debug_enabled').value:
             try:
-                self.viewer = LiveViewer(float(self.get_parameter('live_debug_fps').value))
+                self.viewer = LiveViewer(float(self.get_parameter('live_debug_fps').value),
+                                         self._tuning_values(), self.commands_enabled)
                 self.actual_cmd_sub = self.create_subscription(
                     Twist, '/cmd_vel', self._actual_cmd_callback, qos_profile_sensor_data)
             except (OSError, ValueError, RuntimeError) as exc:
@@ -111,6 +118,7 @@ class LaneFollowingNode(Node):
                 CameraInfo, self.get_parameter('camera_info_topic').value,
                 self._camera_info_callback, qos_profile_sensor_data)
         self.watchdog = self.create_timer(0.05, self._watchdog_callback)
+        self.tuning_timer = self.create_timer(0.1, self._poll_tuning)
         self.get_logger().info(
             f"lane follower ready: {self.get_parameter('image_topic').value} -> "
             f"{self.get_parameter('output_topic').value}; command output={self.commands_enabled}; "
@@ -238,8 +246,52 @@ class LaneFollowingNode(Node):
         for name, default in values.items():
             self.declare_parameter(name, default)
 
-    def _pipeline_config(self):
-        p = lambda name: self.get_parameter(name).value
+    def _tuning_values(self):
+        return {name: self.get_parameter(name).value for name in SPECS}
+
+    def _guard_tuning_parameters(self, parameters):
+        if not self._applying_debug_parameters and any(p.name in SPECS for p in parameters):
+            return SetParametersResult(successful=False,
+                reason='Use the manual debug Apply button, or pass parameters at startup.')
+        return SetParametersResult(successful=True)
+
+    def _poll_tuning(self):
+        if not self.viewer:
+            return
+        try:
+            changes = self.viewer.tuning_requests.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            changes = validate_changes(changes, self._tuning_values(), self.commands_enabled)
+            # Construct/validate first; failure cannot damage the running pipeline.
+            candidate = LanePipeline(self._pipeline_config(changes))
+            self._applying_debug_parameters = True
+            try:
+                applied = self.set_parameters_atomically(
+                    [Parameter(name, value=value) for name, value in changes.items()])
+            finally:
+                self._applying_debug_parameters = False
+            if not applied.successful:
+                raise ValueError(applied.reason)
+            self.pipeline = candidate
+            self._reset_steering()
+            self._invalid_frames = 0
+            self._zigzag_tracker = ZigzagTracker()
+            self._zigzag_active = False
+            reply = dict(message='Applied; tracking history reset (session only)',
+                         values=self._tuning_values())
+            self.get_logger().info(f'debug parameters applied: {changes}')
+        except (ValueError, TypeError, cv2.error) as exc:
+            reply = dict(message=f'Rejected: {exc}')
+        try:
+            self.viewer.tuning_responses.put_nowait(reply)
+        except queue.Full:
+            pass
+
+    def _pipeline_config(self, overrides=None):
+        overrides = overrides or {}
+        p = lambda name: overrides[name] if name in overrides else self.get_parameter(name).value
         return LanePipelineConfig(
             low_light_enabled=p('low_light_enabled'), low_light_max_gain=p('low_light_max_gain'),
             preview_y_ratio=p('preview_y_ratio'),

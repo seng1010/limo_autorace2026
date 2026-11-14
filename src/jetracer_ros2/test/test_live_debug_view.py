@@ -10,6 +10,7 @@ import numpy as np
 from jetracer_ros2.live_debug_view import LiveViewer, render_view, render_grid, path_layers, status_text, VIEW_NAMES
 from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
 from jetracer_ros2.driving_profile import ZigzagTracker
+from jetracer_ros2.lane_tuning import SPECS, validate_changes
 
 
 def sample_packet(valid=True):
@@ -103,7 +104,8 @@ def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
     tree = ast.parse(path.read_text())
     original = next(n for n in tree.body if isinstance(n, ast.ClassDef))
     names = {'__init__', '_declare_parameters', '_pipeline_config', '_publish_command',
-             '_watchdog_callback', '_safe_stop', '_reset_steering'}
+             '_watchdog_callback', '_safe_stop', '_reset_steering', '_tuning_values',
+             '_guard_tuning_parameters', '_poll_tuning'}
     methods = [n for n in original.body if isinstance(n, ast.FunctionDef) and n.name in names]
 
     class FakeNode:
@@ -116,6 +118,15 @@ def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
 
         def get_parameter(self, name):
             return SimpleNamespace(value=self.params[name])
+
+        def add_on_set_parameters_callback(self, callback):
+            self.parameter_callback = callback
+
+        def set_parameters_atomically(self, parameters):
+            result = self.parameter_callback(parameters)
+            if result.successful:
+                self.params.update({p.name: p.value for p in parameters})
+            return result
 
         def create_publisher(self, msg, name, qos):
             self.topics.append(name)
@@ -144,6 +155,9 @@ def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
     definition = ast.ClassDef(name='TestNode', bases=[ast.Name(id='FakeNode', ctx=ast.Load())],
                               keywords=[], body=methods, decorator_list=[])
     scope = dict(FakeNode=FakeNode, np=np, LanePipeline=LanePipeline, LanePipelineConfig=LanePipelineConfig,
+                 SPECS=SPECS, validate_changes=validate_changes, queue=queue, cv2=cv2,
+                 SetParametersResult=SimpleNamespace,
+                 Parameter=lambda name, value: SimpleNamespace(name=name, value=value),
                  ZigzagTracker=ZigzagTracker,
                  Twist=object, Vector3Stamped=object, CompressedImage=object, CameraInfo=object,
                  Bool=object, String=object, qos_profile_sensor_data=object())
@@ -153,6 +167,22 @@ def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
     node._publish_command(object())
     node._watchdog_callback()
     node._safe_stop('test')
+    assert node.sent == []
+    node.viewer = SimpleNamespace(tuning_requests=queue.Queue(), tuning_responses=queue.Queue())
+    node.viewer.tuning_requests.put({'windows': 20})
+    node._poll_tuning()
+    assert node.pipeline.config.windows == 20 and node.params['windows'] == 20
+    assert 'Applied' in node.viewer.tuning_responses.get()['message']
+    previous = node.pipeline
+    node.viewer.tuning_requests.put({'windows': 0, 'normal_speed': .1})
+    node._poll_tuning()
+    assert node.pipeline is previous and node.params['normal_speed'] == .4
+    assert 'Rejected' in node.viewer.tuning_responses.get()['message']
+    node.commands_enabled = True
+    node.viewer.tuning_requests.put({'windows': 10})
+    node._poll_tuning()
+    assert node.pipeline is previous
+    assert 'Rejected' in node.viewer.tuning_responses.get()['message']
     assert node.sent == []
 
 

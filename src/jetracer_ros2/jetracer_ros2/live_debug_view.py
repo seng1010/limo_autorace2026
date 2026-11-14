@@ -1,9 +1,10 @@
-"""Read-only live lane inspector, rendered in a separate desktop process.
+"""Live lane inspector with bounded, manual-only parameter requests.
 
 No ROS publishers, camera drivers, recording, or vehicle controls live here.
 Snapshots come directly from the running lane pipeline, never a second detector.
 """
 import math
+import json
 import multiprocessing as mp
 import queue
 import time
@@ -145,13 +146,13 @@ def status_text(packet):
     ])
 
 
-def run_window(frames, feedback, stop):
+def run_window(frames, feedback, stop, tuning_requests, tuning_responses, tuning_values, commands_enabled):
     """Tk is imported only in the spawned child (Ubuntu: python3-tk)."""
     try:
         import tkinter as tk
         from tkinter import ttk
         root = tk.Tk()
-        root.title('LIMO Live Lane Inspector — display only')
+        root.title('LIMO Live Lane Inspector — manual tuning / driving locked')
         root.geometry(f'{min(1420, root.winfo_screenwidth() - 60)}x{min(900, root.winfo_screenheight() - 100)}')
         root.minsize(960, 600)
         root.columnconfigure(0, weight=1)
@@ -196,13 +197,59 @@ def run_window(frames, feedback, stop):
         for key in options:
             ttk.Checkbutton(sidebar, text=key.upper(), variable=options[key]).pack(anchor='w')
         ttk.Checkbutton(sidebar, text='Freeze display (Space)', variable=frozen).pack(anchor='w', pady=5)
+        from jetracer_ros2.lane_tuning import SPECS
+        ttk.Separator(sidebar).pack(fill='x', pady=5)
+        ttk.Label(sidebar, text='Parameters — manual inspection only').pack(anchor='w')
+        ttk.Label(sidebar, text='Session only. No automatic YAML save.\nCalibration / recovery safety limits are locked.',
+                  wraplength=320).pack(anchor='w')
+        tuning_group = tk.StringVar(value=next(iter(SPECS.values()))[0])
+        groups = list(dict.fromkeys(spec[0] for spec in SPECS.values()))
+        group_box = ttk.Combobox(sidebar, values=groups, textvariable=tuning_group,
+                                 state='readonly', width=36)
+        group_box.pack(fill='x')
+        editor = tk.Text(sidebar, height=12, width=38, undo=True)
+        editor.pack(fill='x')
+        tuning_status = tk.StringVar(value='Locked: command output enabled' if commands_enabled else 'Ready')
+        pending = False
+
+        def load_values(event=None):
+            editor.delete('1.0', 'end')
+            editor.insert('1.0', json.dumps({k: v for k, v in tuning_values.items()
+                          if SPECS[k][0] == tuning_group.get()}, indent=2))
+
+        def apply_values():
+            nonlocal pending
+            if commands_enabled or pending:
+                return
+            try:
+                changes = json.loads(editor.get('1.0', 'end'))
+                tuning_requests.put_nowait(changes)
+                pending = True
+                tuning_status.set('Applying…')
+            except (ValueError, queue.Full) as exc:
+                tuning_status.set(str(exc))
+
+        group_box.bind('<<ComboboxSelected>>', load_values)
+        load_values()
+        row = ttk.Frame(sidebar)
+        row.pack(fill='x')
+        ttk.Button(row, text='Load applied values', command=load_values).pack(side='left')
+        ttk.Button(row, text='Apply', command=apply_values,
+                   state='disabled' if commands_enabled else 'normal').pack(side='left')
+        def copy_settings():
+            root.clipboard_clear()
+            root.clipboard_append(json.dumps({'lane_following_node': {
+                'ros__parameters': tuning_values}}, indent=2))
+            tuning_status.set('Applied settings copied (JSON is also valid YAML)')
+        ttk.Button(sidebar, text='Copy all applied parameters', command=copy_settings).pack(fill='x')
+        ttk.Label(sidebar, textvariable=tuning_status, wraplength=320).pack(fill='x')
         status = ttk.Label(sidebar, text='Waiting for frames…', justify='left', wraplength=330)
         status.pack(anchor='w', fill='x')
-        root.bind('<space>', lambda event: frozen.set(not frozen.get()))
-        root.bind('1', lambda event: preset(('overlay',)))
-        root.bind('2', lambda event: preset(('bev',)))
-        root.bind('3', lambda event: preset(('windows',)))
-        root.bind('4', lambda event: preset(DEFAULT_VIEWS))
+        root.bind('<space>', lambda event: frozen.set(not frozen.get()) if event.widget != editor else None)
+        root.bind('1', lambda event: preset(('overlay',)) if event.widget != editor else None)
+        root.bind('2', lambda event: preset(('bev',)) if event.widget != editor else None)
+        root.bind('3', lambda event: preset(('windows',)) if event.widget != editor else None)
+        root.bind('4', lambda event: preset(DEFAULT_VIEWS) if event.widget != editor else None)
 
         def close():
             stop.set()
@@ -218,10 +265,19 @@ def run_window(frames, feedback, stop):
         root.report_callback_exception = callback_error
 
         def tick():
-            nonlocal current, latest
+            nonlocal current, latest, pending
             if stop.is_set():
                 root.destroy()
                 return
+            try:
+                reply = tuning_responses.get_nowait()
+                pending = False
+                tuning_status.set(reply['message'])
+                if reply.get('values') is not None:
+                    tuning_values.update(reply['values'])
+                    load_values()
+            except queue.Empty:
+                pass
             # Read a bounded number; never spend forever draining a fast sender.
             for _ in range(2):
                 try:
@@ -267,7 +323,7 @@ def run_window(frames, feedback, stop):
 
 
 class LiveViewer:
-    def __init__(self, fps=5.0):
+    def __init__(self, fps=5.0, tuning_values=None, commands_enabled=True):
         if not math.isfinite(fps) or fps <= 0:
             raise ValueError('live_debug_fps must be finite and positive')
         self.fps = min(15., fps)
@@ -275,8 +331,12 @@ class LiveViewer:
         context = mp.get_context('spawn')
         self.frames = context.Queue(maxsize=2)
         self.feedback = context.Queue(maxsize=4)
+        self.tuning_requests = context.Queue(maxsize=1)
+        self.tuning_responses = context.Queue(maxsize=1)
         self.stop = context.Event()
-        self.process = context.Process(target=run_window, args=(self.frames, self.feedback, self.stop), daemon=True)
+        self.process = context.Process(target=run_window, args=(
+            self.frames, self.feedback, self.stop, self.tuning_requests,
+            self.tuning_responses, tuning_values or {}, commands_enabled), daemon=True)
         self.process.start()
 
     def wants_frame(self):
@@ -305,6 +365,6 @@ class LiveViewer:
         if self.process.is_alive():
             self.process.terminate()
             self.process.join(timeout=1)
-        for channel in (self.frames, self.feedback):
+        for channel in (self.frames, self.feedback, self.tuning_requests, self.tuning_responses):
             channel.cancel_join_thread()
             channel.close()
