@@ -113,11 +113,13 @@ def test_camera_watchdog_timestamp_follows_command_publication():
                     and n.name == '_image_callback')
     published = [n.lineno for n in ast.walk(callback) if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute) and n.func.attr == '_publish_command']
+    debug_published = [n.lineno for n in ast.walk(callback) if isinstance(n, ast.Call)
+                       and isinstance(n.func, ast.Attribute) and n.func.attr == '_publish_result']
     completed = [n.lineno for n in ast.walk(callback) if isinstance(n, ast.Assign)
                  and any(isinstance(t, ast.Attribute) and t.attr == '_last_image_ns'
                          for t in n.targets)]
-    assert len(published) == len(completed) == 1
-    assert published[0] < completed[0]
+    assert len(published) == len(debug_published) == len(completed) == 1
+    assert published[0] < debug_published[0] < completed[0]
 
 
 def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():

@@ -583,10 +583,6 @@ class LaneFollowingNode(Node):
             self._reset_steering()
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
         self._publish_command(cmd)
-        # The watchdog must measure time since a completed camera decision.
-        # Using callback entry time can stop the vehicle immediately after a
-        # slow but successfully processed frame publishes its command.
-        self._last_image_ns = self.get_clock().now().nanoseconds
         if timing_log_enabled:
             published_perf_ns = time.perf_counter_ns()
             source_stamp_ns = (msg.header.stamp.sec * 1_000_000_000
@@ -664,6 +660,9 @@ class LaneFollowingNode(Node):
                 roi=self.pipeline._normalized_points(self.pipeline.config.src_points),
                 bev_roi=self.pipeline._normalized_points(self.pipeline.config.dst_points)))
         self._publish_result(msg, result)
+        # Include debug encoding in the completed-frame time. A slow callback
+        # must not make the next watchdog tick retract a just-published command.
+        self._last_image_ns = self.get_clock().now().nanoseconds
 
     def _publish_command(self, command):
         if self.cmd_pub is not None:
