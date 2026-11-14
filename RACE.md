@@ -1,0 +1,51 @@
+# race 브랜치 (대회용 통합 브랜치)
+
+`m1-traffic-light`(매니저 + M1 + M3 + 정지선) + `common-yolo` 를 합치고, 조향 수정과 `simple_lane.py` 를 넣은 브랜치.
+main 과 기존 브랜치는 건드리지 않았다. 차에서 확인된 것만 여기에 올린다.
+
+## 1. 조향 수정 (모든 노드에 해당)
+
+| | 최대 조향에서 실제 회전반경 |
+|---|---|
+| `limo_base.launch.py` + `/cmd_vel` (기존) | 1.0 ~ 1.2 m |
+| `limo_base_ackerman.launch.py` + 변환 노드 | 0.50 ~ 0.53 m |
+
+- 원인: `limo_driver.cpp` 436~453줄. 조향각을 28도로 자른 뒤 2.47로 나눠 보냄 -> 차가 받는 최대값 11.3도.
+  명령을 2.6배로 키워도 회전반경이 그대로였다 (11/14 실차 측정, 카메라 배경 회전량 기준).
+- 해결: 같은 패키지의 `limo_ackerman_base` 드라이버는 0.42rad(24도)까지 보낸다. 이 드라이버는
+  `/limo/ack_cmd` (`ackermann_msgs/AckermannDrive`) 를 받으므로, `/cmd_vel` 을 그 형식으로 바꿔 주는
+  변환 노드를 켠다: `python3 simple_lane.py bridge`
+- 기존 노드 코드는 고칠 필요 없다. 단, 예전 드라이버 기준으로 맞춘 조향 관련 숫자(주차 시간, 콘 조향 세기 등)는 다시 확인.
+- 변환 노드가 꺼져 있으면 차가 움직이지 않는다 (0.5초 넘게 `/cmd_vel` 이 없으면 정지 명령).
+
+## 2. 켜는 순서
+
+```bash
+# 1) 하드웨어 (드라이버 + 카메라 + 라이다)
+ros2 launch jetracer_ros2 jetracer_teleop.launch.py
+# 2) 변환 노드 (켜 둔 채로)
+python3 simple_lane.py bridge
+# 3-a) 차선 주행만 시험할 때
+python3 simple_lane.py reset && python3 simple_lane.py drive rec
+# 3-b) 매니저와 함께 돌릴 때
+ros2 launch jetracer_ros2 all_in_node.launch.py
+python3 simple_lane.py drive --topic inference/cmd_vel
+```
+
+- `all_in_node.launch.py` 는 이제 팀 `lane_following_node` 를 기본으로 켜지 않는다 (`team_lane:=true` 로 켤 수 있음).
+- odom 토픽은 새 드라이버에서도 `/odom` 이다.
+
+## 3. simple_lane.py 가 하는 일
+
+- 노란 차선 사이 가운데를 따라가는 기본 주행 (`lane_following_node` 자리).
+- 90도 코너: 곡선으로 판단된 상태에서 바깥 선이 정면 `turn_in_cm`(75) 안으로 들어오면 최대 조향을 걸고,
+  odom 으로 `turn_deg`(60)도 돌면 풀어서 다시 차선을 따라간다. 도는 중 선이 안 보여도 멈추지 않는다.
+- 11/14 밤 실차: 위쪽 직선 -> 90도 코너 -> 지그재그 -> 횡단보도 -> 90도 코너까지 이탈 없이 주행.
+- 아직 없는 것: `mission/lane_mode`(왼쪽/오른쪽 차로 지시) 처리, 구간 자동 전환 이벤트.
+
+## 4. 남은 일 (앞 구간부터 차에서 확인)
+
+- [ ] 장애물 없이 한 바퀴: 3차선, 갈림길, 나머지 코너에서 기본 주행 확인
+- [ ] 매니저 연결 + 구간 자동 전환 (M5, M6, M2, M8 은 지금 스스로 다음으로 넘어가지 않음)
+- [ ] YOLO 모델 (`params.yaml` 의 `yolo_detection_node.model_path` 가 비어 있음)
+- [ ] M3 -> M1 -> M2 -> M7 -> M8 -> M4 순서로 실차 확인
