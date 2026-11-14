@@ -29,6 +29,7 @@ setup(
             'data_collection_node = jetracer_ros2.data_collection_node:main',
             'lane_following_node = jetracer_ros2.lane_following_node:main',
             'lane_following_node_ks = jetracer_ros2.lane_following_node_ks:main',
+            'simple_lane = jetracer_ros2.simple_lane:main',
             'stop_line_node = jetracer_ros2.stop_line_node:main',
             'yolo_detection_node = jetracer_ros2.yolo_detection_node:main',
             'mission_manager_node = jetracer_ros2.mission_manager_node:main',

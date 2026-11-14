@@ -1,6 +1,6 @@
 # race 브랜치 (대회용 통합 브랜치)
 
-`m1-traffic-light`(매니저 + M1 + M3 + 정지선) + `common-yolo` 를 합치고, 조향 수정과 `simple_lane.py` 를 넣은 브랜치.
+`m1-traffic-light`(매니저 + M1 + M3 + 정지선) + `common-yolo` 를 합치고, 조향 수정과 `simple_lane` 노드를 넣은 브랜치.
 main 과 기존 브랜치는 건드리지 않았다. 차에서 확인된 것만 여기에 올린다.
 
 ## 1. 조향 수정 (모든 노드에 해당)
@@ -14,26 +14,38 @@ main 과 기존 브랜치는 건드리지 않았다. 차에서 확인된 것만 
   명령을 2.6배로 키워도 회전반경이 그대로였다 (11/14 실차 측정, 카메라 배경 회전량 기준).
 - 해결: 같은 패키지의 `limo_ackerman_base` 드라이버는 0.42rad(24도)까지 보낸다. 이 드라이버는
   `/limo/ack_cmd` (`ackermann_msgs/AckermannDrive`) 를 받으므로, `/cmd_vel` 을 그 형식으로 바꿔 주는
-  변환 노드를 켠다: `python3 simple_lane.py bridge`
+  변환 노드를 켠다: `ros2 run jetracer_ros2 simple_lane bridge` (하드웨어 launch 에 포함)
 - 기존 노드 코드는 고칠 필요 없다. 단, 예전 드라이버 기준으로 맞춘 조향 관련 숫자(주차 시간, 콘 조향 세기 등)는 다시 확인.
 - 변환 노드가 꺼져 있으면 차가 움직이지 않는다 (0.5초 넘게 `/cmd_vel` 이 없으면 정지 명령).
 
 ## 2. 켜는 순서
 
+처음 한 번 (LIMO 에서 브랜치를 받은 뒤):
+
 ```bash
-# 1) 하드웨어 (드라이버 + 카메라 + 라이다)
-ros2 launch jetracer_ros2 jetracer_teleop.launch.py
-# 2) 변환 노드 (켜 둔 채로)
-python3 simple_lane.py bridge
-# 3-a) 차선 주행만 시험할 때
-python3 simple_lane.py reset && python3 simple_lane.py drive rec
-# 3-b) 매니저와 함께 돌릴 때
-ros2 launch jetracer_ros2 all_in_node.launch.py
-python3 simple_lane.py drive --topic inference/cmd_vel
+cd ~/limo_autorace2026 && colcon build --symlink-install && source install/setup.bash
 ```
 
-- `all_in_node.launch.py` 는 이제 팀 `lane_following_node` 를 기본으로 켜지 않는다 (`team_lane:=true` 로 켤 수 있음).
+터미널 2개면 된다.
+
+```bash
+# 터미널 1) 하드웨어: 새 드라이버 + 카메라 + 라이다 + 변환 노드
+ros2 launch jetracer_ros2 jetracer_teleop.launch.py
+
+# 터미널 2-a) 차선 주행만 시험 (매니저 없음)
+ros2 launch jetracer_ros2 lane_only.launch.py rec:=true
+
+# 터미널 2-b) 전체 (매니저 + simple_lane + 정지선 + YOLO)
+ros2 launch jetracer_ros2 all_in_node.launch.py
+```
+
+- 변환 노드는 하드웨어 launch 가 같이 켠다. 따로 켤 필요 없다.
+- `all_in_node.launch.py` 의 차선 노드는 기본이 `simple_lane` 이다. 팀 `lane_following_node` 로 돌리려면 `team_lane:=true`.
+- 슬라이더 창은 화면이 있는 터미널(NoMachine)에서 켰을 때만 뜬다. 튜닝할 때는 손으로 켜는 게 편하다:
+  `ros2 run jetracer_ros2 simple_lane drive rec`  (매니저와 함께면 뒤에 `--topic inference/cmd_vel`)
+- 빌드 없이 파일 하나만 복사해서 `python3 simple_lane.py drive` 로 돌려도 똑같이 동작한다.
 - odom 토픽은 새 드라이버에서도 `/odom` 이다.
+- **실행 파일(launch) 변경은 아직 차에서 돌려 보지 않았다.** 처음 켤 때 드라이버·변환 노드가 뜨는지 확인할 것.
 
 ## 3. simple_lane.py 가 하는 일
 

@@ -9,6 +9,8 @@
   -> 중심선 위 앞쪽 목표점(pure pursuit) -> 조향각 -> 속도
 
 실행 (LIMO, 먼저 source ~/wego_ws/install/setup.bash)
+  패키지로 빌드했으면 아래의 `python3 ~/simple_lane.py` 대신 `ros2 run jetracer_ros2 simple_lane` 으로 써도 같다.
+  (예: ros2 run jetracer_ros2 simple_lane drive rec)  이 파일 하나만 복사해서 python3 로 돌려도 된다.
   python3 ~/simple_lane.py                         보기 전용 (명령 발행 안 함)
   python3 ~/simple_lane.py drive                   실제 주행 (/cmd_vel 로 발행)
   python3 ~/simple_lane.py drive --topic inference/cmd_vel   매니저 연결용 (2단계)
