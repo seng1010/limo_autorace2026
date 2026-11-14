@@ -179,6 +179,10 @@ mission_traffic_light_node:
     housing_lamp_margin: 0.08         # 함체 위·아래 테두리로 보고 버릴 비율
     housing_min_lit_ratio: 0.03       # 한 칸이 '켜졌다'고 볼 최소 밝은 픽셀 비율
     housing_lit_dominance: 1.5        # 1등 칸이 2등 칸보다 이 배 이상 밝아야 인정
+    # (A) 색 클래스를 함체 전체 박스로 학습한 경우에만 true 권장.
+    # 라벨 색과 '켜진 칸 위치'가 맞는지까지 확인 -> 광고 모니터에 훨씬 강해짐.
+    # 실물 모델로 정상 인식되는 것을 확인한 뒤 켤 것 (박스가 램프만이면 켜면 안 됨)
+    verify_lamp_position: false
 
 mission_obstacle_avoid_node:
   ros__parameters:

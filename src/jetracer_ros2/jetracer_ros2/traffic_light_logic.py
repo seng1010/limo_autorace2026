@@ -44,6 +44,9 @@ class TrafficLightConfig:
     housing_lamp_margin: float = 0.08    # 함체 위·아래 테두리로 보고 버릴 비율
     housing_min_lit_ratio: float = 0.03  # 한 칸이 '켜졌다'고 볼 최소 밝은 픽셀 비율
     housing_lit_dominance: float = 1.5   # 1등 칸이 2등 칸보다 이 배 이상 밝아야 인정
+    # (A) 색 클래스를 **함체 전체 박스**로 학습한 경우, 켜진 칸 위치까지 함께 확인한다.
+    # 광고 모니터처럼 박스가 고르게 밝으면 칸 구분이 안 돼 걸러진다. 실물 확인 후 켤 것
+    verify_lamp_position: bool = False
     min_confidence: float = 0.45
     min_area_ratio: float = 0.0005       # 박스 면적 / 화면 면적. 이보다 작으면 무시
     verify_hsv: bool = True
@@ -154,6 +157,8 @@ def frame_color(detections: List[dict], image_bgr: Optional[np.ndarray],
             return 'red'
         if ratios[color] < max(ratios.values()):
             return None
+        if config.verify_lamp_position and housing_color(image_bgr, bbox, config) != color:
+            return None                                 # 칸 위치가 라벨 색과 안 맞음
     return color
 
 

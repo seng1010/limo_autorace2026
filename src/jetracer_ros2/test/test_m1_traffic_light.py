@@ -213,3 +213,14 @@ def test_line_only_mode_for_testing_without_yolo():
 def test_invalid_trigger():
     with pytest.raises(ValueError):
         _mission(trigger='sign')
+
+
+def test_verify_lamp_position_rejects_uniform_bright_box():
+    """함체 전체 박스 + 칸 위치 확인 ON: 모니터처럼 고르게 밝으면 라벨이 red여도 버림."""
+    cfg = TrafficLightConfig(verify_lamp_position=True)
+    image = np.full((480, 640, 3), 40, dtype=np.uint8)
+    image[100:200, 300:340] = BGR['red']               # 박스 전체가 빨강
+    assert frame_color([_det('red')], image, image.shape, cfg) is None
+    # 진짜 신호등(위 칸만 켜짐)은 그대로 통과
+    real = _light_image('red')
+    assert frame_color([_det('red')], real, real.shape, cfg) == 'red'
