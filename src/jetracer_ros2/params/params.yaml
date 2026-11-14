@@ -111,6 +111,37 @@ yolo_detection_node:
     traffic_roi: [0.0, 0.0, 1.0, 0.65]
     advertisement_exclusion_roi: [0.0, 0.65, 1.0, 1.0]
 
+section_node:
+  ros__parameters:
+    # 구간 전환 (section_logic.py). 거리 = 그 미션이 시작된 뒤 간 거리 [m], 음수 = 끄기
+    #   line_after : 이 거리 뒤에 나오는 첫 정지선에 앞바퀴가 닿으면 다음 미션
+    #   timeout    : 정지선을 못 봐도 이 거리에서 다음 미션 (정지선을 안 쓰는 미션은 이 값만)
+    #   slow_from~slow_to : 서행 구간. 미션이 넘어가도 slow_to 까지 유지
+    # !! 아래 숫자는 도면 치수로 넣은 임시값. 실차 기록(bag_lines)으로 맞추기 전에는 대회용으로 쓰지 말 것
+    odom_topic: '/odom'
+    slow_speed: 0.13                  # 서행 속도 [m/s] (규정: 기본 속도의 1/2 수준, 최대 0.2 이하)
+    line_min_frames: 2
+    line_refractory_m: 0.30
+    # M5 서행(방지턱): 출발선 -> 첫 코너 지나 지그재그 앞 정지선
+    m5_line_after_m: 6.0
+    m5_timeout_m: 10.5
+    m5_slow_from_m: 1.2               # 서행 노면 표시 부근부터
+    m5_slow_to_m: 5.0                 # 방지턱 위치 확인 후 조정
+    # M6 서행 유도선(지그재그): 횡단보도 정지선이 0.8 m 안에 들어오기 전에 M3 로 넘겨야 함
+    m6_line_after_m: -1.0
+    m6_timeout_m: 1.0
+    m6_slow_from_m: 0.0
+    m6_slow_to_m: 2.6                 # 지그재그 끝 ~ 횡단보도 정지선까지 서행 유지
+    # M2 갈림길, M8 라바콘: 3차선 미션을 붙인 뒤 설정 (지금은 꺼 둠)
+    m2_line_after_m: -1.0
+    m2_timeout_m: -1.0
+    m2_slow_from_m: -1.0
+    m2_slow_to_m: -1.0
+    m8_line_after_m: -1.0
+    m8_timeout_m: -1.0
+    m8_slow_from_m: -1.0
+    m8_slow_to_m: -1.0
+
 mission_manager_node:
   ros__parameters:
     lane_command_topic: 'inference/cmd_vel'
@@ -136,8 +167,9 @@ mission_manager_node:
     full_stop_speed: 0.01             # odom |v| 이하이면 정지로 봄 [m/s]
     full_stop_sec: 0.3                # 그 상태가 이만큼 유지되면 '완전정지' 확인
     # M3 보행자 표지판 정지
-    m3_trigger: 'sign'                # 대회용: 표지판 본 뒤 정지선에서만 정지
-                                      # YOLO 없이 테스트: --ros-args -p m3_trigger:=sign_or_line
+    m3_trigger: 'sign_or_line'        # 표지판을 못 봐도 정지선에서 정지 (YOLO 모델이 없거나 놓쳐도 섬)
+                                      # section_node 가 횡단보도 직전에만 M3 를 켜므로 다른 흰 선에 설 위험이 작다
+                                      # 표지판 본 뒤에만 서게 하려면 'sign'
     m3_line_arm_distance_m: 0.80      # 정지선이 이 거리 안이면 감속·정지 시작
     m3_sign_valid_distance_m: 1.5     # 표지판 본 뒤 이 거리 안에 나온 정지선만 인정
     m3_max_approach_distance_m: 1.5   # M3 시작 후 못 서고 이만큼 가면 M3 건너뜀 (0 = 끄기)

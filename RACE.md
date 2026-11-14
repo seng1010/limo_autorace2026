@@ -61,3 +61,17 @@ ros2 launch jetracer_ros2 all_in_node.launch.py
 - [ ] 매니저 연결 + 구간 자동 전환 (M5, M6, M2, M8 은 지금 스스로 다음으로 넘어가지 않음)
 - [ ] YOLO 모델 (`params.yaml` 의 `yolo_detection_node.model_path` 가 비어 있음)
 - [ ] M3 -> M1 -> M2 -> M7 -> M8 -> M4 순서로 실차 확인
+
+## 5. 구간 전환 + 서행 (section_node)
+
+매니저는 M5·M6·M2·M8 을 스스로 넘기지 않는다. `section_node` 가 정지선(`stop_line_node`)과 odom 거리로
+"이 구간이 끝났다"를 판단해 `mission/event` 로 `M5_DONE` 같은 신호를 보낸다. 팀 미션 코드는 그대로다.
+
+- 정지선을 놓쳐도 정해진 거리(timeout)에서 넘어간다 -> 한 번 놓쳐도 뒤 미션이 밀리지 않는다.
+- 서행 구간(M5 방지턱, M6 지그재그)에서는 `mission/speed_limit` 로 속도 상한(0.13 m/s)을 내고 매니저가 적용한다.
+- `all_in_node.launch.py` 가 같이 켠다 (끄려면 `section:=false`).
+- 설정: `params.yaml` 의 `section_node`. **지금 숫자는 도면 치수로 넣은 임시값**이다. 실차 기록으로 맞춘 뒤 쓸 것.
+- 확인: `ros2 topic echo /section/debug` (미션, 간 거리, 서행 여부, 마지막 정지선).
+  노드 로그에 정지선을 지날 때마다 `정지선: 누적 8.80 m (M5 시작 후 8.80 m)` 가 찍힌다 -> 이 값으로 설정을 맞춘다.
+- `m3_trigger` 기본값을 `sign_or_line` 으로 바꿨다 (YOLO 없이도 횡단보도 정지선에서 선다).
+- 시뮬레이션(ROS 없이 매니저 + section_node 연결)으로 M5 서행 -> M6 -> M3 정지·대기·출발 -> M7 순서를 확인했다. 차에서는 아직.

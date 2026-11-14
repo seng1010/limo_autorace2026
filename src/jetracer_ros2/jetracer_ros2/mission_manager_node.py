@@ -10,6 +10,7 @@ M1 (신호등) 판단은 ``m1_traffic_light.TrafficLightMission`` 이 하고, �
 
 테스트용: ``ros2 run jetracer_ros2 mission_manager_node --ros-args -p start_mission:=M3``
 디버그:   ``/mission_manager/debug/state`` (String) — 현재 미션·상태·정지선 거리·속도 (모든 미션, 20 Hz)
+서행:     ``mission/speed_limit`` (Float32, section_node) — 차선 주행 속도 상한. M5·M6 서행 구간용
 """
 
 import os
@@ -95,6 +96,8 @@ class MissionManagerNode(Node):
         self._cone_cmd = Twist()
         self._parking_cmd = Twist()
         self._last_cmd_ns = {'lane': 0, 'cone': 0, 'parking': 0}
+        self._section_limit = None        # section_node 가 내는 서행 속도 (mission/speed_limit)
+        self._section_limit_ns = 0
         self._slow = False
         self._blocked = False
         self._traffic = 'unknown'
@@ -155,6 +158,7 @@ class MissionManagerNode(Node):
         self.create_subscription(String, 'mission/obstacle_avoid/state', self._obstacle_callback, 10)
         self.create_subscription(String, 'mission/cone/state', self._cone_state_callback, 10)
         self.create_subscription(String, 'mission/parking/state', self._parking_state_callback, 10)
+        self.create_subscription(Float32, 'mission/speed_limit', self._speed_limit_callback, 10)
         self.timer = self.create_timer(0.05, self._control_tick)
         self._enter_mission(self._active, initial=True)
 
@@ -197,6 +201,11 @@ class MissionManagerNode(Node):
         self._odom_speed = float(msg.twist.twist.linear.x)
         self._odom.update(pose.x, pose.y, self._odom_speed)
         self._odom_ns = self.get_clock().now().nanoseconds
+
+    def _speed_limit_callback(self, msg):
+        # 서행 구간 속도 제한 (section_node). 0 이하 = 제한 없음. 1초 넘게 안 오면 무시한다.
+        self._section_limit = float(msg.data) if msg.data > 0.0 else None
+        self._section_limit_ns = self.get_clock().now().nanoseconds
 
     def _stop_line_callback(self, msg):
         distance = msg.data
@@ -361,6 +370,8 @@ class MissionManagerNode(Node):
                       if self._slow else self.get_parameter('normal_speed').value)
             if speed_limit is not None:
                 target = min(target, speed_limit)
+            if self._section_limit is not None and (now - self._section_limit_ns) / 1e9 <= 1.0:
+                target = min(target, self._section_limit)
             command = self._limit_speed(command, target)
         self._publish(command)
 

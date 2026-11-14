@@ -26,6 +26,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'lane', default_value='true',
             description='false: 차선 노드를 이 launch 에서 켜지 않음 (따로 켤 때)'),
+        DeclareLaunchArgument(
+            'section', default_value='true',
+            description='false: 구간 전환 노드(section_node)를 켜지 않음'),
         Node(
             package='jetracer_ros2',
             executable='mission_manager_node',
@@ -53,6 +56,13 @@ def generate_launch_description():
             package='jetracer_ros2',
             executable='stop_line_node',
             output='screen',
+        ),
+        # 구간 전환 + 서행 (정지선 + odom 거리). 끄려면 section:=false
+        Node(
+            package='jetracer_ros2',
+            executable='section_node',
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('section')),
         ),
         Node(
             package='jetracer_ros2',
