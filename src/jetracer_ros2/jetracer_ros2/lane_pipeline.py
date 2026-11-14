@@ -70,7 +70,7 @@ class LanePipelineConfig:
     low_light_max_gain: float = 3.0
     preview_y_ratio: float = 0.76
     metric_lookahead_enabled: bool = False
-    lookahead_distance_m: float = 0.40
+    lookahead_distance_m: float = 0.65
     camera_forward_offset_m: float = 0.0
     metric_lateral_scale_m: float = 0.30
     bev_ground_points_m: Tuple[float, ...] = (0.0,) * 8

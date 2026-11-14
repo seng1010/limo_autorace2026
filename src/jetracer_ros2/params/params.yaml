@@ -108,7 +108,7 @@ lane_following_node:
     low_light_max_gain: 3.0          # 색상 유지 밝기 증폭 상한. 검은 영역은 제외
     # 네 ROI 모서리의 실측 추정값. 실제 주행 전 명령 없는 디버거에서 확인한다.
     metric_lookahead_enabled: true    # 기본은 실측 지면 좌표+아커만; 비교 시 metric_ackermann:=false
-    lookahead_distance_m: 0.40        # 요청 목표. 보이지 않으면 허용 범위 안에서 가장 가까운 관측점 사용
+    lookahead_distance_m: 0.65        # 직선 관측 시작 약 0.80m에서도 안전 검사 통과; 실차 재검증 필요
     camera_forward_offset_m: 0.184  # 공식 LIMO ROS2 URDF 명목값(0.100+0.084m); LIMO Pro 실차에서 확인
     metric_lateral_scale_m: 0.30    # 횡오차 정규화 거리, 실제 트랙에 맞춰 보정
     bev_ground_points_m: [-0.24, 1.326, 0.24, 1.326, 0.22, 0.421, -0.22, 0.421]

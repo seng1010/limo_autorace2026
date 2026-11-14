@@ -17,6 +17,7 @@ def _metric_config():
         detect_yellow=True,
         detect_white=True,
         metric_lookahead_enabled=True,
+        lookahead_distance_m=0.40,
         camera_forward_offset_m=0.184,
         bev_ground_points_m=(-0.24, 1.326, 0.24, 1.326,
                              0.22, 0.421, -0.22, 0.421),
@@ -93,6 +94,15 @@ def test_one_sided_line_still_stops_when_metric_target_is_too_far():
     assert 'requested=0.40m' in result.reason
     assert 'observed=' in result.reason
     assert 'near_allowance=0.30m' in result.reason
+
+
+def test_65cm_lookahead_accepts_observed_straight_starting_near_80cm():
+    pipeline, image = _paint_straight(sides=(-1,), near_m=0.78)
+    pipeline.ground.distance = 0.65
+    result = pipeline.process(image)
+    assert result.valid, result.reason
+    assert result.target_forward_m is not None
+    assert 0.65 <= result.target_forward_m <= 1.27
 
 
 def test_line_starting_above_bottom_windows_is_not_connected():

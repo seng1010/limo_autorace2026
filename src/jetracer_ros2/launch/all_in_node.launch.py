@@ -18,6 +18,7 @@ def generate_launch_description():
         # False is inspection-only: no metric target means no autonomous motion.
         DeclareLaunchArgument('metric_ackermann', default_value='true'),
         DeclareLaunchArgument('near_clamp_m', default_value='0.30'),
+        DeclareLaunchArgument('lookahead_m', default_value='0.65'),
         DeclareLaunchArgument('outer_curve_entry', default_value='false'),
         DeclareLaunchArgument('fork_default', default_value='stop', choices=['stop', 'left', 'right']),
         Node(
@@ -34,6 +35,8 @@ def generate_launch_description():
                              LaunchConfiguration('metric_ackermann'), value_type=bool),
                          'metric_max_near_clamp_m': ParameterValue(
                              LaunchConfiguration('near_clamp_m'), value_type=float),
+                         'lookahead_distance_m': ParameterValue(
+                             LaunchConfiguration('lookahead_m'), value_type=float),
                          'observed_outer_curve_entry_enabled': ParameterValue(
                              LaunchConfiguration('outer_curve_entry'), value_type=bool)}],
             output='screen',

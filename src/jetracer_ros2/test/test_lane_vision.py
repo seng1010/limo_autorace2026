@@ -90,6 +90,7 @@ def test_measured_roi_clamps_requested_target_to_visible_ground_edge():
 def test_measured_roi_pipeline_uses_effective_not_requested_distance():
     calibrated = LanePipelineConfig(
         detect_yellow=True, metric_lookahead_enabled=True,
+        lookahead_distance_m=.40,
         camera_forward_offset_m=.184,
         bev_ground_points_m=(-.24, 1.326, .24, 1.326, .22, .421, -.22, .421))
     pipeline = LanePipeline(calibrated)
@@ -112,6 +113,7 @@ def test_metric_pipeline_exposes_rear_axle_target_only_when_calibrated():
     assert raw.valid and raw.target_lateral_m is None
     calibrated = config()
     calibrated.metric_lookahead_enabled = True
+    calibrated.lookahead_distance_m = .4
     calibrated.camera_forward_offset_m = .184
     calibrated.bev_ground_points_m = (-.32, .8, .32, .8, .32, .1, -.32, .1)
     result = LanePipeline(calibrated).process(image)

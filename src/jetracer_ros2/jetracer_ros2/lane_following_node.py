@@ -222,7 +222,7 @@ class LaneFollowingNode(Node):
             'low_light_max_gain': 3.0,
             'preview_y_ratio': 0.76,
             'metric_lookahead_enabled': True,
-            'lookahead_distance_m': 0.40,
+            'lookahead_distance_m': 0.65,
             'camera_forward_offset_m': 0.184,
             'metric_lateral_scale_m': 0.30,
             'bev_ground_points_m': [-0.24, 1.326, 0.24, 1.326,
