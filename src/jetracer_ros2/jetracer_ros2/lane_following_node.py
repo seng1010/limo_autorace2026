@@ -42,6 +42,7 @@ from jetracer_ros2.lane_recovery import (
 from jetracer_ros2.driving_profile import (
     ZigzagTracker, select_speed, yellow_zigzag_evidence,
 )
+from jetracer_ros2.runtime_identity import runtime_identity
 
 
 VALID_MODES = {'center', 'left', 'right', 'heading_hold'}
@@ -75,6 +76,7 @@ class LaneFollowingNode(Node):
         self._odom_frame_id = None
         self._odom_ready = False
         self._recovery_snapshot = None
+        self._runtime_module, self._source_checkout = runtime_identity(__file__)
 
         self.commands_enabled = self.get_parameter('publish_commands').value
         self._applying_debug_parameters = False
@@ -118,6 +120,9 @@ class LaneFollowingNode(Node):
             f"lane follower ready: {self.get_parameter('image_topic').value} -> "
             f"{self.get_parameter('output_topic').value}; command output={self.commands_enabled}; "
             f"metric Ackermann={self.get_parameter('metric_lookahead_enabled').value}")
+        self.get_logger().info(
+            f"lane runtime module={self._runtime_module}; source checkout HEAD="
+            f"{self._source_checkout}")
 
     def _declare_parameters(self):
         values = {
@@ -630,6 +635,7 @@ class LaneFollowingNode(Node):
         if self.viewer and self.viewer.wants_frame():
             state = dict(
                 received_mono=time.monotonic(), source_stamp_ns=msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec,
+                runtime_module=self._runtime_module, source_checkout=self._source_checkout,
                 commands_enabled=self.commands_enabled, valid=bool(result.valid), usable=bool(usable),
                 confidence=float(result.confidence), reason=result.reason, mode=self._mode,
                 observation_state=result.observation_state, path_state=result.path_state,

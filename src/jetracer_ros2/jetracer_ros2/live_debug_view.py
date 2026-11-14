@@ -113,6 +113,8 @@ def render_grid(packet, selected, options, width=1000, height=700, columns=0):
 def status_text(packet):
     s = packet['state']
     return '\n'.join([
+        f"runtime module: {s.get('runtime_module', 'unknown')}",
+        f"source checkout HEAD: {s.get('source_checkout', 'unknown')}",
         'COMMAND OUTPUT: ' + ('ENABLED' if s['commands_enabled'] else 'OFF (manual inspection)'),
         f"mode={s['mode']} reference={s['reference']}",
         f"valid={s['valid']} usable={s['usable']}",

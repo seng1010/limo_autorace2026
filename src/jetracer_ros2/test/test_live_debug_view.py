@@ -172,6 +172,7 @@ def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
                               keywords=[], body=methods, decorator_list=[])
     scope = dict(FakeNode=FakeNode, np=np, LanePipeline=LanePipeline, LanePipelineConfig=LanePipelineConfig,
                  SPECS=SPECS, validate_changes=validate_changes, queue=queue, cv2=cv2,
+                 runtime_identity=lambda path: ('loaded.py', 'unknown'),
                  SetParametersResult=SimpleNamespace,
                  Parameter=lambda name, value: SimpleNamespace(name=name, value=value),
                  ZigzagTracker=ZigzagTracker,
