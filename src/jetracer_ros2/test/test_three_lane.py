@@ -86,8 +86,11 @@ def test_planner_does_not_cut_in_when_side_lane_is_occupied_or_too_late():
 def test_planner_goes_to_goal_lane_only_when_it_is_empty():
     far = T.LIDAR_MAX
     planner = T.Planner()
-    assert planner.update(1, 0.0, [2.0, far, far], [2.0, far, far], goal=0).target == 1
-    assert planner.update(1, 0.0, [far, far, far], [far, far, far], goal=0).target == 0
+    for _ in range(20):                  # 왼쪽 2.0 m 앞에 장애물이 보이는 동안은 옮기지 않는다
+        assert planner.update(1, 0.0, [2.0, far, far], [2.0, far, far], goal=0).target == 1
+    for k in range(T.GOAL_CLEAR_FRAMES):  # 장애물이 안 보이는 상태가 이어져야 옮긴다 (한두 프레임으로는 안 옮김)
+        plan = planner.update(1, 0.0, [far, far, far], [far, far, far], goal=0)
+        assert plan.target == (0 if k == T.GOAL_CLEAR_FRAMES - 1 else 1)
 
 
 def test_two_lane_move_through_empty_middle_lane():
@@ -210,11 +213,17 @@ def test_heading_is_limited():
 
 def test_goal_side_is_preferred_only_when_free_distance_is_similar():
     far = T.LIDAR_MAX
-    # 갈림길 방향(오른쪽)이 0.6 m 일찍 막히면 더 멀리 빈 왼쪽으로 간다 (11/15 실차에서 멈춰 선 배치)
-    plan = T.Planner().update(1, 0.0, [far, 1.2, 1.9], [far, 1.2, 1.9], goal=2)
+    # 왼쪽은 장애물이 없고 갈림길 방향(오른쪽)은 2.4 m 앞에 있으면 왼쪽 (11/15 05:02 실차에서 막힌 배치)
+    plan = T.Planner().update(1, 0.0, [far, 1.2, 2.4], [far, 1.2, 2.4], goal=2)
     assert plan.target == 0
-    # 빈 거리가 비슷하면 갈림길 방향
-    plan = T.Planner().update(1, 0.0, [far, 1.2, 2.3], [far, 1.2, 2.3], goal=2)
+    # 양쪽 다 장애물이 있고 거리가 비슷하면 갈림길 방향
+    plan = T.Planner().update(1, 0.0, [2.2, 1.2, 2.0], [2.2, 1.2, 2.0], goal=2)
+    assert plan.target == 2
+    # 양쪽 다 장애물이 있는데 한쪽이 훨씬 가까우면 먼 쪽
+    plan = T.Planner().update(1, 0.0, [2.3, 1.2, 1.7], [2.3, 1.2, 1.7], goal=2)
+    assert plan.target == 0
+    # 양쪽 다 장애물이 없으면 갈림길 방향
+    plan = T.Planner().update(1, 0.0, [far, 1.2, far], [far, 1.2, far], goal=2)
     assert plan.target == 2
 
 
@@ -243,3 +252,37 @@ def test_reverse_recovery_backs_up_then_changes_lane():
     assert 'STOP' in states and 'REVERSE' in states and states[-1] == 'CHANGE'
     assert out.target == 1 and dist >= T.MIN_START - 0.02      # 마지막 프레임에서 한 걸음 전진한 만큼
     assert tl.reverse_done <= T.REVERSE_MAX + 0.02
+
+
+def test_no_lane_decision_without_lidar():
+    far = T.LIDAR_MAX
+    planner = T.Planner()
+    for _ in range(30):                   # 라이다가 아직 없으면 '전부 비었음'으로 보고 옮기지 않는다
+        plan = planner.update(1, 0.0, [far] * 3, [far] * 3, goal=2, have_scan=False)
+        assert plan.target == 1 and plan.speed == T.V_SLOW
+
+
+def test_dead_end_is_not_entered_again_after_reversing():
+    # 내 차로(오른쪽) 앞이 막혔고 가운데는 지나친 장애물이 계속 옆에 있다 -> 후진해도 옮길 곳이 없다
+    tl = T.ThreeLane()
+    right = T.LANE_CENTER[2]
+    n, a0, inc = 250, -1.92, 3.84 / 249
+    x, dist = 0.0, 0.30
+
+    def scan(d):
+        r = np.full(n, np.inf, np.float32)
+        for px, py in ((d, -0.05), (d, 0.0), (d, 0.05), (0.3, 0.50), (0.3, 0.55), (0.35, 0.52)):
+            r[int(round((math.atan2(py, px) - a0) / inc))] = math.hypot(px, py)
+        return r, a0, inc, 0.15
+
+    states = []
+    for _ in range(500):
+        out = tl.step_obs(obs(right), (x, 0.0, 0.0), scan(dist))
+        states.append(out.state)
+        step = out.speed / 22.0
+        x += abs(step)
+        dist -= step
+    assert 'REVERSE' in states
+    last_reverse = len(states) - 1 - states[::-1].index('REVERSE')
+    assert set(states[last_reverse + 1:]) == {'STOP'}           # 후진 뒤에는 다시 전진하지 않는다
+    assert states.count('REVERSE') < 250                        # 후진은 한 번만 (전진·후진을 되풀이하지 않는다)

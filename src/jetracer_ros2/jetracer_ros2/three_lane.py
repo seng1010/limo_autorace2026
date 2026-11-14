@@ -74,13 +74,14 @@ SIDE_CLEAR = 1.05                           # 옮길 차로는 옆~앞 이 거�
 SIDE_BEHIND = -0.10                         # 옆 차로 확인을 시작하는 위치 (라이다보다 뒤 -). 지나친 장애물은 곧 시야(좌우 110도)에서 사라진다
 GAIN_MIN = 0.45                             # 옮길 차로가 내 차로보다 이만큼은 더 비어 있어야 한다
 STOP_DIST = 0.38                            # 갈 곳이 없으면 장애물 앞 이 거리에서 정지
+NO_OBSTACLE = LIDAR_MAX - 0.05              # 빈 거리가 이 이상이면 그 차로에 장애물이 안 보이는 것
+GOAL_CLEAR_FRAMES = 6                       # 갈림길 방향 차로가 연속 이만큼 비어 보여야 미리 옮긴다
 GOAL_TIE = 0.40                             # 두 차로의 빈 거리 차이가 이 안이면 갈림길 방향 쪽을 고른다
 STUCK_FRAMES = 25                           # 정지 상태가 이만큼(약 1.2초) 이어지면 후진해서 다시 길을 찾는다
 REVERSE_MIN = 0.25                          # 최소 후진 거리 [m]
 REVERSE_MAX = 1.20                          # 최대 후진 거리 [m]
 REVERSE_KEEP = 0.35                         # 지나온 길 중 이만큼은 남기고 후진 (라이다는 뒤를 못 본다)
 V_REVERSE = 0.12
-GOAL_CLEAR = 2.40                           # 갈림길 방향 차로로 미리 옮기는 건 그 차로에 장애물이 안 보일 때만
 ARRIVE_TOL = 0.10                           # 목표 차로 가운데에서 이 안이면 옮기기 끝
 V_KEEP, V_CHANGE, V_SLOW = 0.22, 0.20, 0.12
 
@@ -344,6 +345,7 @@ class Planner:
     def __init__(self):
         self.target: Optional[int] = None
         self.changing = False
+        self._goal_clear = 0         # 갈림길 방향 옆 차로가 연속으로 비어 보인 프레임 수
 
     def _escape(self, cur, c, ahead, side, goal):
         """막힌 차로 cur 대신 갈 차로. 없으면 None."""
@@ -356,8 +358,12 @@ class Planner:
         if near:
             # 더 멀리까지 빈 차로가 먼저. 갈림길 방향은 빈 거리가 비슷할 때(GOAL_TIE 이내)만 우선한다.
             # (11/15 실차: 갈림길 방향이라고 곧 막히는 차로로 들어가 멈춰 섬)
-            best = max(ahead[j] for j in near)
-            near = [j for j in near if ahead[j] >= best - GOAL_TIE]
+            clear = [j for j in near if ahead[j] >= NO_OBSTACLE]
+            if clear:                    # 장애물이 아예 안 보이는 차로가 있으면 그중에서만 고른다
+                near = clear             # (라이다를 LIDAR_MAX 까지만 봐서 '없음'과 '2.4 m 앞'이 비슷해 보인다)
+            else:
+                best = max(ahead[j] for j in near)
+                near = [j for j in near if ahead[j] >= best - GOAL_TIE]
             if goal is not None:
                 near.sort(key=lambda j: (abs(j - goal), -ahead[j]))
             else:
@@ -370,9 +376,13 @@ class Planner:
         return None
 
     def update(self, lane: int, c: float, ahead: List[float], side: List[float],
-               goal: Optional[int] = None) -> Plan:
+               goal: Optional[int] = None, have_scan: bool = True) -> Plan:
+        """have_scan=False (라이다가 아직 없음) 이면 차로를 바꾸는 결정을 하지 않는다."""
         if self.target is None:
             self.target = lane
+        if not have_scan:
+            self._goal_clear = 0
+            return Plan(self.target, V_SLOW, 'CHANGE' if self.changing else 'KEEP', '라이다 없음 -> 서행')
         if self.changing and abs(c - LANE_CENTER[self.target]) <= ARRIVE_TOL:
             self.changing = False
         cur = self.target
@@ -381,9 +391,13 @@ class Planner:
                 return Plan(cur, V_CHANGE, 'CHANGE', f'차로 {lane} -> {cur}')
             if goal is not None and goal != cur:
                 j = cur + (1 if goal > cur else -1)
-                if side[j] >= GOAL_CLEAR and ahead[j] >= GOAL_CLEAR:
+                self._goal_clear = self._goal_clear + 1 if (side[j] >= NO_OBSTACLE and ahead[j] >= NO_OBSTACLE) else 0
+                if self._goal_clear >= GOAL_CLEAR_FRAMES:
+                    self._goal_clear = 0
                     self.target, self.changing = j, True
                     return Plan(j, V_CHANGE, 'CHANGE', f'갈림길 방향 -> 차로 {j}')
+            else:
+                self._goal_clear = 0
             return Plan(cur, V_KEEP, 'KEEP', '')
         # cur 가 막힘 (가는 중이든 옮기는 중이든)
         best = self._escape(cur, c, ahead, side, goal)
@@ -480,7 +494,8 @@ class ThreeLane:
         self.reverse_done = 0.0      # 이번 후진에서 물러난 거리
         self.reverse_room = 0.0      # 이번 후진에서 물러나도 되는 거리
         self.reverse_count = 0
-        self.gave_up = False         # 후진해도 길이 없었음 -> 더는 후진하지 않는다
+        self.gave_up = False         # 후진해도 길이 없었음 -> 그 자리에 선다
+        self.dead_lane = None        # 막혔던 차로
         self.stuck = 0               # 정지 상태가 이어진 프레임 수
         self.lane_run = 1.0          # 지금 목표 차로로 정한 뒤 앞으로 간 거리 (이만큼은 뒤가 비어 있다).
                                      # 처음에는 지나온 길 1.0 m 가 비어 있다고 본다
@@ -527,17 +542,29 @@ class ThreeLane:
             if self._last_target is not None:
                 self.lane_run = 0.0
             self._last_target = plan.target
-        if self.reversing:
-            can_go = plan.state in ('KEEP', 'CHANGE')
-            if (can_go and self.reverse_done >= REVERSE_MIN) or self.reverse_done >= self.reverse_room:
-                self.reversing, self.stuck = False, 0
-                if not can_go:
-                    self.gave_up = True
+        if self.gave_up:
+            if plan.state == 'CHANGE' and plan.target != self.dead_lane:
+                self.gave_up = False                 # 옮길 차로가 생겼다
                 return False
+            # 막힌 길: 후진해도 옮길 차로가 없었다. 같은 길로 다시 들어가지 않고 선다 (11/15 05:02 실차: 전진·후진 반복)
+            out.speed, out.steer, out.state = 0.0, 0.0, 'STOP'
+            out.reason = '막힌 길 (후진해도 옮길 차로 없음) -> 정지'
+            return True
+        if self.reversing:
+            # 뒤로 물러나 앞이 비어 보이는 것은 '갈 수 있다'가 아니다. 다른 차로로 옮길 수 있어야 한다
+            can_go = plan.state == 'CHANGE' and plan.target != self.dead_lane
+            if can_go and self.reverse_done >= REVERSE_MIN:
+                self.reversing, self.stuck = False, 0
+                return False
+            if self.reverse_done >= self.reverse_room:
+                self.reversing, self.stuck, self.gave_up = False, 0, True
+                out.speed, out.steer, out.state = 0.0, 0.0, 'STOP'
+                out.reason = '막힌 길 (후진해도 옮길 차로 없음) -> 정지'
+                return True
             out.speed, out.steer, out.state = -V_REVERSE, 0.0, 'REVERSE'
             out.reason = f'막힘 -> 후진 {self.reverse_done:.2f}/{self.reverse_room:.2f} m'
             return True
-        if plan.state != 'STOP' or self.gave_up:
+        if plan.state != 'STOP':
             self.stuck = 0
             return False
         self.stuck += 1
@@ -545,9 +572,10 @@ class ThreeLane:
             return False
         room = min(REVERSE_MAX, self.lane_run - REVERSE_KEEP)
         if self.reverse_count >= 2 or room < REVERSE_MIN:
-            self.gave_up = True
+            self.gave_up, self.dead_lane = True, plan.target
             return False
         self.reversing, self.reverse_done, self.reverse_room = True, 0.0, room
+        self.dead_lane = plan.target
         self.reverse_count += 1
         out.speed, out.steer, out.state = -V_REVERSE, 0.0, 'REVERSE'
         out.reason = f'막힘 -> 후진 시작 (최대 {room:.2f} m)'
@@ -573,7 +601,7 @@ class ThreeLane:
         out.island = island
         if island is not None:                   # 가운데 차로는 섬에서 끝난다 -> 장애물로 취급
             ahead[1], side[1] = min(ahead[1], island), min(side[1], island)
-        plan = self.planner.update(lane, self.road.c, ahead, side, goal)
+        plan = self.planner.update(lane, self.road.c, ahead, side, goal, have_scan=scan is not None)
         out.ok = True
         out.speed, out.state, out.reason = plan.speed, plan.state, plan.reason
         out.steer = steer_to_lane(self.road.c, self.road.th, plan.target,
