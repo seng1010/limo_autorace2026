@@ -611,6 +611,7 @@ class LaneFollowingNode(Node):
                 f'left_curve_preview={result.curve_left_preview_rad} '
                 f'lateral={result.lateral_error:+.3f} heading={result.heading_error:+.3f} '
                 f'shape_span={result.curve_heading_span:.3f} '
+                f'metric_curvature={result.metric_curvature} '
                 f'reference={reference_side(result)} '
                 f'lookahead={result.lookahead_description} light_gain={result.illumination_gain:.2f} '
                 f'curve_control={curve_detected if usable else False} zigzag_slow={self._zigzag_active} '
@@ -629,6 +630,7 @@ class LaneFollowingNode(Node):
                 reference=reference_side(result), left_type=result.left_type, right_type=result.right_type,
                 lateral=float(result.lateral_error), heading_rad=float(result.heading_error),
                 shape_span=float(result.curve_heading_span),
+                metric_curvature=result.metric_curvature,
                 curve_control=bool(curve_detected if usable else False), lookahead=result.lookahead_description,
                 curve_turn=result.curve_turn,
                 nearest_observed=bool(result.curve_nearest_observation),

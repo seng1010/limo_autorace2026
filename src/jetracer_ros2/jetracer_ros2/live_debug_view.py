@@ -125,6 +125,7 @@ def status_text(packet):
         f"lateral error: {s['lateral']:+.3f}",
         f"heading: {math.degrees(s['heading_rad']):+.1f} deg",
         f"bend span: {s['shape_span']:.3f} rad",
+        f"ground curvature: {s.get('metric_curvature')} 1/m (diagnostic)",
         f"curve control: {s['curve_control']}",
         f"yellow curve priority: {s.get('yellow_curve_priority', False)}",
         f"observed turn: {s.get('curve_turn', 'unknown')}",

@@ -14,6 +14,7 @@ import numpy as np
 
 from jetracer_ros2.lane_attributes import classify_lane, measured_heading_span
 from jetracer_ros2.lane_vision import compensate_light, GroundLookahead
+from jetracer_ros2.lane_geometry import signed_curvature
 
 
 @dataclass
@@ -125,6 +126,7 @@ class LaneResult:
     curve_left_target_active: bool = False
     curve_left_preview_rad: Optional[float] = None
     ground_path: Tuple[Tuple[float, float], ...] = ()  # (lateral right, forward), near to far
+    metric_curvature: Optional[float] = None  # 1/m; diagnostic until calibration is validated
     right_ground_boundary: Tuple[Tuple[float, float], ...] = ()
 
 
@@ -1360,6 +1362,7 @@ class LanePipeline:
                 if (forward <= self.config.curve_nearest_max_forward_m
                         and (not ground_path or forward > ground_path[-1][1] + 1e-4)):
                     ground_path.append((lateral, forward))
+        metric_curvature = signed_curvature(ground_path)
 
         cv2.circle(debug, (int(center_x), int(y_eval)), 7, (0, 255, 0), -1)
         cv2.putText(
@@ -1413,6 +1416,7 @@ class LanePipeline:
             curve_left_target_active=left_curve_target is not None,
             curve_left_preview_rad=(left_curve_target[3] if left_curve_target is not None else None),
             ground_path=tuple(ground_path),
+            metric_curvature=metric_curvature,
             preview_heading_error=preview_heading,
             lookahead_description=lookahead_description,
             target_lateral_m=target_lateral_m,
