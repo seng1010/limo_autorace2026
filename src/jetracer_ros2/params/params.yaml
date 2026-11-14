@@ -101,7 +101,7 @@ stop_line_node:
 yolo_detection_node:
   ros__parameters:
     image_topic: '/camera/color/image_raw/compressed'
-    model_path: ''  # e.g. /home/wego/models/autorace.engine
+    model_path: '/home/wego/models/autorace_all.pt'   # 통합 YOLO 모델 (LIMO 에 이 경로로 파일을 넣을 것). 비우면 YOLO 없이 동작
     confidence: 0.45
     iou: 0.5
     image_size: 640
