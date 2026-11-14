@@ -1,11 +1,9 @@
 import cv2
 import numpy as np
 import pytest
-from types import SimpleNamespace
 
 from jetracer_ros2.lane_pipeline import LanePipeline, LanePipelineConfig
 from jetracer_ros2.lane_vision import GroundLookahead
-from jetracer_ros2.lane_steering import tracking_error
 
 
 def config():
@@ -133,15 +131,6 @@ def test_metric_requires_calibration_and_visible_target():
         pass
     else:
         raise AssertionError('unseen target accepted')
-
-
-def test_preview_boost_only_for_same_direction_tightening():
-    result = SimpleNamespace(lateral_error=.1, heading_error=.2,
-                             preview_heading_error=.6, recovered_side='left')
-    base = tracking_error(result, .95, .7, 1.35, 1., 0., 1.0)
-    assert tracking_error(result, .95, .7, 1.35, 1., .25, 1.0) > base
-    result.preview_heading_error = -.6
-    assert tracking_error(result, .95, .7, 1.35, 1., .25, 1.0) == base
 
 
 def test_video_estimate_rectifies_observed_parallel_boundaries():

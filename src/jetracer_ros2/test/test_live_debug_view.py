@@ -39,7 +39,7 @@ def test_status_separates_lane_validity_from_control_decision():
     packet['state'].update(
         commands_enabled=True, mode='center', usable=False, confidence=0.89,
         left_type='unobserved', right_type='yellow/solid/curve', lateral=0.0,
-        heading_rad=0.0, shape_span=0.516, curve_weight=0.0,
+        heading_rad=0.0, shape_span=0.516,
         curve_control=False, angle_cmd_deg=0.0, lane_v=0.0, lane_omega=0.0,
         lookahead='unavailable', reason='outer left curve not observed',
         observation_state='accepted', path_state='not_evaluated', policy_state='blocked',
