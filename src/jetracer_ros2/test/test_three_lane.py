@@ -206,3 +206,40 @@ def test_heading_is_limited():
     assert left < -math.radians(10)
     assert T.limit_heading(math.radians(20), -math.radians(20)) == math.radians(20)
     assert T.limit_heading(-math.radians(20), math.radians(50)) > math.radians(10)
+
+
+def test_goal_side_is_preferred_only_when_free_distance_is_similar():
+    far = T.LIDAR_MAX
+    # 갈림길 방향(오른쪽)이 0.6 m 일찍 막히면 더 멀리 빈 왼쪽으로 간다 (11/15 실차에서 멈춰 선 배치)
+    plan = T.Planner().update(1, 0.0, [far, 1.2, 1.9], [far, 1.2, 1.9], goal=2)
+    assert plan.target == 0
+    # 빈 거리가 비슷하면 갈림길 방향
+    plan = T.Planner().update(1, 0.0, [far, 1.2, 2.3], [far, 1.2, 2.3], goal=2)
+    assert plan.target == 2
+
+
+def test_reverse_recovery_backs_up_then_changes_lane():
+    tl = T.ThreeLane()
+    right = T.LANE_CENTER[2]
+    x = 0.0
+    n, a0, inc = 250, -1.92, 3.84 / 249
+
+    def scan(dist):                       # 오른쪽 차로(내 차로) 정면 dist m 에 장애물
+        r = np.full(n, np.inf, np.float32)
+        for dy in (-0.05, 0.0, 0.05):
+            r[int(round((math.atan2(dy, dist) - a0) / inc))] = math.hypot(dist, dy)
+        return r, a0, inc, 0.15
+
+    states = []
+    dist = 0.30                           # 너무 가까워서 옮기지 못하고 멈춘 상태
+    for _ in range(200):
+        out = tl.step_obs(obs(right), (x, 0.0, 0.0), scan(dist))
+        states.append(out.state)
+        step = out.speed / 22.0
+        x += abs(step)                    # odom 위치는 후진해도 '이동 거리'만 준다
+        dist -= step
+        if out.state == 'CHANGE':
+            break
+    assert 'STOP' in states and 'REVERSE' in states and states[-1] == 'CHANGE'
+    assert out.target == 1 and dist >= T.MIN_START - 0.02      # 마지막 프레임에서 한 걸음 전진한 만큼
+    assert tl.reverse_done <= T.REVERSE_MAX + 0.02
