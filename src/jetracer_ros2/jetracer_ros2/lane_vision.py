@@ -75,12 +75,15 @@ class GroundLookahead:
         if not np.all(np.isfinite(world)) or not np.all(np.diff(world[:, 1]) < 0):
             raise ValueError('ground calibration must map upper image to farther ground')
         forward, lateral = world[::-1, 1], world[::-1, 0]
+        observed = (f'requested={self.distance:.2f}m, '
+                    f'observed={forward[0]:.2f}..{forward[-1]:.2f}m, '
+                    f'near_allowance={self.max_near_clamp_m:.2f}m')
         if self.distance > forward[-1]:
-            raise ValueError('lookahead distance outside observed ground range')
+            raise ValueError(f'lookahead distance outside observed ground range ({observed})')
         effective = max(self.distance, float(forward[0]) + self.edge_margin_m)
         if (effective > forward[-1]
                 or effective - self.distance > self.max_near_clamp_m + 1e-8):
-            raise ValueError('lookahead too close to or outside observed ground range')
+            raise ValueError(f'lookahead too close to or outside observed ground range ({observed})')
         x = float(np.interp(effective, forward, lateral))
         slope = float(np.interp(effective, forward, np.gradient(lateral, forward)))
         y = float(np.interp(effective, forward, ys[::-1]))

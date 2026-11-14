@@ -89,7 +89,10 @@ def test_one_sided_line_still_stops_when_metric_target_is_too_far():
     pipeline, image = _paint_straight(sides=(-1,), near_m=0.78)
     result = pipeline.process(image)
     assert not result.valid
-    assert result.reason == 'lookahead too close to or outside observed ground range'
+    assert result.reason.startswith('lookahead too close to or outside observed ground range')
+    assert 'requested=0.40m' in result.reason
+    assert 'observed=' in result.reason
+    assert 'near_allowance=0.30m' in result.reason
 
 
 def test_line_starting_above_bottom_windows_is_not_connected():

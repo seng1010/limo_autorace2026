@@ -23,6 +23,11 @@ def sample_packet(valid=True):
                 roi=np.float32([[100, 240], [540, 240], [639, 479], [0, 479]]))
 
 
+def test_camera_panel_labels_distinguish_raw_and_undistorted_roi():
+    assert 'before undistort' in VIEW_NAMES['raw']
+    assert 'Undistorted' in VIEW_NAMES['overlay']
+
+
 def test_projection_uses_actual_pipeline_transform():
     packet = sample_packet()
     packet['inverse_matrix'] = np.array([[.5, 0, 20], [0, .5, 30], [0, 0, 1.]])

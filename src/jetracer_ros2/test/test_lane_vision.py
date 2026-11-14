@@ -80,8 +80,9 @@ def test_measured_roi_clamps_requested_target_to_visible_ground_edge():
     assert used == pytest.approx(.625, abs=.001)
     assert 0 <= y < 479
     # If the near lane is missing, never extrapolate more than the allowance.
-    with pytest.raises(ValueError, match='too close'):
+    with pytest.raises(ValueError, match='requested=0.40m, observed=') as error:
         ground.evaluate_target(np.array([0, 319.5]), 0, 300)
+    assert 'near_allowance=0.25m' in str(error.value)
     far = GroundLookahead(bird, measured, .184, .7, .3, .25, .02)
     assert far.evaluate_target(np.array([0, 319.5]), 0, 479)[3] == .7
 

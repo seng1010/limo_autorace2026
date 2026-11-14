@@ -14,7 +14,8 @@ import numpy as np
 
 
 VIEW_NAMES = {
-    'raw': 'Original camera', 'overlay': 'Camera + ROI / path',
+    'raw': 'Raw camera (before undistort)',
+    'overlay': 'Undistorted camera + ROI / path',
     'bev': 'BEV + path', 'windows': 'Sliding windows',
     'binary': 'Combined mask', 'color': 'Color mask', 'gradient': 'Gradient mask',
 }
