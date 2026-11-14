@@ -10,6 +10,12 @@ import math
 from typing import Optional, Tuple
 
 
+def brief_hold_allowed(has_valid_command: bool, age_sec: float, limit_sec: float) -> bool:
+    """A short camera-gap hold is independent of optional odom recovery."""
+    return (has_valid_command and math.isfinite(age_sec) and math.isfinite(limit_sec)
+            and 0.0 <= age_sec <= max(0.0, limit_sec))
+
+
 @dataclass(frozen=True)
 class Pose2D:
     x: float

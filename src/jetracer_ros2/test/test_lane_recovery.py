@@ -4,8 +4,17 @@ import math
 
 from jetracer_ros2.lane_recovery import (
     Pose2D, RecoveryTarget, snapshot_path, recovery_target,
-    right_boundary_clearance,
+    right_boundary_clearance, brief_hold_allowed,
 )
+
+
+def test_camera_gap_fallback_is_bounded_without_odom():
+    assert brief_hold_allowed(True, 0.20, 0.50)
+    assert brief_hold_allowed(True, 0.50, 0.50)
+    assert not brief_hold_allowed(True, 0.51, 0.50)
+    assert not brief_hold_allowed(True, -0.01, 0.50)
+    assert not brief_hold_allowed(False, 0.20, 0.50)
+    assert not brief_hold_allowed(True, float('nan'), 0.50)
 
 
 def test_odom_motion_moves_stored_target_back_in_vehicle_frame():

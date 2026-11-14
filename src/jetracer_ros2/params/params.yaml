@@ -40,7 +40,7 @@ lane_following_node:
     invalid_hold_sec: 0.25            # 차선 놓쳤을 때 마지막 명령 유지 시간 [s]
     curve_recovery_sec: 0.50         # 신뢰도 0.70 이상 확인된 곡선 유실만 연결, 최대 0.8초
     curve_recovery_speed: 0.12       # 곡선 유실 시 마지막 조향 유지, 최대 0.12 m/s
-    odom_recovery_enabled: false     # 실차 일괄 검증 전에는 비활성. true 시 검증 경로를 /odom으로 갱신
+    odom_recovery_enabled: true      # 유효/신선한 /odom 경로가 있을 때만 우선 복구; 없으면 짧은 카메라 유실 유지
     odom_topic: '/odom'
     odom_max_age_sec: 0.20           # 갱신이 끊긴 오도메트리로는 복구하지 않음
     odom_max_speed_m_s: 1.0         # 순간 위치 점프/비현실적 변위 거부

@@ -37,6 +37,7 @@ from jetracer_ros2.live_debug_view import LiveViewer
 from jetracer_ros2.lane_ackermann import target_to_inner_angle, metric_target_ready
 from jetracer_ros2.lane_recovery import (
     Pose2D, snapshot_path, recovery_target, right_boundary_clearance,
+    brief_hold_allowed,
 )
 from jetracer_ros2.driving_profile import (
     ZigzagTracker, select_speed, yellow_zigzag_evidence,
@@ -148,7 +149,7 @@ class LaneFollowingNode(Node):
             'invalid_hold_sec': 0.25,
             'curve_recovery_sec': 0.50,
             'curve_recovery_speed': 0.12,
-            'odom_recovery_enabled': False,  # Enable only after the batch vehicle tests.
+            'odom_recovery_enabled': True,  # Odom path only when freshness/geometry checks pass.
             'odom_topic': '/odom',
             'odom_max_age_sec': 0.20,
             'odom_max_speed_m_s': 1.0,
@@ -539,11 +540,12 @@ class LaneFollowingNode(Node):
                              else 'PATH_RECOVERY')
             control_reason = (f'odom progress={recovery.progress_m:.3f}m '
                               f'remaining={recovery.remaining_m:.3f}m')
-        elif (self._last_valid_cmd is not None and self._last_valid_curve
-              and not self.get_parameter('odom_recovery_enabled').value
-              and 0 <= (now_ns - self._last_valid_ns) / 1e9 <= min(
-                  0.8, max(0.0, self.get_parameter('curve_recovery_sec').value))):
-            # Short detection gap only; camera watchdog still stops stale input.
+        elif (self._last_valid_curve and brief_hold_allowed(
+                self._last_valid_cmd is not None,
+                (now_ns - self._last_valid_ns) / 1e9,
+                min(0.8, self.get_parameter('curve_recovery_sec').value))):
+            # Odom recovery has priority. If no validated odom path is available,
+            # retain the pre-existing, bounded camera-gap fallback instead.
             speed = max(0.0, min(0.12, self._last_valid_cmd.linear.x,
                                 self.get_parameter('curve_recovery_speed').value))
             cmd.linear.x = speed
@@ -558,9 +560,10 @@ class LaneFollowingNode(Node):
             cmd.angular.z = self._omega(self._held_steering, cmd.linear.x)
             control_state = 'HEADING_HOLD'
             control_reason = 'heading_hold mode with invalid lane'
-        elif (self._last_valid_cmd is not None
-              and not self.get_parameter('odom_recovery_enabled').value
-              and (now_ns - self._last_valid_ns) / 1e9 <= self.get_parameter('invalid_hold_sec').value):
+        elif brief_hold_allowed(
+                self._last_valid_cmd is not None,
+                (now_ns - self._last_valid_ns) / 1e9,
+                self.get_parameter('invalid_hold_sec').value):
             # 반사·그림자 등으로 잠깐 놓친 프레임은 마지막 명령을 유지해 덜컥거림을 막는다.
             # Even a brief blind interval must not retain the 0.70 m/s cruise.
             cmd.linear.x = min(0.12, self._last_valid_cmd.linear.x)

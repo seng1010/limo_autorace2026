@@ -150,7 +150,7 @@ def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
         def _mode_callback(self, *args):
             pass
 
-        _image_callback = _camera_info_callback = _mode_callback
+        _image_callback = _camera_info_callback = _odom_callback = _mode_callback
 
     definition = ast.ClassDef(name='TestNode', bases=[ast.Name(id='FakeNode', ctx=ast.Load())],
                               keywords=[], body=methods, decorator_list=[])
@@ -160,6 +160,7 @@ def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
                  Parameter=lambda name, value: SimpleNamespace(name=name, value=value),
                  ZigzagTracker=ZigzagTracker,
                  Twist=object, Vector3Stamped=object, CompressedImage=object, CameraInfo=object,
+                 Odometry=object,
                  Bool=object, String=object, qos_profile_sensor_data=object())
     exec(compile(ast.fix_missing_locations(ast.Module(body=[definition], type_ignores=[])), str(path), 'exec'), scope)
     node = scope['TestNode']()
