@@ -52,6 +52,22 @@ def test_centered_two_sided_straight_uses_nearest_observed_target():
     assert result.target_forward_m == pytest.approx(.679, abs=.02)
 
 
+def test_rejected_metric_target_does_not_poison_previous_lane_fit():
+    pipeline, image = _paint_straight()
+    pipeline.ground.distance = 5.0  # Paint is observed, but the target is not.
+    rejected = pipeline.process(image)
+    assert not rejected.valid
+    assert rejected.observation_state == 'accepted'
+    assert pipeline._previous_left is None
+    assert pipeline._previous_right is None
+    assert pipeline._previous_width is None
+    pipeline.ground.distance = 0.40
+    accepted = pipeline.process(image)
+    assert accepted.valid, accepted.reason
+    assert pipeline._previous_left is not None
+    assert pipeline._previous_right is not None
+
+
 @pytest.mark.parametrize('offset_m', (-0.10, -0.06, -0.02, 0.02, 0.06, 0.10))
 def test_straight_offsets_keep_observed_boundaries(offset_m):
     pipeline, image = _paint_straight(offset_m)

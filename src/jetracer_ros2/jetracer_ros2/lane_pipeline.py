@@ -1152,9 +1152,6 @@ class LanePipeline:
         measured_left_fit, measured_right_fit = left_fit, right_fit
         left_fit = self._smooth(left_fit, self._previous_left)
         right_fit = self._smooth(right_fit, self._previous_right)
-        self._previous_left = left_fit
-        self._previous_right = right_fit
-        self._previous_width = mean_width
 
         zigzag, zigzag_score, direction_changes, sampled_centers = (
             self._zigzag_metrics(
@@ -1400,6 +1397,11 @@ class LanePipeline:
             cv2.circle(roi_view, tuple(np.int32(target_camera)), 6, (0, 0, 255), -1)
             if debug.shape[0] >= 120 and debug.shape[1] >= 160:
                 debug[-120:, -160:] = cv2.resize(roi_view, (160, 120))
+        # Only a path that passed the observation, metric target and road-area
+        # gates may become the temporal reference for the next frame.
+        self._previous_left = left_fit
+        self._previous_right = right_fit
+        self._previous_width = mean_width
         return LaneResult(
             valid=True,
             observation_state='accepted',
