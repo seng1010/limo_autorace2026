@@ -68,7 +68,7 @@ stop_line_node:
     roi_top_ratio: 0.58
     # 정지선 색: 흰색 (트랙 확인). 옆 차선은 노란색이라 흰색만 검출해야 차선이 안 섞임
     detect_white: true
-    white_lightness_min: 180
+    white_lightness_min: 170          # 11/15 실차: 횡단보도 정지선 밝기 160~195 -> 180 이면 놓침. 165~178 정상, 162 이하 오검출
     white_saturation_max: 90
     detect_yellow: false
     yellow_hue_min: 15                # HLS hue (0~180)
