@@ -114,7 +114,7 @@ src/jetracer_ros2/
 
 | 토픽 | 타입 | 발행 | 구독 | 내용 |
 |---|---|---|---|---|
-| `mission/yolo_event` | `std_msgs/String` | `yolo_detection_node` | manager, traffic_light | 여러 프레임 연속으로 확인된 객체 하나 (아래 값) |
+| `mission/yolo_event` | `std_msgs/String` | `yolo_detection_node` | manager | `confirm_frames` 연속으로 보인 객체. **클래스마다 따로 세서 각각 발행**하므로 한 화면에 여러 종류가 보여도 묻히지 않음. 확정되는 순간 1회 발행, 사라졌다 다시 보이면 다시 발행 (아래 값) |
 | `perception/detections` | `std_msgs/String` (JSON) | `yolo_detection_node` | (없음, 디버그용) | 한 프레임에 보인 객체 전부 |
 | `mission/stop_line_distance` | `std_msgs/Float32` | `stop_line_node` | manager, traffic_light, lane(M6) | **앞바퀴**→정지선 거리 [m] (정지선 앞에 서야 하므로 앞바퀴 기준. `reference_wheel: rear`로 전환 가능). 선이 카메라 사각지대로 사라져도 odom으로 계속 추정, 선을 지나치거나 없으면 `-1.0` |
 | `mission/stop_line_detected` | `std_msgs/Bool` | `stop_line_node` | (없음) | 거리 값이 유효한지 (화면 검출 또는 odom 추적) |
