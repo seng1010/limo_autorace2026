@@ -73,6 +73,25 @@ def test_housing_rejects_when_lamp_position_and_color_disagree():
     assert frame_color([_det('traffic_light')], image, image.shape, TrafficLightConfig()) is None
 
 
+def test_housing_red_and_yellow_together_means_red():
+    """적+황 동시 점등 → 정지(red). 세 칸 전부는 아니라 모니터와 구분됨."""
+    image = np.full((480, 640, 3), 40, dtype=np.uint8)
+    image[100:200, 300:340] = (30, 30, 30)
+    image[112:130, 310:330] = BGR['red']               # 위 칸
+    image[142:160, 310:330] = BGR['yellow']            # 가운데 칸
+    assert frame_color([_det('traffic_light')], image, image.shape, TrafficLightConfig()) == 'red'
+
+
+def test_color_label_red_and_yellow_together_means_red():
+    """색 클래스로 학습한 경우에도 적+황 동시면 정지."""
+    image = np.full((480, 640, 3), 40, dtype=np.uint8)
+    image[100:200, 300:340] = (30, 30, 30)
+    image[112:130, 310:330] = BGR['red']
+    image[140:165, 310:330] = BGR['yellow']            # 황이 더 밝아도
+    for label in ('red', 'yellow'):
+        assert frame_color([_det(label)], image, image.shape, TrafficLightConfig()) == 'red'
+
+
 def test_housing_rejects_bright_screen_without_single_lamp():
     """광고 모니터처럼 박스 전체가 고르게 밝으면 칸 구분이 안 돼 버림."""
     image = np.full((480, 640, 3), 40, dtype=np.uint8)

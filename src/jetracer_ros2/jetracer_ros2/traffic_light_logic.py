@@ -15,6 +15,9 @@
    (B) 켜진 칸의 위치 + 그 칸의 HSV 색이 둘 다 맞아야 인정
 4. 같은 색이 confirm_frames 번 연속이면 확정, lost_timeout_sec 동안 신호등이 없으면 unknown
 
+적+황이 동시에 켜지면 'red'(정지)로 본다. 어느 해석이든(전환 중 / "곧 출발") 멈추는 게
+맞고, 녹색이 확정될 때까지 기다리면 된다. 세 칸이 모두 밝으면 광고 모니터로 보고 버린다.
+
 광고 모니터: YOLO 학습 데이터에 모니터 화면을 배경(라벨 없음)으로 넣어서 1차로 거르고,
 여기서는 HSV 확인과 연속 프레임 조건으로 한 번 더 거른다.
 """
@@ -109,8 +112,10 @@ def housing_color(image_bgr: np.ndarray, bbox: Sequence[float],
     best_total, best_color, best_ratios = scores[0]
     if best_total < config.housing_min_lit_ratio:
         return None                                     # 켜진 칸이 없음 (꺼져 있거나 오검출)
-    if best_total < scores[1][0] * config.housing_lit_dominance:
-        return None                                     # 여러 칸이 비슷하게 밝음 -> 애매
+    lit = {color for total, color, _ in scores if total >= config.housing_min_lit_ratio}
+    if len(lit) > 1 and best_total < scores[1][0] * config.housing_lit_dominance:
+        # 1등 칸이 뚜렷하지 않음: 적+황 동시 점등이면 정지, 그 외(3칸 전부 등)는 버림
+        return 'red' if lit == {'red', 'yellow'} else None
     if config.verify_hsv and max(best_ratios, key=best_ratios.get) != best_color:
         return None                                     # 칸 위치와 실제 색이 안 맞음
     return best_color
@@ -141,7 +146,13 @@ def frame_color(detections: List[dict], image_bgr: Optional[np.ndarray],
         return housing_color(image_bgr, bbox, config) if image_bgr is not None else None
     if config.verify_hsv and image_bgr is not None:     # (A) 라벨 색을 HSV 로 재확인
         ratios = lit_color_ratios(image_bgr, bbox, config)
-        if ratios[color] < config.min_lit_ratio or ratios[color] < max(ratios.values()):
+        if ratios[color] < config.min_lit_ratio:
+            return None
+        # 적+황 동시 점등이면 라벨이 뭐든, 둘 중 뭐가 더 밝든 정지
+        both = min(ratios['red'], ratios['yellow']) >= config.min_lit_ratio
+        if color in ('red', 'yellow') and both and ratios['green'] < config.min_lit_ratio:
+            return 'red'
+        if ratios[color] < max(ratios.values()):
             return None
     return color
 
