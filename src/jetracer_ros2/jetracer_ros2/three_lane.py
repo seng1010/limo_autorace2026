@@ -39,6 +39,9 @@ FIT_FMAX = 1.9
 WHITE_POS = (0.27, -0.27)
 YELLOW_POS = (0.80, -0.80)
 LANE_CENTER = (0.535, 0.0, -0.535)          # 차로 0, 1, 2
+WALL_MARGIN = 0.17                          # 노란 선과 차 가운데 사이 최소 거리 (차 반폭 0.11 + 여유)
+WALL_RADIUS = 0.62                          # 나란해지는 데 쓰는 회전 반경 (실측 최소 0.50~0.53 에 여유)
+WALL_LAG_M = 0.08                           # 조향이 먹기 전에 가는 거리
 ISLAND_INSIDE = 0.55                        # 도로 가운데에서 이 안쪽에 보이는 노란 선은 갈림길 섬 테두리로 본다
 ISLAND_HALF = 0.36                          # 섬(가운데 차로 끝) 폭의 절반 + 여유
 ISLAND_MIN_POINTS = 25
@@ -165,11 +168,17 @@ def _shrink(u):
 
 
 def _match_score(c, lines, c_prior=None):
-    """c_prior 가 있으면, 그 위치에서 봤을 때 도로 안쪽(|위치| < ISLAND_INSIDE)에 있는 노란 선은 쓰지 않는다.
+    """c_prior 가 있으면, 그 위치에서 봤을 때 도로 안쪽(|위치| < ISLAND_INSIDE)에 나란히 있는 노란 선 두 줄은 쓰지 않는다.
     갈림길 섬 테두리(노란색)를 바깥 노란 선으로 착각해 위치가 반대편으로 넘어가는 것을 막는다 (11/15 3번 주행)."""
+    island = set()
+    if c_prior is not None:
+        inside = [u for u, n, ratio in lines if ratio >= 0.7 and abs(c_prior + _shrink(u)) < ISLAND_INSIDE]
+        for a in inside:                 # 섬은 노란 선 두 줄이 차로 폭만큼 떨어져 있다. 한 줄뿐이면 바깥 선일 수 있어 그대로 쓴다
+            if any(0.38 <= abs(a - b) <= 0.68 for b in inside):
+                island.add(a)
     total = 0.0
     for u, n, yellow_ratio in lines:
-        if c_prior is not None and yellow_ratio >= 0.7 and abs(c_prior + _shrink(u)) < ISLAND_INSIDE:
+        if u in island:
             continue
         pos = c + _shrink(u)
         if yellow_ratio >= 0.7:
@@ -340,6 +349,30 @@ def steer_to_lane(c, th, target, lookahead=LOOKAHEAD):
     return math.copysign(min(math.atan(WHEELBASE / inside_radius), MAX_STEER), left)
 
 
+def yellow_wall(lines, th_obs):
+    """노란 선은 벽: 3차선에서 넘어도 되는 것은 흰 점선뿐이다 (노란 선 = 바깥 선 또는 섬 테두리).
+    노란 선에 닿기 전에 나란해질 수 없을 만큼 가까워지면, 위치 추정과 상관없이 그 선 반대쪽으로 꺾는다.
+    반환: None 또는 (조향각[왼쪽 +], 설명)."""
+    worst = None
+    for u, n, ratio in lines:
+        if ratio < 0.75 or n < 50 or abs(u) > 0.60:
+            continue
+        side = 1.0 if u > 0 else -1.0                 # 선이 차의 왼쪽(+) / 오른쪽(-)
+        approach = -side * th_obs                     # 그 선 쪽으로 향한 각 (+ 면 다가가는 중)
+        need = WALL_MARGIN
+        if approach > 0.0:
+            need += WALL_RADIUS * (1.0 - math.cos(approach)) + WALL_LAG_M * math.sin(approach)
+        gap = abs(u) - need
+        if gap <= 0.0 and (worst is None or gap < worst[0]):
+            worst = (gap, side, approach, u)
+    if worst is None:
+        return None
+    gap, side, approach, u = worst
+    angle = MAX_STEER if approach > math.radians(3.0) else math.radians(10.0)
+    name = '왼쪽' if side > 0 else '오른쪽'
+    return -side * angle, f'{name} 노란 선 {abs(u) * 100:.0f} cm (다가가는 각 {math.degrees(approach):+.0f}도) -> 반대로 꺾음'
+
+
 @dataclass
 class ThreeLaneOutput:
     ok: bool = False                 # False 면 위치를 모름 (호출한 쪽이 기존 주행으로)
@@ -355,6 +388,8 @@ class ThreeLaneOutput:
     lines: List[Tuple[float, int, float]] = field(default_factory=list)
     white_seen: bool = False         # 가까운 흰 점선이 보임 (3차선 시작 판단용)
     island: Optional[float] = None   # 갈림길 섬까지 거리 (보일 때)
+    wall: Optional[float] = None     # 노란 선을 피하는 반사 조향 (걸렸을 때)
+    wall_text: str = ''
 
 
 class ThreeLane:
@@ -375,7 +410,9 @@ class ThreeLane:
 
     def step(self, image, pose, scan, goal=None, tune=None) -> ThreeLaneOutput:
         self._advance(pose)
-        obs = self.fitter.fit(image, self.road.th if self.road.c is not None else None, tune)
+        # 선으로 맞춘 지 얼마 안 됐으면 그 방향 근처만, 아니면 넓게 찾는다 (odom 방향이 틀어졌을 수 있다)
+        prior = self.road.th if (self.road.c is not None and self.road.blind_m < 0.3) else None
+        obs = self.fitter.fit(image, prior, tune)
         return self._decide(obs, scan, goal)
 
     def step_obs(self, obs, pose, scan, goal=None) -> ThreeLaneOutput:
@@ -400,6 +437,9 @@ class ThreeLane:
         out = ThreeLaneOutput(lines=obs['lines'] if obs else [])
         out.white_seen = bool(obs) and any(
             ratio <= 0.3 and n >= 50 and abs(u) < 0.50 for u, n, ratio in obs['lines'])
+        wall = yellow_wall(obs['lines'], obs['th']) if obs else None
+        if wall is not None:
+            out.wall, out.wall_text = wall
         if self.road.c is None or self.road.blind_m > 1.0:
             out.state, out.reason = 'LOST', '차로 선으로 위치를 못 잡음'
             return out
@@ -417,6 +457,9 @@ class ThreeLane:
         out.speed, out.state, out.reason = plan.speed, plan.state, plan.reason
         out.steer = steer_to_lane(self.road.c, self.road.th, plan.target,
                                   LOOKAHEAD_CHANGE if plan.state == 'CHANGE' else LOOKAHEAD)
+        if wall is not None:
+            out.steer = wall[0]
+            out.reason = (out.reason + ' | ' if out.reason else '') + out.wall_text
         out.lane, out.target, out.c, out.th, out.ahead = lane, plan.target, self.road.c, self.road.th, ahead
         if scan is None:
             out.reason = (out.reason + ' 라이다 없음').strip()
@@ -508,6 +551,10 @@ class Lane3Supervisor:
             if self._lost >= LOST_FRAMES:
                 self.mode, self.message = 'done', '[3차선] 끝: 차로 선을 못 찾음 -> 기본 주행'
                 return None
+            if out.wall is not None:
+                self.steer = out.wall
+                return dict(v=V_SLOW, steer=self.steer, state='LANE3', reason='3차선: 위치 모름 | ' + out.wall_text,
+                            note='L3 lost wall')
             return dict(v=V_SLOW, steer=self.steer, state='LANE3', reason='3차선: 선을 못 찾아 직전 조향 유지',
                         note='L3 lost')
         self._lost = 0
@@ -525,12 +572,16 @@ class Lane3Supervisor:
         if self.tl.travel >= MAX_ON_M:
             self.mode, self.message = 'done', '[3차선] 끝: 최대 거리 -> 기본 주행'
             return None
-        self.steer += 0.6 * (out.steer - self.steer)
+        if out.wall is not None:
+            self.steer = out.steer                # 벽 반사는 늦추지 않는다
+        else:
+            self.steer += 0.6 * (out.steer - self.steer)
         goal_text = '-' if goal is None else ('A' if goal == 0 else ('B' if goal == 2 else str(goal)))
         free = '/'.join(f'{a:.1f}' for a in out.ahead)
         reason = (f"3차선 {out.state} 차로 {out.lane}->{out.target} 빈거리 {free} 목표 {goal_text}"
                   + (f' | {out.reason}' if out.reason else ''))
         note = (f"L3 {out.state} lane{out.lane} tgt{out.target} c{out.c:+.2f} th{math.degrees(out.th):+.0f} "
                 f"free{free} goal{goal_text} s{self.tl.travel:.2f}"
-                + ('' if out.island is None else f' isl{out.island:.1f}') + ('' if self.tl.road.fixed else ' nofix'))
+                + ('' if out.island is None else f' isl{out.island:.1f}') + ('' if self.tl.road.fixed else ' nofix')
+                + ('' if out.wall is None else ' WALL'))
         return dict(v=out.speed, steer=self.steer, state='LANE3', reason=reason, note=note)

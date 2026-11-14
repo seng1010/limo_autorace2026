@@ -143,3 +143,28 @@ def test_island_distance_and_middle_lane_blocked_by_island():
     far = T.LIDAR_MAX
     plan = T.Planner().update(1, 0.0, [far, d, far], [far, d, far], goal=0)
     assert plan.state == 'CHANGE' and plan.target == 0
+
+
+def test_yellow_wall_turns_away_before_crossing():
+    # 왼쪽 30 cm 에 노란 선, 그쪽으로 35도 향함 (th = -35도) -> 오른쪽으로 최대 조향
+    steer, _ = T.yellow_wall([(0.30, 300, 1.0)], -math.radians(35))
+    assert steer == -T.MAX_STEER
+    steer, _ = T.yellow_wall([(-0.30, 300, 1.0)], math.radians(35))
+    assert steer == T.MAX_STEER
+
+
+def test_yellow_wall_is_quiet_in_lane_center_and_for_white_lines():
+    assert T.yellow_wall([(0.27, 300, 1.0), (-0.27, 150, 0.0)], 0.0) is None       # 바깥 차로 가운데, 나란함
+    assert T.yellow_wall([(0.27, 300, 1.0)], -math.radians(15)) is None           # 조금 비스듬해도 아직 여유
+    assert T.yellow_wall([(0.05, 300, 0.0)], -math.radians(35)) is None           # 흰 점선은 넘어도 된다
+    assert T.yellow_wall([(0.30, 300, 1.0)], math.radians(35)) is None            # 멀어지는 중
+
+
+def test_yellow_wall_overrides_steering_even_when_position_is_wrong():
+    tl = T.ThreeLane()
+    tl.step_obs(obs(T.LANE_CENTER[0]), (0.0, 0.0, 0.0), None)
+    tl.road.c = 0.0                      # 실제는 왼쪽 차로인데 가운데라고 착각
+    tl.planner.target = 0                # -> 왼쪽으로 더 가려고 함
+    seen = dict(th=-math.radians(30), lines=[(0.24, 300, 1.0)], score=1.0, n=1000)
+    out = tl.step_obs(seen, (0.01, 0.0, 0.0), None)
+    assert out.wall is not None and out.steer == -T.MAX_STEER
