@@ -170,18 +170,20 @@ mission_traffic_light_node:
     min_confidence: 0.45
     min_area_ratio: 0.0005            # 박스 면적/화면. 너무 작은(먼) 신호등 무시
     verify_hsv: true                  # 박스 안 불빛 색을 HSV로 다시 확인 (광고 모니터·오분류 거르기)
-    min_lit_ratio: 0.04               # 박스 안 그 색 불빛 픽셀 비율 최소
+    # 아래 3개는 2026-11-15 실물 사진 14장으로 보정. LED 과노출로 채도가 많이 떨어지고
+    # 함체 전체 박스 기준 켜진 비율이 0.004~0.029 로 작다
+    min_lit_ratio: 0.002              # 박스 안 그 색 불빛 픽셀 비율 최소
     lit_value_min: 150
-    lit_saturation_min: 90
+    lit_saturation_min: 30
     confirm_frames: 3                 # 같은 색 연속 N번이면 확정
     lost_timeout_sec: 1.0             # 신호등이 이 시간 안 보이면 unknown
     # (B) 몸체 클래스 전용
     housing_lamp_margin: 0.08         # 함체 위·아래 테두리로 보고 버릴 비율
-    housing_min_lit_ratio: 0.03       # 한 칸이 '켜졌다'고 볼 최소 밝은 픽셀 비율
+    housing_min_lit_ratio: 0.003      # 한 칸이 '켜졌다'고 볼 최소 밝은 픽셀 비율
     housing_lit_dominance: 1.5        # 1등 칸이 2등 칸보다 이 배 이상 밝아야 인정
     # (A) 색 클래스를 함체 전체 박스로 학습한 경우에만 true 권장.
     # 라벨 색과 '켜진 칸 위치'가 맞는지까지 확인 -> 광고 모니터에 훨씬 강해짐.
-    # 실물 모델로 정상 인식되는 것을 확인한 뒤 켤 것 (박스가 램프만이면 켜면 안 됨)
+    # 2026-11-15 실물 사진 14장에서는 켜도 14/14 정답. 트랙에서 모니터 오인식이 보이면 켤 것
     verify_lamp_position: false
 
 mission_obstacle_avoid_node:
