@@ -72,7 +72,7 @@ src/jetracer_ros2/
 |---|---|---|
 | `mission_obstacle_avoid_node` | LiDAR로 앞의 정차 LIMO 감지, 차선 변경 방향 결정 | M7 |
 | `mission_cone_avoid_node` | LiDAR로 양쪽 라바콘 사이 경로 추종 (차선 무시) | M8 |
-| `mission_traffic_light_node` | 신호 색만 판단: YOLO 모든 박스 중 가장 큰 신호등 + 박스 안 HSV 불빛 확인 + 연속 프레임 (`traffic_light_logic.py`). 정지·출발은 manager | M1 |
+| `mission_traffic_light_node` | 신호 색만 판단: YOLO 모든 박스 중 가장 큰 신호등 + 연속 프레임 (`traffic_light_logic.py`). 정지·출발은 manager. YOLO 라벨은 색 클래스(`red`/`yellow`/`green`)와 몸체 클래스(`traffic_light`, 켜진 칸 위치로 색 판단) 둘 다 지원 | M1 |
 | `mission_parking_node` | LiDAR로 빈칸 탐색 → 전진 → 회전 후진 → 직진 후진 (odom 기준 T자 주차) | M4 |
 
 ### 별도 노드 없이 `mission_manager_node`에서 처리

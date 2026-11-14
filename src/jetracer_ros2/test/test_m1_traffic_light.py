@@ -49,6 +49,37 @@ def test_frame_color_ignores_small_low_conf_and_other_labels():
     assert frame_color([_det('pedestrian')], image, image.shape, cfg) is None
 
 
+# ---- (B) 몸체 클래스 ---------------------------------------------------------- #
+
+def test_housing_label_reads_color_from_lamp_position():
+    cfg = TrafficLightConfig()
+    for color in ('red', 'yellow', 'green'):
+        image = _light_image(color)
+        assert frame_color([_det('traffic_light')], image, image.shape, cfg) == color
+
+
+def test_housing_rejects_when_nothing_lit():
+    cfg = TrafficLightConfig()
+    image = np.full((480, 640, 3), 40, dtype=np.uint8)
+    image[100:200, 300:340] = (30, 30, 30)              # 함체만, 불 꺼짐
+    assert frame_color([_det('traffic_light')], image, image.shape, cfg) is None
+
+
+def test_housing_rejects_when_lamp_position_and_color_disagree():
+    """위 칸(=적색 자리)인데 초록불 → 신호등이 아니거나 오검출로 보고 버림."""
+    image = np.full((480, 640, 3), 40, dtype=np.uint8)
+    image[100:200, 300:340] = (30, 30, 30)
+    image[115:135, 310:330] = BGR['green']              # 위 칸에 초록
+    assert frame_color([_det('traffic_light')], image, image.shape, TrafficLightConfig()) is None
+
+
+def test_housing_rejects_bright_screen_without_single_lamp():
+    """광고 모니터처럼 박스 전체가 고르게 밝으면 칸 구분이 안 돼 버림."""
+    image = np.full((480, 640, 3), 40, dtype=np.uint8)
+    image[100:200, 300:340] = BGR['red']                # 전체가 빨강
+    assert frame_color([_det('traffic_light')], image, image.shape, TrafficLightConfig()) is None
+
+
 def test_frame_color_picks_largest_light():
     cfg = TrafficLightConfig(verify_hsv=False)
     dets = [_det('green', (10, 10, 20, 30)), _det('red', (300, 100, 340, 200))]
