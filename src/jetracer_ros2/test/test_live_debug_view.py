@@ -99,6 +99,22 @@ def test_invalid_frame_keeps_bev_and_masks():
     assert result.binary_image.shape == (480, 640)
 
 
+def test_camera_watchdog_timestamp_follows_command_publication():
+    path = Path(__file__).parents[1] / 'jetracer_ros2' / 'lane_following_node.py'
+    tree = ast.parse(path.read_text())
+    node = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+                and n.name == 'LaneFollowingNode')
+    callback = next(n for n in node.body if isinstance(n, ast.FunctionDef)
+                    and n.name == '_image_callback')
+    published = [n.lineno for n in ast.walk(callback) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute) and n.func.attr == '_publish_command']
+    completed = [n.lineno for n in ast.walk(callback) if isinstance(n, ast.Assign)
+                 and any(isinstance(t, ast.Attribute) and t.attr == '_last_image_ns'
+                         for t in n.targets)]
+    assert len(published) == len(completed) == 1
+    assert published[0] < completed[0]
+
+
 def test_manual_mode_creates_no_command_publisher_and_watchdog_sends_nothing():
     path = Path(__file__).parents[1] / 'jetracer_ros2' / 'lane_following_node.py'
     tree = ast.parse(path.read_text())

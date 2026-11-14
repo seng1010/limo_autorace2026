@@ -409,7 +409,6 @@ class LaneFollowingNode(Node):
     def _image_callback(self, msg: CompressedImage):
         timing_log_enabled = bool(self.get_parameter('timing_log_enabled').value)
         started_perf_ns = time.perf_counter_ns() if timing_log_enabled else 0
-        self._last_image_ns = self.get_clock().now().nanoseconds
         image = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
         decoded_perf_ns = time.perf_counter_ns() if timing_log_enabled else 0
         if image is None:
@@ -579,6 +578,10 @@ class LaneFollowingNode(Node):
             self._reset_steering()
             self._warn(f'lane invalid: {result.reason}, confidence={result.confidence:.2f}')
         self._publish_command(cmd)
+        # The watchdog must measure time since a completed camera decision.
+        # Using callback entry time can stop the vehicle immediately after a
+        # slow but successfully processed frame publishes its command.
+        self._last_image_ns = self.get_clock().now().nanoseconds
         if timing_log_enabled:
             published_perf_ns = time.perf_counter_ns()
             source_stamp_ns = (msg.header.stamp.sec * 1_000_000_000
