@@ -118,3 +118,28 @@ def test_supervisor_arms_only_in_m7_and_takes_sign():
     assert sup.sign_goal == 0
     sup.set_mission('M8')
     assert sup.mode == 'off'
+
+
+def test_island_lines_do_not_pull_position_to_the_other_side():
+    # 가운데 차로에서 섬 테두리(노란 선 2개, 0.5 m 간격)가 보여도 오른쪽/왼쪽 차로로 착각하지 않는다
+    road = T.RoadState()
+    road.update(obs(0.0))
+    island = dict(th=0.0, lines=[(-0.25, 230, 1.0), (0.26, 250, 1.0)], score=1.0, n=1000)
+    for _ in range(40):
+        road.predict(0.01, 0.0)
+        road.update(island)
+    assert abs(road.c) < 0.05 and road.lane == 1
+
+
+def test_island_distance_and_middle_lane_blocked_by_island():
+    f = np.linspace(1.2, 1.7, 40)
+    xy = np.concatenate([np.stack([np.full(40, -0.25), f], 1), np.stack([np.full(40, 0.25), f], 1)])
+    d = T.island_distance(xy, c=0.0, th=0.0)
+    assert d is not None and abs(d - 1.25) < 0.08
+    assert T.island_distance(xy, c=0.0, th=0.0) > T.island_distance(xy - [0.0, 0.3], c=0.0, th=0.0)
+    # 바깥 차로의 노란 실선(도로 가운데에서 0.8 m)은 섬이 아니다
+    outer = np.stack([np.full(60, -0.27), np.linspace(0.5, 1.8, 60)], 1)
+    assert T.island_distance(outer, c=-0.535, th=0.0) is None
+    far = T.LIDAR_MAX
+    plan = T.Planner().update(1, 0.0, [far, d, far], [far, d, far], goal=0)
+    assert plan.state == 'CHANGE' and plan.target == 0

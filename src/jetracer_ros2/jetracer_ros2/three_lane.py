@@ -39,6 +39,9 @@ FIT_FMAX = 1.9
 WHITE_POS = (0.27, -0.27)
 YELLOW_POS = (0.80, -0.80)
 LANE_CENTER = (0.535, 0.0, -0.535)          # 차로 0, 1, 2
+ISLAND_INSIDE = 0.55                        # 도로 가운데에서 이 안쪽에 보이는 노란 선은 갈림길 섬 테두리로 본다
+ISLAND_HALF = 0.36                          # 섬(가운데 차로 끝) 폭의 절반 + 여유
+ISLAND_MIN_POINTS = 25
 FAR_U = 0.35                                # 이보다 먼 선은 BEV 가 벌어져 보여서 줄여 쓴다
 FAR_SHRINK = 1.25
 
@@ -151,7 +154,8 @@ class LineFitter:
             lines.append((float(u[sel].mean()), int(sel.sum()), float(P[sel, 2].mean())))
         if not lines:
             return None
-        return dict(th=float(th), lines=sorted(lines), score=score / float(len(P)) ** 2, n=len(P))
+        return dict(th=float(th), lines=sorted(lines), score=score / float(len(P)) ** 2, n=len(P),
+                    yellow_xy=P[P[:, 2] > 0.5, :2])
 
 
 def _shrink(u):
@@ -160,9 +164,13 @@ def _shrink(u):
     return math.copysign(FAR_U + (abs(u) - FAR_U) / FAR_SHRINK, u)
 
 
-def _match_score(c, lines):
+def _match_score(c, lines, c_prior=None):
+    """c_prior 가 있으면, 그 위치에서 봤을 때 도로 안쪽(|위치| < ISLAND_INSIDE)에 있는 노란 선은 쓰지 않는다.
+    갈림길 섬 테두리(노란색)를 바깥 노란 선으로 착각해 위치가 반대편으로 넘어가는 것을 막는다 (11/15 3번 주행)."""
     total = 0.0
     for u, n, yellow_ratio in lines:
+        if c_prior is not None and yellow_ratio >= 0.7 and abs(c_prior + _shrink(u)) < ISLAND_INSIDE:
+            continue
         pos = c + _shrink(u)
         if yellow_ratio >= 0.7:
             expected = YELLOW_POS
@@ -204,10 +212,12 @@ class RoadState:
         lines = obs['lines']
         if self.c is None or self.blind_m > 1.2:
             candidates = np.arange(-0.80, 0.8001, 0.02)
+            prior = None
         else:
             window = 0.16 + 0.25 * min(self.blind_m, 0.6)
             candidates = np.arange(self.c - window, self.c + window + 1e-6, 0.02)
-        scores = np.array([_match_score(float(c), lines) for c in candidates])
+            prior = self.c
+        scores = np.array([_match_score(float(c), lines, prior) for c in candidates])
         k = int(np.argmax(scores))
         if scores[k] < 40.0:
             return
@@ -221,6 +231,20 @@ class RoadState:
         self.th += 0.7 * (obs['th'] - self.th)
         self.blind_m = 0.0
         self.fixed = True
+
+
+def island_distance(yellow_xy, c, th):
+    """갈림길 섬(가운데 차로 끝의 노란 테두리)까지 도로 방향 거리 [m]. 안 보이면 None.
+    yellow_xy: 노란 선 점들 (오른쪽, 앞) [m], 카메라 바닥 투영점 기준."""
+    if yellow_xy is None or len(yellow_xy) == 0:
+        return None
+    x, f = yellow_xy[:, 0], yellow_xy[:, 1]
+    lateral = c + (-x * math.cos(th) - f * math.sin(th))
+    along = -x * math.sin(th) + f * math.cos(th)
+    inside = (np.abs(lateral) <= ISLAND_HALF) & (along > 0.0)
+    if int(inside.sum()) < ISLAND_MIN_POINTS:
+        return None
+    return float(np.percentile(along[inside], 10))
 
 
 def lane_free(ranges, angle_min, angle_increment, range_min, c, th):
@@ -330,6 +354,7 @@ class ThreeLaneOutput:
     ahead: List[float] = field(default_factory=list)
     lines: List[Tuple[float, int, float]] = field(default_factory=list)
     white_seen: bool = False         # 가까운 흰 점선이 보임 (3차선 시작 판단용)
+    island: Optional[float] = None   # 갈림길 섬까지 거리 (보일 때)
 
 
 class ThreeLane:
@@ -383,6 +408,10 @@ class ThreeLane:
             ahead, side = lane_free(scan[0], scan[1], scan[2], scan[3], self.road.c, self.road.th)
         else:
             ahead, side = [LIDAR_MAX] * 3, [LIDAR_MAX] * 3
+        island = island_distance(obs.get('yellow_xy') if obs else None, self.road.c, self.road.th)
+        out.island = island
+        if island is not None:                   # 가운데 차로는 섬에서 끝난다 -> 장애물로 취급
+            ahead[1], side[1] = min(ahead[1], island), min(side[1], island)
         plan = self.planner.update(lane, self.road.c, ahead, side, goal)
         out.ok = True
         out.speed, out.state, out.reason = plan.speed, plan.state, plan.reason
@@ -502,5 +531,6 @@ class Lane3Supervisor:
         reason = (f"3차선 {out.state} 차로 {out.lane}->{out.target} 빈거리 {free} 목표 {goal_text}"
                   + (f' | {out.reason}' if out.reason else ''))
         note = (f"L3 {out.state} lane{out.lane} tgt{out.target} c{out.c:+.2f} th{math.degrees(out.th):+.0f} "
-                f"free{free} goal{goal_text} s{self.tl.travel:.2f}")
+                f"free{free} goal{goal_text} s{self.tl.travel:.2f}"
+                + ('' if out.island is None else f' isl{out.island:.1f}') + ('' if self.tl.road.fixed else ' nofix'))
         return dict(v=out.speed, steer=self.steer, state='LANE3', reason=reason, note=note)
