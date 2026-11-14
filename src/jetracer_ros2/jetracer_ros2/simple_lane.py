@@ -35,6 +35,11 @@
   미리 꺾기(ff)·강제 최소 조향(latch)은 이 방식에서는 쓰지 않는다. mem 을 안 붙이면 기존 방식 그대로.
   python3 ~/simple_lane.py replay ~/simple_lane_log/폴더   기록 다시 보기
 
+3차선 구간 (three_lane.py 가 같은 폴더/패키지에 있어야 함, /scan 필요)
+  ros2 run jetracer_ros2 simple_lane drive lane3 rec          3차선 입구(또는 안)에 놓고 시험. 갈림길 차로에 들어가면 기본 주행으로 돌아감
+  ros2 run jetracer_ros2 simple_lane drive lane3 goal_a rec   갈림길 A(왼쪽)로. goal_b = B(오른쪽)
+  매니저와 함께 돌 때는 mission/active 가 M7 이 되면 스스로 켜진다 (표지판은 mission/yolo_event 의 sign_a / sign_b)
+
 디버거 창 키 (NoMachine 터미널에서 실행했을 때)
   스페이스: 화면 멈춤 / s: 캡처 저장 / q: 종료
 """
@@ -46,6 +51,14 @@ import time
 
 import cv2
 import numpy as np
+
+try:                                    # 3차선 구간 주행 (three_lane.py). 파일이 없으면 이 기능만 빠진다
+    from jetracer_ros2 import three_lane as _three_lane
+except ImportError:
+    try:
+        import three_lane as _three_lane
+    except ImportError:
+        _three_lane = None
 
 # =====================================================================
 # 파라미터 (트랙에서 바꿀 값은 대부분 디버거 슬라이더로 조절 가능)
@@ -115,6 +128,9 @@ CURVE_STAY = math.radians(12.0)   # 곡선 모드 유지: 선 기울기가 이 �
 PP_DISAGREE = math.radians(5.0)   # 경로 추종이 커브 반대 방향으로 이만큼 이상 꺾으라 하면 최소 조향 강제 안 함
 # --- 경로 기억 (실행 인자 mem). 카메라는 차 앞 약 55cm부터만 보여서, 지나온 중심선을 /odom 으로 옮겨 가며 기억 ---
 MEM = False                     # 실행할 때 mem 을 붙이면 켜짐
+LANE3 = False                   # 실행할 때 lane3 를 붙이면 처음부터 3차선 선을 찾아 3차선 주행 (3차선 입구에 놓고 시험)
+LANE3_GOAL = None               # goal_a / goal_b 를 붙이면 갈림길 방향을 정해 둠 (표지판 인식 없이 시험)
+SCAN_TOPIC = '/scan'
 ODOM_TOPIC = '/odom'
 MEM_JUMP = 0.15                 # 이번에 본 선의 시작점이 기억한 같은 쪽 선에서 이보다(m) 멀면 일단 무시
 MEM_BAD_FRAMES = 5              # 위 상황이 이만큼 연속되면 기억을 버리고 새 선으로 교체
@@ -1646,7 +1662,8 @@ def run_ros(mode, topic, record=False):
     from geometry_msgs.msg import Twist
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
-    from sensor_msgs.msg import CameraInfo, CompressedImage
+    from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
+    from std_msgs.msg import String
     from collections import deque
     from nav_msgs.msg import Odometry
 
@@ -1679,6 +1696,13 @@ def run_ros(mode, topic, record=False):
             self.odom = deque(maxlen=200)       # (메시지 시각, 받은 시각, x, y, yaw[연속])
             self.odom_mode = None
             self.warned_odom = 0.0
+            self.scan = None                    # 가장 최근 라이다 (ranges, angle_min, angle_increment, range_min)
+            self.scan_t = 0.0
+            self.lane3 = None
+            if _three_lane is not None:
+                self.lane3 = _three_lane.Lane3Supervisor(forced=LANE3, goal=LANE3_GOAL)
+            elif LANE3:
+                print('[3차선] three_lane.py 를 찾을 수 없어 lane3 를 쓸 수 없습니다')
             if record:
                 self.rec_dir = os.path.join(LOG_DIR, time.strftime('%m%d_%H%M%S') + ('_drive' if self.drive else '_view')
                                             + (f'_{PRESET}' if PRESET else '') + ('_mem' if MEM else ''))
@@ -1697,6 +1721,13 @@ def run_ros(mode, topic, record=False):
             self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, self.on_info, qos_profile_sensor_data)
             self.create_subscription(Odometry, ODOM_TOPIC, self.on_odom, qos_profile_sensor_data)
             self.create_subscription(Odometry, '/limo' + ODOM_TOPIC, self.on_odom, qos_profile_sensor_data)
+            if self.lane3 is not None:
+                self.create_subscription(LaserScan, SCAN_TOPIC, self.on_scan, qos_profile_sensor_data)
+                self.create_subscription(String, 'mission/active', self.on_mission, 10)
+                self.create_subscription(String, 'mission/yolo_event', self.on_yolo, 10)
+                if LANE3:
+                    print('[3차선] lane3: 가까운 흰 점선이 보이면 3차선 주행을 시작합니다'
+                          + ('' if LANE3_GOAL is None else f" (갈림길 {'A' if LANE3_GOAL == 0 else 'B'})"))
             if MEM:
                 print(f'[mem] 선 기억 방식 켜짐: {ODOM_TOPIC} 로 지나온 차선을 기억합니다.')
             self.create_timer(0.05, self.on_timer)
@@ -1713,6 +1744,16 @@ def run_ros(mode, topic, record=False):
                 self.K = np.array(msg.k, np.float64).reshape(3, 3)
                 self.D = np.array(msg.d, np.float64)
                 print(f'[카메라 보정값 수신] {msg.width}x{msg.height}, 왜곡계수 {len(self.D)}개')
+
+        def on_scan(self, msg):
+            self.scan = (np.asarray(msg.ranges, dtype=np.float32), msg.angle_min, msg.angle_increment, msg.range_min)
+            self.scan_t = time.monotonic()
+
+        def on_mission(self, msg):
+            self.lane3.set_mission(msg.data.strip())
+
+        def on_yolo(self, msg):
+            self.lane3.set_sign(msg.data.strip())
 
         def on_odom(self, msg):
             q = msg.pose.pose.orientation
@@ -1805,7 +1846,21 @@ def run_ros(mode, topic, record=False):
                       + (' / 선 기억은 못 씀' if MEM else '') + ' (드라이버 확인)')
             try:
                 res = self.engine.process(image, self.tune, now, pose=pose)
-                cmd = self.engine.command(res, self.tune, now)
+                tune_cmd = self.tune
+                if self.lane3 is not None and self.lane3.latch_off:
+                    tune_cmd = dict(self.tune, latch=0)      # 3차선 입구의 사선을 코너로 보고 꺾지 않게
+                cmd = self.engine.command(res, tune_cmd, now)
+                if self.lane3 is not None:
+                    both = (res['left'] is not None and res['right'] is not None
+                            and 0.42 <= res['lane_width'] <= 0.62)
+                    scan = self.scan if now - self.scan_t < 0.5 else None
+                    l3 = self.lane3.step(image, pose, scan, both, self.tune)
+                    if self.lane3.message:
+                        print('\n' + self.lane3.message)
+                        self.lane3.message = ''
+                    if l3 is not None:
+                        cmd = (l3['v'], l3['steer'], l3['state'], l3['reason'])
+                        res['note'] = l3['note']
             except (cv2.error, ValueError, np.linalg.LinAlgError) as e:
                 print(f'\n[처리 오류] {e} -> 정지')
                 self.send(0.0, 0.0)
@@ -1893,10 +1948,16 @@ def run_ros(mode, topic, record=False):
 
 
 def main():
-    global STEER_GAIN, PRESET, MEM
+    global STEER_GAIN, PRESET, MEM, LANE3, LANE3_GOAL
     args = sys.argv[1:]
     if 'mem' in args:
         MEM = True
+    if 'lane3' in args:
+        LANE3 = True
+    if 'goal_a' in args:
+        LANE3_GOAL = 0
+    if 'goal_b' in args:
+        LANE3_GOAL = 2
     if '--gain' in args:
         i = args.index('--gain')
         if i + 1 < len(args):

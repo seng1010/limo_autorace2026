@@ -34,7 +34,8 @@ from jetracer_ros2.stop_line_detector import OdomPathIntegrator
 
 MISSION_ORDER = ('M5', 'M6', 'M3', 'M7', 'M2', 'M8', 'M1', 'M4')
 DYNAMIC_NODE = {
-    'M7': 'mission_obstacle_avoid_node',
+    # M7(3차선)은 simple_lane 의 3차선 주행(three_lane.py)이 맡는다. 팀 mission_obstacle_avoid_node 는
+    # 장애물 하나를 지나면 M7 을 끝내고, 막히면 차를 세워서 7대 구간에는 맞지 않아 켜지 않는다 (11/15)
     'M8': 'mission_cone_avoid_node',
     'M1': 'mission_traffic_light_node',
     'M4': 'mission_parking_node',
