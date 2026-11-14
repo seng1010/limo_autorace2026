@@ -115,3 +115,22 @@ def test_mission_start_is_measured_from_where_it_became_active():
         s += 0.01
     done_s = next(s for s, e in log if e)
     assert abs(done_s - 33.5) < 0.05
+
+
+def test_slow_starts_when_marking_line_is_seen_and_falls_back_to_distance():
+    rules = {'M5': SectionRule(line_after_m=8.6, timeout_m=9.6, slow_line_after_m=0.8,
+                               slow_from_m=1.7, slow_to_m=5.0)}
+    seen = drive(SectionTracker(rules), manager(('M5', 'M6')), lines=(1.52,), total_m=6.0)
+    slow = {s: out.slow for s, _, out in seen}
+    assert not slow[0.9]
+    assert slow[1.1] and slow[1.5] and slow[4.9] and not slow[5.1]     # 선이 보이는 1.0 m 부근부터
+    missed = drive(SectionTracker(rules), manager(('M5', 'M6')), lines=(), total_m=6.0)
+    slow = {s: out.slow for s, _, out in missed}
+    assert not slow[1.6] and slow[1.8] and slow[4.9] and not slow[5.1]
+
+
+def test_line_before_window_does_not_start_slow():
+    rules = {'M5': SectionRule(slow_line_after_m=0.8, slow_from_m=1.7, slow_to_m=5.0)}
+    log = drive(SectionTracker(rules), manager(('M5',)), lines=(0.3,), total_m=3.0)
+    slow = {s: out.slow for s, _, out in log}
+    assert not slow[0.5] and not slow[1.5] and slow[1.8]

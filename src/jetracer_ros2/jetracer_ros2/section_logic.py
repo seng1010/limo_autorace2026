@@ -21,6 +21,8 @@ class SectionRule:
     timeout_m: float = -1.0      # 정지선과 상관없이 이 거리에서 완료 (음수 = 끄기)
     slow_from_m: float = -1.0    # 서행 시작 (미션 시작 기준, 음수 = 서행 없음)
     slow_to_m: float = -1.0      # 서행 끝
+    slow_line_after_m: float = -1.0  # 이 거리 뒤에 처음 보이는 정지선에서 서행 시작 (음수 = 안 씀).
+                                     # 선을 놓치면 slow_from_m 에서 시작. 끝은 똑같이 slow_to_m
 
 
 class LinePassDetector:
@@ -71,6 +73,7 @@ class SectionTracker:
         self.start_s = 0.0
         self._done_line_s: Optional[float] = None   # 이 선에 앞바퀴가 닿으면 완료
         self._done_reason = ''
+        self._slow_line_used = False
         self._slow_zones: List[Tuple[float, float]] = []
 
     def _enter(self, mission: str, s: float) -> None:
@@ -78,6 +81,7 @@ class SectionTracker:
         self.start_s = s
         self._done_line_s = None
         self._done_reason = ''
+        self._slow_line_used = False
         rule = self.rules.get(mission)
         if rule and rule.slow_from_m >= 0.0 and rule.slow_to_m > rule.slow_from_m:
             self._slow_zones.append((s + rule.slow_from_m, s + rule.slow_to_m))
@@ -89,10 +93,16 @@ class SectionTracker:
             return SectionOutput(line_s=new_line)
         if active != self.active:
             self._enter(active, s)
+        rule = self.rules.get(active)
+        if (rule is not None and new_line is not None and not self._slow_line_used
+                and rule.slow_line_after_m >= 0.0 and rule.slow_to_m >= 0.0
+                and new_line - self.start_s >= rule.slow_line_after_m
+                and s < self.start_s + rule.slow_to_m):
+            self._slow_line_used = True               # 서행 표시 선이 보인 순간부터 서행
+            self._slow_zones.append((s, self.start_s + rule.slow_to_m))
         self._slow_zones = [z for z in self._slow_zones if s <= z[1]]
         out = SectionOutput(slow=any(a <= s <= b for a, b in self._slow_zones),
                             travelled_m=s - self.start_s, line_s=new_line)
-        rule = self.rules.get(active)
         if rule is None:
             return out
         if self._done_reason:                       # 이미 완료 판정 -> 매니저가 넘길 때까지 유지
