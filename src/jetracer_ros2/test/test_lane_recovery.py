@@ -1,6 +1,8 @@
 """Metric path propagation and independent fail-safe stop limits."""
 
 import math
+import ast
+from pathlib import Path
 
 from jetracer_ros2.lane_recovery import (
     Pose2D, RecoveryTarget, snapshot_path, recovery_target,
@@ -15,6 +17,22 @@ def test_camera_gap_fallback_is_bounded_without_odom():
     assert not brief_hold_allowed(True, -0.01, 0.50)
     assert not brief_hold_allowed(False, 0.20, 0.50)
     assert not brief_hold_allowed(True, float('nan'), 0.50)
+
+
+def test_legacy_heading_hold_branch_requires_recent_valid_command():
+    source = (Path(__file__).parents[1] / 'jetracer_ros2' /
+              'lane_following_node.py').read_text()
+    tree = ast.parse(source)
+    node = next(item for item in tree.body if isinstance(item, ast.ClassDef)
+                and item.name == 'LaneFollowingNode')
+    callback = next(item for item in node.body if isinstance(item, ast.FunctionDef)
+                    and item.name == '_image_callback')
+    guards = [ast.unparse(item.test) for item in ast.walk(callback)
+              if isinstance(item, ast.If) and 'heading_hold' in ast.unparse(item.test)]
+    assert len(guards) == 1
+    assert 'brief_hold_allowed' in guards[0]
+    assert '_last_valid_cmd' in guards[0]
+    assert 'heading_hold_max_sec' in guards[0]
 
 
 def test_odom_motion_moves_stored_target_back_in_vehicle_frame():

@@ -146,6 +146,7 @@ class LaneFollowingNode(Node):
             'steering_release_rate': 1.2,
             'steering_reversal_rate': 4.0,
             'heading_hold_decay': 0.98,
+            'heading_hold_max_sec': 0.50,  # Misnamed legacy mode: bounded steering hold, not yaw feedback.
             'invalid_hold_sec': 0.25,
             'curve_recovery_sec': 0.50,
             'curve_recovery_speed': 0.12,
@@ -552,14 +553,18 @@ class LaneFollowingNode(Node):
             cmd.angular.z = self._omega(self._held_steering, speed)
             control_state = 'CURVE_HOLD'
             control_reason = 'brief curve detection gap'
-        elif self._mode == 'heading_hold' and abs(self._held_steering) > 1e-3:
+        elif (self._mode == 'heading_hold' and abs(self._held_steering) > 1e-3
+              and brief_hold_allowed(
+                  self._last_valid_cmd is not None,
+                  (now_ns - self._last_valid_ns) / 1e9,
+                  self.get_parameter('heading_hold_max_sec').value)):
             self._held_steering *= self.get_parameter('heading_hold_decay').value
             self._applied_steering = self._held_steering
             self._last_steering_ns = now_ns
             cmd.linear.x = self.get_parameter('zigzag_speed').value
             cmd.angular.z = self._omega(self._held_steering, cmd.linear.x)
             control_state = 'HEADING_HOLD'
-            control_reason = 'heading_hold mode with invalid lane'
+            control_reason = 'bounded steering hold (not yaw feedback)'
         elif brief_hold_allowed(
                 self._last_valid_cmd is not None,
                 (now_ns - self._last_valid_ns) / 1e9,
