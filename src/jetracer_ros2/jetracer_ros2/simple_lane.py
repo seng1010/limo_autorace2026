@@ -1769,7 +1769,12 @@ def run_ros(mode, topic, record=False):
             if self.pub is None:
                 return
             for _ in range(repeat):
-                self.pub.publish(Twist())
+                try:
+                    self.pub.publish(Twist())
+                except Exception:  # noqa: BLE001
+                    # launch 로 켠 상태에서 Ctrl+C 하면 ROS 통신이 먼저 내려가 발행이 실패한다.
+                    # 이때는 변환 노드(bridge)가 0.5초 뒤 정지 명령을 보낸다. 여기서 죽으면 기록 저장을 못 한다
+                    break
                 time.sleep(0.03)
 
         def on_timer(self):

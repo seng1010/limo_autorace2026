@@ -104,6 +104,7 @@ class MissionManagerNode(Node):
         self._last_light_s = None         # 신호등(아무 색)을 마지막으로 본 odom 위치
         self._obstacle_seen = False
         self._processes = {}
+        self._stopping = []               # 끄는 중인 미션 노드 (process, 시작 시각 ns)
         self._stop_line_m = None
         self._stop_line_ns = 0
         self._odom = OdomPathIntegrator()
@@ -345,6 +346,8 @@ class MissionManagerNode(Node):
 
     def _control_tick(self):
         now = self.get_clock().now().nanoseconds
+        if self._stopping:
+            self._reap_processes(now)
         if self._active not in ('M1', 'M3'):   # M1·M3는 _report 에서 상태까지 같이 발행
             line = self._fresh_stop_line(now)
             line_text = f'{line:.3f}' if line is not None else 'none'
@@ -391,15 +394,31 @@ class MissionManagerNode(Node):
         self._processes[name] = subprocess.Popen(['ros2', 'run', 'jetracer_ros2', name])
         self.get_logger().info(f'started {name}')
 
-    def _stop_process(self, name):
+    def _stop_process(self, name, wait=False):
         process = self._processes.pop(name, None)
         if process is None or process.poll() is not None:
             return
         process.send_signal(signal.SIGINT)
+        if not wait:
+            # 여기서 끝나길 기다리면 그동안 /cmd_vel 이 끊겨 차가 선다 (11/15 실차: M7->M2 에서 확인).
+            # 주행 중에는 기다리지 않고 _reap_processes 에서 나중에 확인한다
+            self._stopping.append((process, self.get_clock().now().nanoseconds))
+            return
         try:
             process.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
             process.terminate()
+
+    def _reap_processes(self, now_ns):
+        alive = []
+        for process, since in self._stopping:
+            if process.poll() is not None:
+                continue
+            if (now_ns - since) / 1e9 > 2.0:
+                process.terminate()
+                continue
+            alive.append((process, since))
+        self._stopping = alive
 
     def destroy_node(self):
         # Ctrl+C 로 이미 통신이 내려간 뒤면 정지 명령 발행이 실패하므로 무시한다
@@ -409,7 +428,10 @@ class MissionManagerNode(Node):
         except Exception:  # noqa: BLE001
             pass
         for name in list(self._processes):
-            self._stop_process(name)
+            self._stop_process(name, wait=True)
+        for process, _ in self._stopping:
+            if process.poll() is None:
+                process.terminate()
         return super().destroy_node()
 
 
