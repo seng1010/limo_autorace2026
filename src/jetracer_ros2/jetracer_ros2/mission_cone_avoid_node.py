@@ -39,7 +39,7 @@ class MissionConeAvoidNode(Node):
             'lidar_x_m': 0.203, 'lidar_y_m': 0.0, 'lidar_yaw_rad': 0.0,
             'scan_frame': 'laser_link', 'scan_timeout_sec': 0.25,
             'vehicle_half_width_m': 0.12, 'vehicle_front_m': 0.29, 'vehicle_rear_m': 0.09,
-            'cone_padding_m': 0.030, 'minimum_clearance_m': 0.015,
+            'cone_padding_m': 0.015, 'minimum_clearance_m': 0.020,
             'resume_scans': 2,
             'minimum_turn_radius_m': 0.50,
             'motion_enabled': False,

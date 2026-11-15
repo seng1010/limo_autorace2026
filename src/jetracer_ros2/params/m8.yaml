@@ -15,8 +15,8 @@ mission_cone_avoid_node:
     vehicle_half_width_m: 0.12        # 바퀴·범퍼 포함 실제 치수로 교체
     vehicle_front_m: 0.29
     vehicle_rear_m: 0.09
-    cone_padding_m: 0.030            # 사용자 확인: 스캔면보다 받침이 한쪽으로 3cm 미만 돌출
-    minimum_clearance_m: 0.015       # 받침 보정 이후 추가 여유; 출구 검사에도 동일 적용
+    cone_padding_m: 0.015            # 스캔면 대비 받침의 한쪽 돌출 보정
+    minimum_clearance_m: 0.020      # 받침 보정 이후 추가 여유; 출구 검사에도 동일 적용
     resume_scans: 2
 
     target_hold_sec: 0.50

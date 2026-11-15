@@ -25,8 +25,8 @@ class Params:
     half_width: float = .12
     front: float = .29
     rear: float = .09
-    cone_padding: float = .030
-    clearance: float = .015
+    cone_padding: float = .015
+    clearance: float = .020
     minimum_radius: float = .50
     max_steer_rad: float = .42
     speed: float = .10

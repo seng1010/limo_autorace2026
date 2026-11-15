@@ -314,10 +314,10 @@ def test_lost_scan_stops_even_with_goal_history():
 
 
 def test_measured_padding_and_clearance_are_separate():
-    assert P.cone_padding == .030
-    assert P.clearance == .015
+    assert P.cone_padding == .015
+    assert P.clearance == .020
     body = np.zeros((1, 3))
-    for raw_gap, expected in ((.044, False), (.046, True)):
+    for raw_gap, expected in ((.034, False), (.036, True)):
         points = np.array([[P.front+raw_gap, 0.]])
         assert (cone_corridor.swept_clearance(points, body, P) >= P.clearance) == expected
 
