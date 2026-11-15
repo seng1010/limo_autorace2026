@@ -94,6 +94,17 @@ class M8EntryGate:
             return
         self.line_s = _observe_line(self.observations, s, distance, now)
 
+    def observe_near(self, s, distance, now, max_distance):
+        """Confirm a nearby entrance while ordinary lane following still owns control."""
+        if self.started_s is not None:
+            return False
+        distance = distance if distance is not None and distance <= max_distance else None
+        line_s = _observe_line(self.observations, s, distance, now)
+        if line_s is None:
+            return False
+        self.line_s = line_s
+        return True
+
     def decide(self, s, odom_fresh):
         # A later retreat, odom dropout or cone loss never gives lane control back.
         if self.passed:

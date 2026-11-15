@@ -18,6 +18,7 @@ class M8Control:
         self.node=node
         defaults = {
             'm8_entry_arm_after_m': -1.0,
+            'm8_entry_arm_near_line_m': -1.0,
             'm8_entry_pass_margin_m': 0.02,
             'm8_entry_search_limit_m': 0.50,
             'm8_entry_approach_speed': 0.10,
@@ -45,8 +46,10 @@ class M8Control:
                 .10 <= self._m8_exit.settle_distance <= .30):
             raise ValueError('Invalid M8 exit parameters')
         self._m8_arm_after = p('m8_entry_arm_after_m')
+        self._m8_near_line = p('m8_entry_arm_near_line_m')
         self._m8_approach_speed = p('m8_entry_approach_speed')
         if not (math.isfinite(self._m8_arm_after) and 0 <= self._m8_entry.pass_margin <= .30
+                and (self._m8_near_line == -1.0 or .15 <= self._m8_near_line <= .60)
                 and 0 < self._m8_entry.search_limit <= 1.0 and 0 < self._m8_approach_speed <= .10):
             raise ValueError('Invalid M8 entry parameters')
         self._m2_start_s = None
@@ -71,7 +74,13 @@ class M8Control:
         now = self.node.get_clock().now().nanoseconds
         if self._odom_fresh(now):
             if self.node._active == 'M2':
-                self._m8_entry.observe(self.node._odom.s, msg.data, now/1e9)
+                s = self.node._odom.s
+                if self._m8_phase_sent == 'watch_entry':
+                    if not self.node._blocked and self._m8_entry.observe_near(
+                            s, msg.data, now/1e9, self._m8_near_line):
+                        self._arm_m8()
+                else:
+                    self._m8_entry.observe(s, msg.data, now/1e9)
             elif self.node._active == 'M8' and self._m8_exit.entry_line is None:
                 # Only the strict entry detector may establish the first anchor.
                 armed_s = self._m8_entry.started_s
@@ -240,7 +249,9 @@ class M8Control:
             self._m8_exit_handoff_ns=0
         else:
             self._set_exit_check(False)
-        self._set_m8_phase(m8_phase(mission=='M8',self._m8_exit.owns_lane))
+        watch_entry = mission == 'M2' and self._m8_near_line > 0 and self._m8_arm_after != 0
+        self._set_m8_phase('watch_entry' if watch_entry else
+                           m8_phase(mission=='M8', self._m8_exit.owns_lane))
 
     def tick(self,now):
         n=self.node

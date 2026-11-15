@@ -48,7 +48,7 @@
 
 첫 선은 콘 진입의 필수 조건이 아니지만 **두 번째 선을 구별하는 기준**이다. 전체 인계 시험은 첫 정지선이 보이는 입구에서 시작한다. 콘 한가운데에서 `start:=M8`로 시작하면 콘 주행은 가능해도 첫 선 기준이 없어 자동 출구 인계가 완료되지 않을 수 있다.
 
-전체 대회에서는 팀의 구간 판단이 M2에서 ARM_M8/M2_DONE을 전달해야 한다. 전 구간에서 아무 물체에나 M8 제어권을 주지 않았다. 새 시험 launch는 입구 시작 전제로 `m8_entry_arm_after_m:=0.0`을 준다.
+전체 대회에서는 기본 설정대로 팀의 구간 판단이 M2에서 ARM_M8/M2_DONE을 전달한다. M8 시험 launch의 `start:=M2 motion:=true`에서는 먼저 `watch_entry`로 입구 선만 관측하고, 기존 race 차선 명령과 속도 제한을 그대로 사용한다. 앞 차축 기준 `entry_near_m` (기본 0.45m) 이내에서 입구 선이 일관되게 3회 관측되면 `approach`로 바뀌고 기존 LiDAR 접근 검사와 0.10 m/s 제한이 적용된다. 입구 선을 못 보면 자동으로 검사 모드에 들어가지 않으므로, 첫 실차 시험은 선이 보이는 접근 구간에서 진행하고 전환되지 않으면 차량을 정지한다. `motion:=false`는 일반 차선 명령이 나가지 않도록 기존 즉시 접근 가드를 유지한다.
 
 ## 파일 분리와 병합
 
@@ -169,7 +169,7 @@ ros2 launch jetracer_ros2 m8_cone.launch.py motion:=true record:=true
 
 1. /cmd_vel 발행자는 매니저 하나, 구독은 기존 cmdvel_to_ackermann.
 2. 아커만 모드 경고 없음, /scan 약 10 Hz, /odom 약 50 Hz.
-3. 콘 획득 전 source=lane, 획득 후 source=cone와 v=0.100.
+3. 초반에는 phase=watch_entry와 기존 M2 차선 명령, 입구 검출 뒤 phase=approach와 검사된 source=lane, 콘 획득 뒤 phase=cone 및 source=cone와 v=0.100.
 4. safe_cmd_vel과 /cmd_vel의 v/omega 일치.
 5. 멈추면 no_gate/path_blocked/footprint_blocked/stale_cone/exit_lane 중 정확한 이유.
 6. 출구 선 뒤 새 차선 미검출이면 대기, 관측 차선이 생기면 인계.

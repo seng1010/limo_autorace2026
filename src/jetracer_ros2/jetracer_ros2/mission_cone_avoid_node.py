@@ -194,7 +194,7 @@ class MissionConeAvoidNode(Node):
             if lane is not None and fresh(lidar) and fresh(_stamp_ns(lane.header.stamp)):
                 command = checked_exit_lane(
                     (lane.twist.linear.x, lane.twist.angular.z), result['points'], self.config,
-                    scan=result['scan'], approach=self.m8_phase in ('off','approach'))
+                    scan=result['scan'], approach=self.m8_phase in ('off','watch_entry','approach'))
                 stamp = min((scan_stamp, lane.header.stamp), key=_stamp_ns)
 
             if (not command[0] and self.m8_phase == 'exit_lane' and fresh(lidar)

@@ -115,6 +115,48 @@ def test_approach_keeps_race_until_armed_then_cone_owns(owner):
     assert owner.output[-1]==(.10,-.13)
 
 
+def test_visual_watch_leaves_race_in_control_until_a_near_line_is_confirmed(owner):
+    owner.params['m8_entry_arm_near_line_m'] = .45
+    owner.m8 = type(owner.m8)(owner)
+    owner._active = 'M2'
+    owner.m8.enter('M2')
+
+    def observe(dist, delta=0.):
+        owner.now += 50_000_000
+        owner._odom_ns = owner.now
+        owner._odom.s += delta
+        owner.m8._m8_visual_line_callback(NS(data=dist))
+        return owner.m8.tick(owner.now)
+
+    assert owner.m8._m8_phase_sent == 'watch_entry'
+    assert not owner.m8._exit_check_enabled
+    proposal(owner)  # Even a valid cone proposal cannot take over here.
+    for dist in (.55, .55, .55, .44, -1., .44):
+        assert observe(dist) is False
+    assert owner.output == []
+    assert observe(.43, .01) is False
+    assert observe(.42, .01) is True
+    assert owner.m8._m8_phase_sent == 'approach'
+    assert owner.m8._m8_entry.line_s == pytest.approx(.44)
+    assert owner.m8._exit_check_enabled
+    assert owner.output[-1] == (0., 0.)  # No verified approach command yet.
+    proposal(owner)
+    assert owner._active == 'M8'
+    assert owner.m8._m8_exit.entry_line == pytest.approx(.44)
+    assert owner.output[-1] == (.10, -.13)
+
+
+def test_no_motion_launch_can_keep_immediate_approach_guard(owner):
+    owner.params.update(m8_entry_arm_after_m=0., m8_entry_arm_near_line_m=.45)
+    owner.m8 = type(owner.m8)(owner)
+    owner._active = 'M2'
+    owner.m8.enter('M2')
+    assert owner.m8._m8_phase_sent == 'off'
+    assert owner.m8.tick(owner.now) is True
+    assert owner.m8._m8_phase_sent == 'approach'
+    assert owner.output[-1] == (0., 0.)
+
+
 def test_no_other_mission_control_is_consumed(owner):
     for mission in ('M1','M3','M4','M5','M6','M7'):
         owner._active=mission
