@@ -286,3 +286,78 @@ def test_dead_end_is_not_entered_again_after_reversing():
     last_reverse = len(states) - 1 - states[::-1].index('REVERSE')
     assert set(states[last_reverse + 1:]) == {'STOP'}           # 후진 뒤에는 다시 전진하지 않는다
     assert states.count('REVERSE') < 250                        # 후진은 한 번만 (전진·후진을 되풀이하지 않는다)
+
+
+def test_outer_solid_line_never_moves_position_by_a_lane_in_one_frame():
+    # 11/15 06:01 실차: 오른쪽 차로(-0.53)에서 섬 옆을 지날 때 흰 실선 한 줄 때문에 한 프레임에 왼쪽 차로로 튐
+    road = T.RoadState()
+    road.update(obs(-0.53))
+    seen = obs(-0.53)
+    seen['edges'] = [(0.63, 104)]                 # 지금 위치와 맞지 않는 흰 실선
+    for _ in range(5):
+        road.predict(0.007, 0.0)
+        road.update(seen)
+    assert abs(road.c + 0.53) < 0.05
+
+
+def test_tracking_correction_is_limited_per_frame():
+    road = T.RoadState()
+    road.update(obs(0.0))
+    road.predict(0.007, 0.0)
+    road.update(obs(0.14, th=math.radians(15)))   # 한 프레임 만에 14 cm, 15도 옮겨 보임
+    assert abs(road.c) <= T.TRACK_C_STEP + 0.01
+    assert abs(road.th) <= T.TRACK_TH_STEP + 1e-6
+    for _ in range(20):                           # 계속 그렇게 보이면 따라간다
+        road.predict(0.0, 0.0)
+        road.update(obs(0.14, th=math.radians(15)))
+    assert abs(road.c - 0.14) < 0.03
+
+
+def test_acquire_needs_a_clear_lane():
+    assert T.acquire(None) is None
+    c, th = T.acquire(obs(0.05, th=0.1))
+    assert abs(c - 0.05) < 0.04 and abs(th - 0.1) < 1e-6
+    # 흰 선 한 줄뿐: 가운데 차로인지 옆 차로인지 가릴 수 없다
+    assert T.acquire(dict(th=0.0, lines=[(0.25, 250, 0.0)], score=1.0, n=500)) is None
+    # 반사광: 22 cm 떨어진 흰 줄 두 개 (11/15 12:38)
+    assert T.acquire(dict(th=0.5, lines=[(-0.31, 285, 0.0), (-0.09, 708, 0.0)], score=1.0, n=1000)) is None
+
+
+def test_island_borders_hold_position_in_front_of_island():
+    # 가운데 차로에서 섬을 마주 봄: 노란 테두리 두 줄이 +-0.27 자리에, 갈라지는 흰 선은 제자리가 아님 (bag_3lane2 #388)
+    road = T.RoadState()
+    road.update(obs(0.02))
+    seen = dict(th=0.0, score=1.0, n=1000,
+                lines=[(-0.57, 115, 0.0), (-0.33, 190, 1.0), (-0.07, 91, 0.0), (0.24, 274, 1.0), (0.55, 92, 0.0)])
+    for _ in range(15):
+        road.predict(0.007, 0.0)
+        road.update(seen)
+    assert abs(road.c - 0.045) < 0.05
+
+
+def test_front_gap_ignores_things_beside_the_car():
+    ranges, a0, inc, rmin = scan_with([(0.25, 0.0)])
+    assert abs(T.front_gap(ranges, a0, inc, rmin) - 0.25) < 0.02
+    ranges, a0, inc, rmin = scan_with([(0.25, 0.30), (0.60, -0.25)])
+    assert T.front_gap(ranges, a0, inc, rmin) == T.LIDAR_MAX
+
+
+def test_stops_for_object_straight_ahead_even_if_lane_estimate_says_free():
+    tl = T.ThreeLane()
+    tl.step_obs(obs(0.27), (0.0, 0.0, 0.0), None)
+    # 차로 경계(흰 점선 위)에 있어 어느 차로 계산에도 애매하게 걸린 물체가 바로 앞 0.25 m 에 있다
+    tl.road.c = 0.535                             # 실제와 다르게 왼쪽 차로 가운데라고 착각
+    out = tl.step_obs(None, (0.0, 0.0, 0.0), scan_with([(0.25, 0.0), (0.25, 0.05), (0.25, -0.05)]))
+    assert out.state == 'STOP' and out.speed == 0.0 and '정면' in out.reason
+
+
+def test_supervisor_starts_only_after_consistent_frames(monkeypatch):
+    sup = T.Lane3Supervisor(forced=True)
+    answers = iter([((-0.16, 0.54), True), ((0.06, -0.30), True), ((0.06, -0.30), True), ((0.07, -0.30), True)])
+    monkeypatch.setattr(sup.tl, 'look', lambda image, tune=None: next(answers))
+    monkeypatch.setattr(sup.tl, 'step', lambda *a, **k: T.ThreeLaneOutput())
+    pose = (0.0, 0.0, 0.0)
+    for expected in ('armed', 'armed', 'armed', 'on'):
+        sup.step(None, pose, None, False)
+        assert sup.mode == expected
+    assert abs(sup.tl.road.c - 0.07) < 1e-6 and abs(sup.tl.road.th + 0.30) < 1e-6

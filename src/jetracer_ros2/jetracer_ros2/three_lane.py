@@ -43,6 +43,12 @@ FIX_MIN_SCORE = 60.0                        # 선으로 위치를 맞췄다고 �
 EDGE_POS = 0.88                             # 바깥 흰 실선의 위치 (바깥 노란 선 0.80 ~ 매트 가장자리 0.97 의 가운데)
 EDGE_TOL = 0.35
 EDGE_MIN_POINTS = 100
+TRACK_C_STEP = 0.03                         # 선으로 위치를 고칠 때 한 프레임에 옮기는 최대 폭 [m] (차 움직임은 odom 으로 이미 반영)
+TRACK_C_STEP_BLIND = 0.30                   # 선을 못 본 채 간 거리 1 m 당 더 허용하는 폭
+TRACK_TH_STEP = math.radians(3.0)           # 도로 방향을 고칠 때 한 프레임 최대 각
+ACQUIRE_MARGIN = 1.10                       # 처음 위치를 잡을 때: 가장 잘 맞는 위치가 다른 차로 위치보다 이 배수 이상 잘 맞아야 한다
+ACQUIRE_C_TOL = 0.12                        # 처음 위치를 잡을 때 연속 프레임끼리 허용하는 차이
+ACQUIRE_TH_TOL = math.radians(12.0)
 YELLOW_MIN_SPAN = 0.60                      # 바깥 노란 실선은 길게 보인다. 이보다 짧은 노란 조각은 위치 맞추기에 쓰지 않는다
 SOLID_MIN_SPAN = 0.60                       # 흰 선이 이 길이 이상 보이는데
 SOLID_MAX_GAP = 0.10                        # 끊긴 곳이 이보다 짧으면 실선 (점선은 0.14~0.22 m 씩 끊김, 실선은 0.05 이하)
@@ -53,6 +59,7 @@ WALL_LAG_M = 0.08                           # 조향이 먹기 전에 가는 거
 ISLAND_INSIDE = 0.55                        # 도로 가운데에서 이 안쪽에 보이는 노란 선은 갈림길 섬 테두리로 본다
 ISLAND_HALF = 0.36                          # 섬(가운데 차로 끝) 폭의 절반 + 여유
 ISLAND_MIN_POINTS = 25
+GLARE_MARGIN_PX = 45                        # 흰 덩어리 둘레로 같이 지우는 폭 [px = cm] (양쪽 22 cm)
 FAR_U = 0.35                                # 이보다 먼 선은 BEV 가 벌어져 보여서 줄여 쓴다
 FAR_SHRINK = 1.25
 
@@ -73,6 +80,8 @@ FAR_CLEAR = 2.20                            # 두 칸 옮길 때 도착 차로�
 SIDE_CLEAR = 1.05                           # 옮길 차로는 옆~앞 이 거리까지 비어 있어야 한다
 SIDE_BEHIND = -0.10                         # 옆 차로 확인을 시작하는 위치 (라이다보다 뒤 -). 지나친 장애물은 곧 시야(좌우 110도)에서 사라진다
 GAIN_MIN = 0.45                             # 옮길 차로가 내 차로보다 이만큼은 더 비어 있어야 한다
+GUARD_HALF = 0.15                           # 정면 통로 반폭 (차 반폭 0.11 + 여유)
+GUARD_DIST = 0.30                           # 정면 통로 안 이 거리(라이다 기준)에 물체가 있으면 위치 추정과 상관없이 선다
 STOP_DIST = 0.38                            # 갈 곳이 없으면 장애물 앞 이 거리에서 정지
 NO_OBSTACLE = LIDAR_MAX - 0.05              # 빈 거리가 이 이상이면 그 차로에 장애물이 안 보이는 것
 GOAL_CLEAR_FRAMES = 6                       # 갈림길 방향 차로가 연속 이만큼 비어 보여야 미리 옮긴다
@@ -98,12 +107,13 @@ class LineFitter:
         g2b = np.array([[1 / RES, 0, XW / RES], [0, -1 / RES, F1 / RES], [0, 0, 1.0]])
         self.i2b = g2b @ i2g
         self._kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        self._glare_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (GLARE_MARGIN_PX, GLARE_MARGIN_PX))
         self._rng = np.random.default_rng(0)
         self.yellow = self.white = None
 
-    def _thin(self, mask):
+    def _thin(self, mask, margin_kernel=None):
         # 15 cm 보다 굵은 덩어리(밝은 바닥, 상자)는 선이 아니다
-        fat = cv2.dilate(cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._kernel), self._kernel)
+        fat = cv2.dilate(cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._kernel), margin_kernel if margin_kernel is not None else self._kernel)
         return cv2.bitwise_and(mask, cv2.bitwise_not(fat))
 
     def masks(self, image, tune=None):
@@ -113,7 +123,9 @@ class LineFitter:
                              (tune.get('h_max', 40), 255, 255))
         white = cv2.inRange(hsv, (0, 0, 150), (179, 60, 255))
         warp = lambda m: cv2.warpPerspective(m, self.i2b, (self.w, self.h), flags=cv2.INTER_NEAREST)  # noqa: E731
-        self.yellow, self.white = self._thin(warp(yellow)), self._thin(warp(white))
+        # 흰색은 햇빛 받은 바닥(매트 밖)·반사광도 잡힌다. 큰 덩어리는 가장자리가 지저분하게 남아 가짜 선이 되므로
+        # 덩어리 둘레 GLARE_MARGIN 까지 같이 지운다 (11/15 12:38 낮 주행: 매트 밖 밝은 바닥을 차로 선으로 착각)
+        self.yellow, self.white = self._thin(warp(yellow)), self._thin(warp(white), self._glare_kernel)
         return self.yellow, self.white
 
     def fit(self, image, th_prior=None, tune=None):
@@ -213,9 +225,11 @@ def _shrink(u):
 
 
 def _match_score(c, lines, c_prior=None, skip=()):
-    """c_prior 가 있으면, 그 위치에서 봤을 때 도로 안쪽(|위치| < ISLAND_INSIDE)에 나란히 있는 노란 선 두 줄은 쓰지 않는다.
-    갈림길 섬 테두리(노란색)를 바깥 노란 선으로 착각해 위치가 반대편으로 넘어가는 것을 막는다 (11/15 3번 주행)."""
+    """c_prior 가 있으면, 그 위치에서 봤을 때 도로 안쪽(|위치| < ISLAND_INSIDE)에 나란히 있는 노란 선 두 줄은
+    갈림길 섬 테두리로 본다: 바깥 노란 선 자리가 아니라 가운데 차로 양쪽 선 자리(+-0.27)에 맞춘다.
+    (섬 테두리를 바깥 노란 선으로 착각해 위치가 반대편으로 넘어가는 것을 막는다 - 11/15 3번 주행)"""
     island = set()
+    inside = []
     if c_prior is not None:
         inside = [u for u, n, ratio in lines if ratio >= 0.7 and abs(c_prior + _shrink(u)) < ISLAND_INSIDE]
         for a in inside:                 # 섬은 노란 선 두 줄이 차로 폭만큼 떨어져 있다. 한 줄뿐이면 바깥 선일 수 있어 그대로 쓴다
@@ -223,10 +237,14 @@ def _match_score(c, lines, c_prior=None, skip=()):
                 island.add(a)
     total = 0.0
     for u, n, yellow_ratio in lines:
-        if u in island or u in skip:
+        if u in skip:
             continue
         pos = c + _shrink(u)
-        if yellow_ratio >= 0.7:
+        if u in island:
+            expected = WHITE_POS             # 섬 테두리는 가운데 차로 양쪽 선 자리(+-0.27)에 있다
+        elif u in inside:
+            expected = YELLOW_POS + WHITE_POS    # 한 줄만 보이면 섬 테두리일 수도, 바깥 선일 수도 있다
+        elif yellow_ratio >= 0.7:
             expected = YELLOW_POS
         elif yellow_ratio <= 0.3:
             expected = WHITE_POS
@@ -279,11 +297,8 @@ class RoadState:
                 continue
             c_edge = math.copysign(EDGE_POS, u) - _shrink(u)
             ok = np.abs(candidates - c_edge) <= EDGE_TOL
-            if ok.any():
-                candidates = candidates[ok]
-            else:                                   # 지금 위치가 가장자리와 안 맞음 -> 가장자리 기준으로 다시 찾는다
-                candidates = np.arange(c_edge - EDGE_TOL, c_edge + EDGE_TOL + 1e-6, 0.02)
-                prior = None
+            if ok.any():                            # 후보를 줄이기만 한다. 안 맞는다고 위치를 통째로 옮기지 않는다
+                candidates = candidates[ok]         # (11/15 06:01 실차: 섬 옆에서 한 프레임에 한 차로씩 튀어 좌우로 흔들림)
         scores = np.array([_match_score(float(c), lines, prior, skip) for c in candidates])
         k = int(np.argmax(scores))
         if scores[k] < FIX_MIN_SCORE:
@@ -291,13 +306,42 @@ class RoadState:
         # 가장 잘 맞는 c 주변을 가중 평균
         near = np.abs(candidates - candidates[k]) <= 0.041
         c = float((candidates[near] * scores[near]).sum() / scores[near].sum())
-        if self.c is None or self.blind_m > 1.2 or prior is None:
-            self.c = c
-        else:
-            self.c += 0.6 * (c - self.c)
-        self.th += 0.7 * (obs['th'] - self.th)
+        if prior is None:                           # 처음이거나 오래 못 봤다 -> 그대로 받는다
+            self.c, self.th = c, obs['th']
+        else:                                       # 따라가는 중 -> 조금씩만 고친다 (잘못 본 몇 프레임에 끌려가지 않게)
+            step = TRACK_C_STEP + TRACK_C_STEP_BLIND * min(self.blind_m, 1.0)
+            self.c += float(np.clip(0.6 * (c - self.c), -step, step))
+            self.th += float(np.clip(0.7 * (obs['th'] - self.th), -TRACK_TH_STEP, TRACK_TH_STEP))
         self.blind_m = 0.0
         self.fixed = True
+
+
+def acquire(obs):
+    """선 검출 한 장으로 위치를 처음 잡는다 (이전 위치를 쓰지 않음). 반환: None 또는 (c, th).
+    다른 차로 위치도 비슷하게 잘 맞으면(= 어느 차로인지 가릴 수 없으면) None."""
+    if obs is None:
+        return None
+    candidates = np.arange(-0.80, 0.8001, 0.02)
+    skip = obs.get('short', ())
+    scores = np.array([_match_score(float(c), obs['lines'], None, skip) for c in candidates])
+    k = int(np.argmax(scores))
+    if scores[k] < FIX_MIN_SCORE:
+        return None
+    other = np.abs(candidates - candidates[k]) > 0.30
+    if scores[k] < ACQUIRE_MARGIN * float(scores[other].max()):
+        return None
+    near = np.abs(candidates - candidates[k]) <= 0.041
+    return float((candidates[near] * scores[near]).sum() / scores[near].sum()), float(obs['th'])
+
+
+def front_gap(ranges, angle_min, angle_increment, range_min):
+    """차 정면 통로(차 폭)에서 가장 가까운 물체까지 거리 [m] (라이다 기준). 위치 추정을 쓰지 않는다."""
+    r = np.asarray(ranges, dtype=np.float32)
+    a = angle_min + np.arange(r.size) * angle_increment
+    ok = np.isfinite(r) & (r >= max(range_min, 0.05)) & (r <= LIDAR_MAX)
+    x, y = r[ok] * np.cos(a[ok]), r[ok] * np.sin(a[ok])
+    d = np.sort(x[(np.abs(y) <= GUARD_HALF) & (x > 0.0)])
+    return float(d[1]) if d.size >= 2 else LIDAR_MAX          # 점 2개 이상일 때만 (잡음 1개는 무시)
 
 
 def island_distance(yellow_xy, c, th):
@@ -476,6 +520,7 @@ class ThreeLaneOutput:
     island: Optional[float] = None   # 갈림길 섬까지 거리 (보일 때)
     wall: Optional[float] = None     # 노란 선을 피하는 반사 조향 (걸렸을 때)
     wall_text: str = ''
+    front: float = LIDAR_MAX         # 정면 통로에서 가장 가까운 물체 (라이다)
 
 
 class ThreeLane:
@@ -514,6 +559,18 @@ class ThreeLane:
         prior = self.road.th if (self.road.c is not None and self.road.blind_m < 0.3) else None
         obs = self.fitter.fit(image, prior, tune)
         return self._decide(obs, scan, goal)
+
+    def look(self, image, tune=None):
+        """이전 위치를 쓰지 않고 이 한 장으로만 본 결과: (c, th) 또는 None, 그리고 가까운 흰 점선이 보이는지."""
+        obs = self.fitter.fit(image, None, tune)
+        white = bool(obs) and any(ratio <= 0.3 and n >= 50 and abs(u) < 0.50 for u, n, ratio in obs['lines'])
+        return acquire(obs), white
+
+    def start(self, c, th, pose) -> None:
+        """look() 으로 확인한 위치에서 주행을 시작한다."""
+        self.reset()
+        self.road.c, self.road.th, self.road.blind_m = float(c), float(th), 0.0
+        self._pose = pose
 
     def step_obs(self, obs, pose, scan, goal=None) -> ThreeLaneOutput:
         """선 검출 결과를 직접 넣는 버전 (시뮬레이션·테스트용)."""
@@ -589,6 +646,8 @@ class ThreeLane:
         wall = yellow_wall(obs['lines'], obs['th']) if obs else None
         if wall is not None:
             out.wall, out.wall_text = wall
+        if scan is not None:
+            out.front = front_gap(scan[0], scan[1], scan[2], scan[3])
         if self.road.c is None or self.road.blind_m > 1.0:
             out.state, out.reason = 'LOST', '차로 선으로 위치를 못 잡음'
             return out
@@ -602,6 +661,9 @@ class ThreeLane:
         if island is not None:                   # 가운데 차로는 섬에서 끝난다 -> 장애물로 취급
             ahead[1], side[1] = min(ahead[1], island), min(side[1], island)
         plan = self.planner.update(lane, self.road.c, ahead, side, goal, have_scan=scan is not None)
+        if out.front < GUARD_DIST and plan.speed > 0.0:
+            # 위치를 잘못 알아 '빈 차로'라고 믿고 장애물로 가는 것을 막는다 (11/15 06:01 실차: 장애물을 밀고 지나감)
+            plan = Plan(plan.target, 0.0, 'STOP', f'정면 {out.front:.2f} m 에 물체 -> 정지')
         out.ok = True
         out.speed, out.state, out.reason = plan.speed, plan.state, plan.reason
         out.steer = steer_to_lane(self.road.c, self.road.th, plan.target,
@@ -642,6 +704,7 @@ class Lane3Supervisor:
         self.arm_travel = 0.0
         self._pose = None
         self._white = self._both = self._lost = 0
+        self._seen = None                 # 시작 전 직전 프레임에서 본 (c, th, pose)
         self.steer = 0.0
         self.last = None                  # 마지막 ThreeLaneOutput (화면·기록용)
         self.message = ''                 # 상태가 바뀔 때 한 번 찍을 글
@@ -654,6 +717,7 @@ class Lane3Supervisor:
                 self.mode, self.arm_travel = 'armed', 0.0
                 self.tl.reset()
                 self._white = self._both = self._lost = 0
+                self._seen = None
         elif name != 'M2':
             self.mode = 'off'
 
@@ -681,17 +745,30 @@ class Lane3Supervisor:
         if self.mode == 'armed':
             if not self.forced and self.arm_travel < ARM_AFTER_M:
                 return None
-            out = self.tl.step(image, pose, scan, None, tune)
-            self.last = out
-            self._white = self._white + 1 if (out.ok and out.white_seen) else 0
+            # 시작 조건: 한 장씩 따로 본 위치가 (1) 어느 차로인지 분명하고 (2) 연속 ENTRY_FRAMES 장이 서로 맞아야 한다.
+            # (11/15 12:38 낮 주행: 반사광을 선으로 본 첫 장에서 시작해 도로 방향을 45도 틀리게 알고 왼쪽으로 나감)
+            seen, white = self.tl.look(image, tune)
+            if seen is None or not white or pose is None:
+                self._white, self._seen = 0, None
+                return None
+            if self._seen is not None:
+                c0, th0, pose0 = self._seen
+                ds = math.hypot(pose[0] - pose0[0], pose[1] - pose0[1])
+                th_exp = th0 - (pose[2] - pose0[2])
+                same = (abs(seen[1] - th_exp) <= ACQUIRE_TH_TOL
+                        and abs(seen[0] - (c0 - ds * math.sin(th0))) <= ACQUIRE_C_TOL)
+                self._white = self._white + 1 if same else 1
+            else:
+                self._white = 1
+            self._seen = (seen[0], seen[1], pose)
             if self._white < ENTRY_FRAMES:
                 return None
             self.mode = 'on'
-            self.tl.planner = Planner()
-            self.tl.travel = 0.0
+            self.tl.start(seen[0], seen[1], pose)
             self._both = self._lost = 0
             self.steer = 0.0
-            self.message = f'[3차선] 시작: 차로 {out.lane} (도로 가운데에서 {out.c * 100:+.0f} cm)'
+            self.message = (f'[3차선] 시작: 차로 {self.tl.road.lane} (도로 가운데에서 {seen[0] * 100:+.0f} cm, '
+                            f'도로 방향 {math.degrees(seen[1]):+.0f}도)')
         goal = self.sign_goal
         if goal is None and self.tl.travel >= DEFAULT_GOAL_AFTER_M:
             lane = self.tl.road.lane
@@ -703,6 +780,9 @@ class Lane3Supervisor:
             if self._lost >= LOST_FRAMES:
                 self.mode, self.message = 'done', '[3차선] 끝: 차로 선을 못 찾음 -> 기본 주행'
                 return None
+            if out.front < GUARD_DIST:
+                return dict(v=0.0, steer=self.steer, state='LANE3',
+                            reason=f'3차선: 위치 모름, 정면 {out.front:.2f} m 에 물체 -> 정지', note='L3 lost guard')
             if out.wall is not None:
                 self.steer = out.wall
                 return dict(v=V_SLOW, steer=self.steer, state='LANE3', reason='3차선: 위치 모름 | ' + out.wall_text,
