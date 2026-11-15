@@ -45,6 +45,7 @@
   스페이스: 화면 멈춤 / s: 캡처 저장 / q: 종료
 """
 import json
+import hashlib
 import math
 import os
 import sys
@@ -1710,13 +1711,15 @@ def run_ros(mode, topic, record=False):
             self.scan_t = 0.0
             self.scan_id = 0
             self.lane3 = None
+            self.m7_version = 'legacy'
             if LANE3_MAPPED:
                 try:
-                    from jetracer_ros2.m7_navigation import MappedSupervisor
+                    from jetracer_ros2 import m7_navigation as mapped_module
                 except ImportError:
-                    from m7_navigation import MappedSupervisor
-                self.lane3 = MappedSupervisor(forced=LANE3, goal=LANE3_GOAL)
-                print('[M7] visibility map + footprint planner')
+                    import m7_navigation as mapped_module
+                self.lane3 = mapped_module.MappedSupervisor(forced=LANE3, goal=LANE3_GOAL)
+                self.m7_version = mapped_module.CONTROLLER_VERSION
+                print(f'[M7] {mapped_module.CONTROLLER_VERSION}')
             elif LANE3_SIMPLE and _three_lane_simple is not None:
                 self.lane3 = _three_lane_simple.Lane3SimpleSupervisor(forced=LANE3, goal=LANE3_GOAL)
                 print('[3차선] 단순 버전(three_lane_simple.py)을 씁니다')
@@ -1732,6 +1735,17 @@ def run_ros(mode, topic, record=False):
                 os.makedirs(self.rec_dir, exist_ok=True)
                 with open(os.path.join(self.rec_dir, 'tune_start.json'), 'w') as f:
                     json.dump(dict(self.tune, preset=PRESET or '', gain=STEER_GAIN, mem=int(MEM)), f, indent=1)
+                module = sys.modules[type(self.lane3).__module__] if self.lane3 is not None else None
+                source = getattr(module, '__file__', None)
+                source_hash = None
+                if source and os.path.isfile(source):
+                    with open(source, 'rb') as f:
+                        source_hash = hashlib.sha256(f.read()).hexdigest()
+                with open(os.path.join(self.rec_dir, 'run_start.json'), 'w') as f:
+                    json.dump(dict(argv=sys.argv[1:],controller=type(self.lane3).__name__,
+                                   controller_version=getattr(module,'CONTROLLER_VERSION','legacy'),
+                                   controller_file=source,controller_sha256=source_hash,
+                                   forced_lane3=LANE3,scan_topic=SCAN_TOPIC,odom_topic=ODOM_TOPIC),f,indent=2)
                 self.rec_csv = open(os.path.join(self.rec_dir, 'log.csv'), 'w')
                 self.rec_csv.write('frame,t,state,left,right,source,lateral_cm,steer_deg,speed,lane_width_cm,ms,'
                                    'mode,tilt_deg,ff_deg,ff_w,front_m,'
@@ -1740,6 +1754,8 @@ def run_ros(mode, topic, record=False):
                 print(f'[기록] 프레임과 상태를 저장합니다: {self.rec_dir}')
             self.m7_log = (open(os.path.join(self.rec_dir, 'm7.jsonl'), 'w')
                            if self.rec_dir is not None and LANE3_MAPPED else None)
+            self.m7_scan_log = (open(os.path.join(self.rec_dir, 'm7_scans.jsonl'), 'w')
+                                if self.rec_dir is not None and LANE3_MAPPED else None)
             qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                              history=HistoryPolicy.KEEP_LAST, depth=1)
             self.create_subscription(CompressedImage, IMAGE_TOPIC, self.on_image, qos)
@@ -1780,6 +1796,14 @@ def run_ros(mode, topic, record=False):
             self.scan_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
             self.scan_range_max = float(msg.range_max)
             self.scan_id += 1
+            if self.m7_scan_log is not None:
+                def number(x):
+                    return float(x) if math.isfinite(x) else ('inf' if x>0 else '-inf' if x<0 else 'nan')
+                self.m7_scan_log.write(json.dumps(dict(scan_id=self.scan_id,stamp=self.scan_stamp,
+                    t=self.scan_t-self.t_start,angle_min=number(msg.angle_min),angle_increment=number(msg.angle_increment),
+                    range_min=number(msg.range_min),range_max=number(msg.range_max),
+                    ranges=[number(x) for x in msg.ranges]),allow_nan=False)+'\n')
+                self.m7_scan_log.flush()
 
         def on_mission(self, msg):
             self.lane3.set_mission(msg.data.strip())
@@ -1903,6 +1927,7 @@ def run_ros(mode, topic, record=False):
                 print(f'\n[주의] {ODOM_TOPIC} 가 안 들어옴 -> 코너에서 돈 각도를 시간으로 추정합니다'
                       + (' / 선 기억은 못 씀' if MEM else '') + ' (드라이버 확인)')
             try:
+                scan_pose = None
                 res = self.engine.process(image, self.tune, now, pose=pose)
                 tune_cmd = self.tune
                 if self.lane3 is not None and self.lane3.latch_off:
@@ -1929,8 +1954,11 @@ def run_ros(mode, topic, record=False):
             if self.drive and now - self.t_start < RESET_SEC:
                 cmd = (0.0, 0.0, 'WAIT', '시작 전 조향 초기화')
             self.send(cmd[0], cmd[1])
-            if self.m7_log is not None and self.lane3.mode == 'on':
+            if self.m7_log is not None and self.lane3.mode in ('armed','on'):
                 self.m7_log.write(json.dumps(dict(t=now-self.t_start, scan_id=self.scan_id,
+                                                  frame=self.rec_n+1,phase=self.lane3.mode,
+                                                  pose=pose,scan_pose=scan_pose,
+                                                  controller_version=self.m7_version,
                                                   odom_source=self.odom_src, v=cmd[0], steer=cmd[1],
                                                   **self.lane3.core.diagnostics)) + '\n')
                 self.m7_log.flush()
@@ -2006,6 +2034,8 @@ def run_ros(mode, topic, record=False):
             print(f'[기록 저장됨] {node.rec_dir}  ({node.rec_n}프레임)')
         if node.m7_log is not None:
             node.m7_log.close()
+        if node.m7_scan_log is not None:
+            node.m7_scan_log.close()
         try:
             cv2.destroyAllWindows()
         except cv2.error:

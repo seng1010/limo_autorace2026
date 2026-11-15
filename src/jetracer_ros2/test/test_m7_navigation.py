@@ -8,14 +8,16 @@ import pytest
 
 from jetracer_ros2 import three_lane as T
 from jetracer_ros2 import three_lane_simple as S
-from jetracer_ros2.m7_navigation import MappedSupervisor, MappedThreeLane, VisibilityMap
+from jetracer_ros2.m7_navigation import MappedSupervisor, MappedThreeLane, VisibilityMap, central_white_pair
 
 sys.path.insert(0, str(Path(__file__).parent))
 from sim_three_lane_simple import raycast, rect
 
 
 def white_observation(c=0.0, th=0.0):
-    return dict(th=th, n=1000, lines=[(-0.27-c, 120, 0.0), (0.27-c, 120, 0.0)],
+    def bev(u):
+        return u if abs(u)<=T.FAR_U else math.copysign(T.FAR_U+(abs(u)-T.FAR_U)*T.FAR_SHRINK,u)
+    return dict(th=th, n=1000, lines=[(bev(-0.27-c), 120, 0.0), (bev(0.27-c), 120, 0.0)],
                 short=set(), ystart={})
 
 
@@ -132,6 +134,9 @@ def test_manager_missions_do_not_activate_mapped_controller():
         sup.set_mission(mission)
         assert sup.mode == 'off'
         assert sup.step(None, None, None, False) is None
+    sup._entry_seen,sup._entry_count = (0.,0.,(0,0,0)),5
+    sup.set_mission('M7')
+    assert sup.mode=='armed' and sup._entry_seen is None and sup._entry_count==0
 
 
 def test_invalid_heading_does_not_refresh_lane_confidence():
@@ -213,15 +218,14 @@ def test_range_max_limits_free_evidence_and_invalid_scan_id_is_not_cached():
     assert not blind.known(np.array([[.4,0]]),0.)[0]
 
 
-def test_entry_constructs_mapped_core_and_clamps_ambiguous_white_lane(monkeypatch):
+def test_entry_constructs_mapped_core_after_confirmed_pair(monkeypatch):
     sup = MappedSupervisor(forced=True)
-    monkeypatch.setattr(sup._look,'look',lambda *a: ((.5,.5),True))
-    monkeypatch.setattr(sup._look.fitter,'fit',lambda *a: white_observation())
+    monkeypatch.setattr(sup.entry_fitter,'fit',lambda *a: white_observation())
     monkeypatch.setattr(S,'dash_start_ahead',lambda *a: None)
-    for _ in range(S.ENTRY_FRAMES):
-        entered = sup._try_enter(None,(0,0,0),None)
+    for _ in range(sup.entry_frames):
+        entered = sup._try_enter(np.zeros((480,640,3),np.uint8),(0,0,0),None)
     assert entered and sup.mode=='on' and isinstance(sup.core,MappedThreeLane)
-    assert sup.core.c==S.ENTRY_C_MAX and sup.core.th==S.ENTRY_TH_MAX
+    assert sup.core.c==0 and sup.core.th==0
 
 
 def test_handoff_only_after_merge_and_ready_for_normal_lane_control():
@@ -250,3 +254,87 @@ def test_island_post_does_not_falsely_occupy_the_whole_exit_lane():
     out = k.step_obs(None,k.pose,scan,goal=2,now=0.)
     assert out['v']>0 and k.lane==2
     assert k.visibility.hits  # Keep the actual obstacle, check physical clearance.
+
+
+def test_entry_rejects_floor_reflections_and_unaligned_pose():
+    assert central_white_pair(white_observation(),.02) is None
+    assert central_white_pair(white_observation(th=math.radians(31)),.95) is None
+    assert central_white_pair(white_observation(c=.5),.95) is None
+    assert central_white_pair(white_observation(),.95)==(0.,0.)
+
+
+def test_forced_waiting_for_entry_never_falls_back_to_normal_drive(monkeypatch):
+    sup = MappedSupervisor(forced=True)
+    monkeypatch.setattr(sup.entry_fitter,'fit',lambda *a: None)
+    image = np.zeros((480,640,3),np.uint8)
+    for _ in range(10):
+        out = sup.step(image,(0,0,0),None,False)
+        assert out is not None and out['v']==0 and sup.mode=='armed'
+    assert sup.core.diagnostics['state']=='WAIT_ENTRY'
+
+
+def test_stationary_relocalisation_retains_longitudinal_and_obstacle_map(monkeypatch):
+    sup = MappedSupervisor(forced=True)
+    sup.mode = 'on'
+    sup.core.start(.45,0.,(0,0,0),3.)
+    sup.core.state = 'BLOCKED'
+    sup.core.visibility.hits[(20,5)] = 0.
+    monkeypatch.setattr(sup.entry_fitter,'fit',lambda *a: white_observation(c=.14))
+    for t in np.arange(0.,.8,.1):
+        sup._try_relocalise(np.zeros((480,640,3),np.uint8),(0,0,0),None,float(t))
+    assert sup.core.c==pytest.approx(.14) and sup.core.s==3.
+    assert sup.core.visibility.hits=={(20,5):0.}
+    assert sup.core.relocalizations==1
+
+
+def test_large_relocation_cannot_silently_reanchor_road(monkeypatch):
+    sup = MappedSupervisor(forced=True)
+    sup.core.start(-.96,math.radians(-178),(0,0,0),3.88)
+    sup.core.state = 'LOCALISE'
+    monkeypatch.setattr(sup.entry_fitter,'fit',lambda *a: white_observation())
+    for i in range(12):
+        sup._try_relocalise(np.zeros((480,640,3),np.uint8),(0,0,0),None,i*.1)
+    assert sup.core.c==-.96 and sup.core.relocalizations==0
+    assert 'restart at the entrance' in sup.core.recovery_status
+
+
+def test_relocalisation_requires_stationary_vehicle(monkeypatch):
+    sup = MappedSupervisor(forced=True)
+    sup.core.start(.45,0.,(0,0,0),3.)
+    sup.core.state = 'BLOCKED'
+    monkeypatch.setattr(sup.entry_fitter,'fit',lambda *a: white_observation(c=.14))
+    for i in range(12):
+        sup._try_relocalise(np.zeros((480,640,3),np.uint8),(i*.03,0,0),None,i*.1)
+    assert sup.core.c==.45 and sup.core.relocalizations==0
+
+
+def test_localise_diagnostics_are_current_and_do_not_repeat_old_path():
+    k = core()
+    k.blind_travel = 1.3
+    k.diagnostics = dict(s=-99,c=99,blind_m=0.,path=[[1,2,3]])
+    out = k.step_obs(None,(.05,0,0),raycast(.234,0,0,[]),now=0.)
+    assert out['v']==0 and k.diagnostics['state']=='LOCALISE'
+    assert k.diagnostics['s']==k.s and k.diagnostics['c']==k.c
+    assert k.diagnostics['blind_m']==k.blind_travel and k.blind_travel>1.3
+    assert k.diagnostics['path']==[] and k.diagnostics['observed_m'] is None
+
+
+def test_floor_yellow_outlier_cannot_move_island_to_two_metres(monkeypatch):
+    k = core()
+    monkeypatch.setattr(T,'island_distance',lambda *a: 1.0)
+    for _ in range(6):
+        k._camera_island(dict(yellow_xy=np.zeros((3,2))))
+    assert k.island_s is None and k.island_at==S.START_TO_ISLAND
+
+
+def test_stopped_recovery_can_use_two_weak_but_consistent_dashes(monkeypatch):
+    sup = MappedSupervisor(forced=True)
+    sup.core.start(.45,0.,(0,0,0),3.)
+    sup.core.state = 'BLOCKED'
+    obs = white_observation(c=.14)
+    obs['lines'] = [(u,35,ratio) for u,_,ratio in obs['lines']]
+    monkeypatch.setattr(sup.entry_fitter,'fit',lambda *a: obs)
+    for n in range(7):
+        sup._try_relocalise(np.zeros((480,640,3),np.uint8),(0,0,0),None,n*.1)
+    assert sup.core.c==pytest.approx(.14) and sup.core.relocalizations==1
+    assert central_white_pair(obs,.95) is None  # Entry still requires stronger evidence.

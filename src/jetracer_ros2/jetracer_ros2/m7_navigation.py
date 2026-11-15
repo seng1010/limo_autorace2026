@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import math
 import time
 
+import cv2
 import numpy as np
 
 try:
@@ -17,6 +18,37 @@ try:
 except ImportError:
     import three_lane as T
     import three_lane_simple as S
+
+CONTROLLER_VERSION = 'm7-mapped-20261116-entry-recovery'
+
+
+class EntryLineFitter(T.LineFitter):
+    """The flaring yellow entrance must not outvote the two white dashes."""
+    def masks(self, image, tune=None):
+        yellow, white = super().masks(image, tune)
+        self.yellow = np.zeros_like(yellow)
+        return self.yellow, white
+
+
+def central_white_pair(obs, dark_fraction, heading_limit=math.radians(12), min_points=40):
+    """Require a dark road and two independent white boundaries around us.
+
+    Never turn a far-away/sideways road fit into an entry by clamping its pose.
+    This gate is for the central entrance and stopped central-lane recovery.
+    """
+    if not obs or dark_fraction < .55 or obs.get('n',0)<120 or abs(obs['th'])>heading_limit:
+        return None
+    white = [(T._shrink(u),n) for u,n,ratio in obs['lines'] if ratio<=.3 and n>=min_points]
+    pairs = []
+    for left,nl in white:
+        for right,nr in white:
+            width = left-right
+            c = -(left+right)/2
+            if right<-.06 and left>.06 and .44<=width<=.68 and abs(c)<=.18:
+                pairs.append((min(nl,nr)-100*abs(width-.54),c))
+    if not pairs:
+        return None
+    return max(pairs)[1],float(obs['th'])
 
 
 @dataclass(frozen=True)
@@ -335,6 +367,25 @@ class MappedThreeLane(S.SimpleThreeLane):
         self.stop_since = None
         self.diagnostics = {}
         self.goal = None
+        self.recovery_status = ''
+        self.relocalizations = 0
+
+    def stopped_diagnostics(self, state, reason, pose_valid=True):
+        # A stopped frame must not retain the last moving frame's pose/path.
+        self.diagnostics = dict(state=state,reason=reason,s=self.s,c=self.c,heading=self.th,
+                                lane=int(np.argmin(np.abs(np.asarray(T.LANE_CENTER)-self.c))),
+                                target=self.lane,goal=self.goal,blind_m=self.blind_travel,
+                                line_accepted=False,pose_valid=pose_valid,observed_m=None,collision_m=None,
+                                next_lane=None,path=[],obstacles=[],reverse_count=self.reverse_count,
+                                occupied_cells=len(self.visibility.hits),free_cells=len(self.visibility.free),
+                                recovery=self.recovery_status,relocalizations=self.relocalizations)
+
+    def _camera_island(self, obs):
+        before = self.island_s
+        super()._camera_island(obs)
+        if self.island_s is not None and not S.START_TO_ISLAND-.7<=self.island_s<=S.START_TO_ISLAND+.5:
+            self.island_s = before
+            self._isl_seen = []
 
     def obstacle_report(self):
         """Visible connected surfaces, not an assertion that all 7 are known.
@@ -375,10 +426,12 @@ class MappedThreeLane(S.SimpleThreeLane):
 
     def step_obs(self, obs, pose, scan, goal=None, now=None):
         now = time.monotonic() if now is None else now
+        line_accepted = False
         def stopped(state, reason):
             self.state, self.reason = state, reason
             self.reversing = False
-            self.diagnostics.update(state=state, reason=reason)
+            self.stopped_diagnostics(state,reason,state not in ('NO_ODOM','ODOM_JUMP'))
+            self.diagnostics['line_accepted'] = bool(line_accepted)
             return dict(v=0.0, steer=0.0, state=state, reason=reason, wall_text='')
         if pose is None or not np.isfinite(pose).all():
             return stopped('NO_ODOM', 'waiting for odometry; M7 retained')
@@ -393,7 +446,8 @@ class MappedThreeLane(S.SimpleThreeLane):
         heading_ok = bool(obs and math.isfinite(obs.get('th',math.nan))
                           and abs(obs['th']-self.th)<=S.TH_ACCEPT)
         line_accepted = self._camera_lines(obs) if heading_ok and not in_merge else False
-        self._camera_island(obs)
+        if line_accepted:
+            self._camera_island(obs)
         if line_accepted and obs.get('n', 0) >= S.TH_MIN_POINTS:
             self.blind_travel = 0.0
         if not self.visibility.observe(scan, pose, now):
@@ -446,6 +500,7 @@ class MappedThreeLane(S.SimpleThreeLane):
                                 free_cells=len(self.visibility.free), reverse_count=self.reverse_count,
                                 line_accepted=bool(line_accepted), blind_m=self.blind_travel,
                                 goal=goal, reading_sign=reading,
+                                pose_valid=True,recovery=self.recovery_status,relocalizations=self.relocalizations,
                                 obstacles=self.obstacle_report(), path=best['path'].round(3).tolist(),
                                 reason=self.reason)
         return dict(v=speed, steer=steer, state=self.state, reason=self.reason, wall_text='')
@@ -454,6 +509,121 @@ class MappedThreeLane(S.SimpleThreeLane):
 class MappedSupervisor(S.Lane3SimpleSupervisor):
     """Same M7/M2 handoff contract; only explicit exit evidence completes M7."""
     smooth_output = False  # The command has already been checked with actuator lag.
+    entry_frames = 5
+
+    def __init__(self, forced=False, goal=None):
+        super().__init__(forced,goal)
+        self.entry_fitter = EntryLineFitter()
+        self.entry_reason = 'waiting for two white dashed boundaries on the road'
+        self._entry_seen = None
+        self._entry_count = 0
+        self._recovery_seen = None
+        self._recovery_since = None
+        self._recovery_count = 0
+        self._last_v = 0.
 
     def make_core(self):
         return MappedThreeLane()
+
+    def set_mission(self, name):
+        previous = self.mode
+        super().set_mission(name)
+        if previous=='off' and self.mode=='armed':
+            self._entry_seen,self._entry_count = None,0
+            self._recovery_seen,self._recovery_since,self._recovery_count = None,None,0
+            self._last_v = 0.
+
+    @staticmethod
+    def road_fraction(image):
+        if image is None or image.size==0:
+            return 0.
+        h,w = image.shape[:2]
+        roi = image[int(h*.54):int(h*.92),int(w*.25):int(w*.75)]
+        return float((cv2.cvtColor(roi,cv2.COLOR_BGR2HSV)[:,:,2]<100).mean())
+
+    def _try_enter(self, image, pose, tune):
+        dark = self.road_fraction(image)
+        obs = self.entry_fitter.fit(image,0.,tune) if image is not None and dark>=.55 else None
+        candidate = central_white_pair(obs,dark)
+        if candidate is None or pose is None:
+            self._entry_seen,self._entry_count = None,0
+            self.entry_reason = ('dark road surface not confirmed' if dark<.55 else
+                                 'two central white dashes/aligned heading not confirmed')
+            return False
+        c,th = candidate
+        if self._entry_seen is not None:
+            pc,pth,pp = self._entry_seen
+            consistent = (abs(c-pc)<.06 and abs(th-pth)<math.radians(4)
+                          and math.hypot(pose[0]-pp[0],pose[1]-pp[1])<.10
+                          and abs(pose[2]-pp[2])<math.radians(8))
+            self._entry_count = self._entry_count+1 if consistent else 1
+        else:
+            self._entry_count = 1
+        self._entry_seen = (c,th,pose)
+        self.entry_reason = f'confirming central entrance {self._entry_count}/{self.entry_frames}'
+        if self._entry_count<self.entry_frames:
+            return False
+        d = S.dash_start_ahead(self.entry_fitter,obs)
+        self.core = self.make_core()
+        self.core.start(c,th,pose,S.START_TO_DASH-d if d is not None else S.START_TO_DASH)
+        self.mode = 'on'
+        self.message = f'[M7 mapped] entry confirmed: c={c:+.2f}, heading={math.degrees(th):+.1f}, s={self.core.s:.2f}'
+        return True
+
+    def _try_relocalise(self, image, pose, tune, now):
+        core = self.core
+        if pose is None or abs(self._last_v)>1e-6 or core.state not in ('LOCALISE','BLOCKED'):
+            self._recovery_since,self._recovery_seen,self._recovery_count = None,None,0
+            return
+        dark = self.road_fraction(image)
+        obs = self.entry_fitter.fit(image,None,tune) if image is not None and dark>=.55 else None
+        candidate = central_white_pair(obs,dark,math.radians(40),min_points=30)
+        if candidate is None:
+            self._recovery_since,self._recovery_seen,self._recovery_count = None,None,0
+            core.recovery_status = 'waiting for a confirmed central white pair'
+            return
+        c,th = candidate
+        if abs(math.atan2(math.sin(th-core.th),math.cos(th-core.th)))>math.radians(20) or abs(c-core.c)>.45:
+            self._recovery_since,self._recovery_seen,self._recovery_count = None,None,0
+            core.recovery_status = 'pose inconsistent after relocation; restart at the entrance'
+            return
+        if self._recovery_seen is not None:
+            pc,pth,pp = self._recovery_seen
+            consistent = (abs(c-pc)<.04 and abs(th-pth)<math.radians(3)
+                          and math.hypot(pose[0]-pp[0],pose[1]-pp[1])<.01
+                          and abs(pose[2]-pp[2])<math.radians(2))
+        else:
+            consistent = False
+        self._recovery_count = self._recovery_count+1 if consistent else 1
+        self._recovery_since = self._recovery_since if consistent else now
+        self._recovery_seen = (c,th,pose)
+        core.recovery_status = f'confirming stopped pose {self._recovery_count}/{self.entry_frames}'
+        if self._recovery_count<self.entry_frames or now-self._recovery_since<.5:
+            return
+        # Keep longitudinal position and fixed-frame obstacle evidence. A white
+        # pair cannot tell us where along the road we are or justify clearing it.
+        core._advance(pose)
+        core.c,core.th,core.blind_travel = c,th,0.
+        core.planner.previous_steer = 0.
+        core.planner.target = int(np.argmin(np.abs(np.asarray(T.LANE_CENTER)-c)))
+        core.relocalizations += 1
+        core.recovery_status = 'central pose re-acquired; longitudinal/map evidence retained'
+        self._recovery_since,self._recovery_seen,self._recovery_count = None,None,0
+
+    def step(self, image, pose, scan, both_yellow, tune=None, now=None):
+        now = time.monotonic() if now is None else now
+        if self.mode=='on':
+            self._try_relocalise(image,pose,tune,now)
+        out = super().step(image,pose,scan,both_yellow,tune,now)
+        if self.mode=='armed':
+            self.core.stopped_diagnostics('WAIT_ENTRY',self.entry_reason,pose is not None)
+            if self.forced:
+                out = dict(v=0.,steer=0.,state='LANE3',reason=self.entry_reason,note='M7 WAIT_ENTRY')
+        if out is not None:
+            self._last_v = out['v']
+        return out
+
+    def step_obs(self, obs, pose, scan, both_yellow, now=None):
+        if pose is None:
+            self.core.stopped_diagnostics('NO_ODOM','odometry unavailable; M7 retained',False)
+        return super().step_obs(obs,pose,scan,both_yellow,now)
