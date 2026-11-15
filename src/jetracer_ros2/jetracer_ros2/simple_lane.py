@@ -1724,7 +1724,7 @@ def run_ros(mode, topic, record=False):
             if self.lane3 is not None:
                 self.create_subscription(LaserScan, SCAN_TOPIC, self.on_scan, qos_profile_sensor_data)
                 self.create_subscription(String, 'mission/active', self.on_mission, 10)
-                self.create_subscription(String, 'mission/yolo_event', self.on_yolo, 10)
+                self.create_subscription(String, 'perception/detections', self.on_detections, 10)
                 if LANE3:
                     print('[3차선] lane3: 가까운 흰 점선이 보이면 3차선 주행을 시작합니다'
                           + ('' if LANE3_GOAL is None else f" (갈림길 {'A' if LANE3_GOAL == 0 else 'B'})"))
@@ -1752,8 +1752,14 @@ def run_ros(mode, topic, record=False):
         def on_mission(self, msg):
             self.lane3.set_mission(msg.data.strip())
 
-        def on_yolo(self, msg):
-            self.lane3.set_sign(msg.data.strip())
+        def on_detections(self, msg):
+            # 갈림길 표지판은 YOLO 가 '확정'해 보낸 이벤트(mission/yolo_event)가 아니라 프레임별 결과로 직접 판정한다
+            # (멀리서 읽은 값은 틀린다 - three_lane.SignVote)
+            try:
+                detections = json.loads(msg.data).get('detections', [])
+            except (ValueError, AttributeError):
+                return
+            self.lane3.see_signs(detections)
 
         def on_odom(self, msg):
             q = msg.pose.pose.orientation

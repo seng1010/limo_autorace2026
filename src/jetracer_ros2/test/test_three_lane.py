@@ -361,3 +361,111 @@ def test_supervisor_starts_only_after_consistent_frames(monkeypatch):
         sup.step(None, pose, None, False)
         assert sup.mode == expected
     assert abs(sup.tl.road.c - 0.07) < 1e-6 and abs(sup.tl.road.th + 0.30) < 1e-6
+
+
+def test_sign_vote_ignores_small_boxes_and_needs_four_of_five():
+    vote = T.SignVote()
+    for _ in range(10):                                   # 멀리서(작게) 읽은 A 는 몇 번이 와도 쓰지 않는다
+        assert vote.add('a', 16.0) is None
+    assert vote.goal is None
+    assert vote.add('b', 30.0) is None and vote.add('a', 30.0) is None
+    assert vote.add('b', 31.0) is None and vote.add('b', 32.0) is None
+    assert vote.add('b', 33.0) == 2                       # 최근 5개 중 4개가 B
+    assert vote.add('a', 60.0) is None and vote.goal == 2     # 한 번 튄 값으로는 안 바뀐다
+
+
+def test_supervisor_decides_sign_from_detections_only_inside_three_lane():
+    det = lambda label, h: [{'label': label, 'confidence': 0.8, 'bbox': [100.0, 100.0, 120.0, 100.0 + h]}]  # noqa: E731
+    sup = T.Lane3Supervisor()
+    for _ in range(6):
+        sup.see_signs(det('b', 40))                       # 아직 3차선 구간이 아님
+    assert sup.sign_goal is None
+    sup.set_mission('M7')
+    for _ in range(4):
+        sup.see_signs(det('a', 15))                       # 멀리서 읽은 A
+    assert sup.sign_goal is None
+    for _ in range(4):
+        sup.see_signs(det('b', 30))
+    assert sup.sign_goal == 2 and 'B' in sup.message
+    fixed = T.Lane3Supervisor(forced=True, goal=0)        # goal_a 로 정해 두면 표지판을 보지 않는다
+    for _ in range(6):
+        fixed.see_signs(det('b', 40))
+    assert fixed.sign_goal == 0
+
+
+def clear():
+    return [T.LIDAR_MAX] * 3, [T.LIDAR_MAX] * 3
+
+
+def test_waits_in_center_lane_until_sign_is_decided():
+    planner = T.Planner()
+    ahead, side = clear()
+    plan = None
+    for _ in range(T.GOAL_CLEAR_FRAMES):
+        plan = planner.update(2, T.LANE_CENTER[2], ahead, side, goal=None, may_center=True)
+    assert plan.state == 'CHANGE' and plan.target == 1
+    # 어느 차로든 앞에 뭔가 보이면 돌아가지 않는다 (돌아간 뒤 빠져나갈 길이 막힐 수 있다)
+    planner = T.Planner()
+    ahead, side = clear()
+    ahead[0] = side[0] = 1.8
+    for _ in range(30):
+        plan = planner.update(2, T.LANE_CENTER[2], ahead, side, goal=None, may_center=True)
+    assert plan.state == 'KEEP' and plan.target == 2
+
+
+def test_crosses_two_lanes_to_sign_side_only_when_island_is_far():
+    planner = T.Planner()
+    ahead, side = clear()
+    plan = None
+    for k in range(T.CROSS_FRAMES):
+        plan = planner.update(2, T.LANE_CENTER[2], ahead, side, goal=0)
+        assert (plan.state == 'CHANGE') == (k == T.CROSS_FRAMES - 1)
+    assert plan.target == 0
+    # 섬(가운데 차로 끝)이 2.0 m 앞에 보이면 건너지 않는다 (11/15 13:33 실차 배치)
+    planner = T.Planner()
+    ahead, side = clear()
+    ahead[1] = side[1] = 2.0
+    for _ in range(60):
+        plan = planner.update(2, T.LANE_CENTER[2], ahead, side, goal=0)
+    assert plan.state == 'KEEP' and plan.target == 2
+
+
+def test_obstacle_avoidance_comes_before_sign_side():
+    planner = T.Planner()
+    ahead, side = clear()
+    ahead[1] = side[1] = 1.0                              # 가운데 차로(지금 차로) 앞이 막힘, 표지판은 A
+    ahead[0] = side[0] = 0.6                              # A 쪽 차로도 막힘
+    plan = planner.update(1, 0.0, ahead, side, goal=0)
+    assert plan.state == 'CHANGE' and plan.target == 2    # 표지판과 반대여도 빈 쪽으로 피한다
+
+
+def test_undecided_sign_at_island_takes_default_side():
+    planner = T.Planner()
+    ahead, side = clear()
+    ahead[1] = side[1] = 1.2                              # 섬
+    plan = planner.update(1, 0.0, ahead, side, goal=None)
+    assert plan.state == 'CHANGE' and plan.target == T.DEFAULT_SIDE
+
+
+def test_yellow_line_that_starts_ahead_is_not_a_wall_until_it_is_close():
+    lines = [(0.19, 280, 1.0)]                            # 왼쪽 19 cm 노란 선, 20도로 다가가는 중 (11/15 03:50 #361: 섬 왼쪽 테두리)
+    th = -math.radians(20)
+    assert T.yellow_wall(lines, th) is not None                       # 시작 지점을 모르면 벽
+    assert T.yellow_wall(lines, th, {0.19: 1.05}) is None             # 1.05 m 앞에서 시작 -> 그 전에 지나간다
+    assert T.yellow_wall(lines, th, {0.19: 0.45}) is not None         # 바로 앞부터 있는 선 (바깥 노란 선)
+    beside = [(0.14, 280, 1.0)]                           # 나란히 가는 중
+    assert T.yellow_wall(beside, 0.0, {0.14: 1.5}) is None
+    assert T.yellow_wall(beside, 0.0, {0.14: 0.6}) is not None
+
+
+def test_yellow_wall_stays_on_once_triggered():
+    tl = T.ThreeLane()
+    near = dict(th=-math.radians(30), lines=[(0.28, 200, 1.0)], score=1.0, n=1000, ystart={0.28: 0.45})
+    tl.step_obs(obs(0.3), (0.0, 0.0, 0.0), None)
+    out = tl.step_obs(near, (0.0, 0.0, 0.0), None)
+    assert out.wall is not None and out.wall < 0                      # 왼쪽 선 -> 오른쪽으로
+    # 코앞에서는 카메라 사각 때문에 선이 '앞에서 시작'하는 것처럼 보인다. 이미 걸린 쪽은 계속 피한다
+    blind = dict(th=-math.radians(25), lines=[(0.06, 200, 1.0)], score=1.0, n=1000, ystart={0.06: 0.47})
+    assert T.yellow_wall(blind['lines'], blind['th'], blind['ystart']) is None
+    out = tl.step_obs(blind, (0.0, 0.0, 0.0), None)
+    assert out.wall is not None and out.wall < 0

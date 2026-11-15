@@ -17,6 +17,7 @@ ROS 없음 (simple_lane.py 가 불러 쓴다. 기록(bag)으로 오프라인 확
 """
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -55,6 +56,8 @@ SOLID_MAX_GAP = 0.10                        # 끊긴 곳이 이보다 짧으면 
 HEADING_MAX = math.radians(42.0)            # 차로를 옮길 때 도로 방향에서 이 각도 넘게 틀지 않는다
 WALL_MARGIN = 0.17                          # 노란 선과 차 가운데 사이 최소 거리 (차 반폭 0.11 + 여유)
 WALL_RADIUS = 0.62                          # 나란해지는 데 쓰는 회전 반경 (실측 최소 0.50~0.53 에 여유)
+WALL_AHEAD_MARGIN = 0.30                    # 노란 선이 '내가 그 선 자리를 넘는 지점'보다 이만큼 더 앞에서 시작하면 벽이 아니다 (갈림길 섬 테두리)
+WALL_BESIDE_MAX = 0.90                      # 나란히 갈 때: 노란 선이 이보다 앞에서 시작하면 아직 옆에 없는 선
 WALL_LAG_M = 0.08                           # 조향이 먹기 전에 가는 거리
 ISLAND_INSIDE = 0.55                        # 도로 가운데에서 이 안쪽에 보이는 노란 선은 갈림길 섬 테두리로 본다
 ISLAND_HALF = 0.36                          # 섬(가운데 차로 끝) 폭의 절반 + 여유
@@ -85,6 +88,8 @@ GUARD_DIST = 0.30                           # 정면 통로 안 이 거리(라�
 STOP_DIST = 0.38                            # 갈 곳이 없으면 장애물 앞 이 거리에서 정지
 NO_OBSTACLE = LIDAR_MAX - 0.05              # 빈 거리가 이 이상이면 그 차로에 장애물이 안 보이는 것
 GOAL_CLEAR_FRAMES = 6                       # 갈림길 방향 차로가 연속 이만큼 비어 보여야 미리 옮긴다
+CROSS_FRAMES = 12                           # 두 칸 건너기: 가운데·도착 차로에 아무것도 안 보이는 상태가 연속 이만큼 (라이다 4바퀴)
+                                            # 시뮬레이션: 섬 앞끝까지 1.9 m 부터 성공, 1.5~1.8 m 는 섬 앞에 갇힘 -> 2.45 m 안에 섬·기둥이 안 보일 때만
 GOAL_TIE = 0.40                             # 두 차로의 빈 거리 차이가 이 안이면 갈림길 방향 쪽을 고른다
 STUCK_FRAMES = 25                           # 정지 상태가 이만큼(약 1.2초) 이어지면 후진해서 다시 길을 찾는다
 REVERSE_MIN = 0.25                          # 최소 후진 거리 [m]
@@ -206,6 +211,7 @@ class LineFitter:
             return None
         lines = sorted(lines)
         short = set()                                  # 짧은 노란 조각 (갈림길 섬 꼭짓점 등): 바깥 선이 아니다
+        ystart = {}                                    # 노란 선마다: 그 선이 실제로 시작하는 곳 (도로 방향 거리, 카메라 기준)
         if yellow_full is not None and len(yellow_full[0]):
             uy = -yellow_full[0] * math.cos(th) - yellow_full[1] * math.sin(th)
             ty = -yellow_full[0] * math.sin(th) + yellow_full[1] * math.cos(th)
@@ -214,8 +220,10 @@ class LineFitter:
                     t = ty[np.abs(uy - line[0]) < 0.04]
                     if t.size < 10 or float(t.max() - t.min()) < YELLOW_MIN_SPAN:
                         short.add(line[0])
+                    if t.size >= 10:
+                        ystart[line[0]] = float(np.percentile(t, 5))
         return dict(th=float(th), lines=lines, score=score / float(len(P)) ** 2, n=len(P),
-                    yellow_xy=P[P[:, 2] > 0.5, :2], edges=sorted(edges), short=short)
+                    yellow_xy=P[P[:, 2] > 0.5, :2], edges=sorted(edges), short=short, ystart=ystart)
 
 
 def _shrink(u):
@@ -410,8 +418,8 @@ class Planner:
                 near = [j for j in near if ahead[j] >= best - GOAL_TIE]
             if goal is not None:
                 near.sort(key=lambda j: (abs(j - goal), -ahead[j]))
-            else:
-                near.sort(key=lambda j: -ahead[j])
+            else:                        # 표지판을 모름: 더 빈 쪽, 같으면 기본 쪽
+                near.sort(key=lambda j: (-ahead[j], abs(j - DEFAULT_SIDE)))
             return near[0]
         far = 2 - cur
         if cur != 1 and side[1] >= TRANSIT_CLEAR and side[far] >= FAR_CLEAR \
@@ -420,8 +428,10 @@ class Planner:
         return None
 
     def update(self, lane: int, c: float, ahead: List[float], side: List[float],
-               goal: Optional[int] = None, have_scan: bool = True) -> Plan:
-        """have_scan=False (라이다가 아직 없음) 이면 차로를 바꾸는 결정을 하지 않는다."""
+               goal: Optional[int] = None, have_scan: bool = True, may_center: bool = False) -> Plan:
+        """have_scan=False (라이다가 아직 없음) 이면 차로를 바꾸는 결정을 하지 않는다.
+        goal: 확정된 표지판 방향 (0 = A, 2 = B, None = 아직 모름). may_center: 모를 때 가운데 차로로 돌아가도 되는지.
+        장애물 회피가 먼저다: 아래 '가고 싶은 차로' 판단은 지금 차로가 막히지 않았을 때만 한다."""
         if self.target is None:
             self.target = lane
         if not have_scan:
@@ -433,13 +443,22 @@ class Planner:
         if ahead[cur] >= BLOCK_DIST:
             if self.changing:
                 return Plan(cur, V_CHANGE, 'CHANGE', f'차로 {lane} -> {cur}')
-            if goal is not None and goal != cur:
-                j = cur + (1 if goal > cur else -1)
-                self._goal_clear = self._goal_clear + 1 if (side[j] >= NO_OBSTACLE and ahead[j] >= NO_OBSTACLE) else 0
-                if self._goal_clear >= GOAL_CLEAR_FRAMES:
+            # 가고 싶은 차로: 표지판이 확정됐으면 그쪽, 아직 모르면 가운데 (어느 쪽이 나와도 한 칸이면 되게)
+            want = goal if goal is not None else (1 if may_center else cur)
+            if want != cur:
+                if goal is None:         # 가운데로 돌아가 기다리기: 세 차로 모두 앞에 아무것도 안 보일 때만
+                    ok = min(min(side), min(ahead)) >= NO_OBSTACLE       # (돌아간 뒤 어느 쪽으로든 나갈 수 있어야 한다)
+                elif abs(want - cur) == 1:
+                    ok = side[want] >= NO_OBSTACLE and ahead[want] >= NO_OBSTACLE
+                else:                    # 반대편 바깥 차로 -> 가운데 차로를 가로질러 한 번에 건넌다 (섬이 충분히 멀 때만)
+                    ok = (min(side[1], ahead[1]) >= NO_OBSTACLE
+                          and side[want] >= NO_OBSTACLE and ahead[want] >= NO_OBSTACLE)
+                self._goal_clear = self._goal_clear + 1 if ok else 0
+                if self._goal_clear >= (GOAL_CLEAR_FRAMES if abs(want - cur) == 1 else CROSS_FRAMES):
                     self._goal_clear = 0
-                    self.target, self.changing = j, True
-                    return Plan(j, V_CHANGE, 'CHANGE', f'갈림길 방향 -> 차로 {j}')
+                    self.target, self.changing = want, True
+                    why = '갈림길 방향' if goal is not None else '표지판 대기'
+                    return Plan(want, V_CHANGE, 'CHANGE', f'{why} -> 차로 {want}')
             else:
                 self._goal_clear = 0
             return Plan(cur, V_KEEP, 'KEEP', '')
@@ -479,16 +498,26 @@ def limit_heading(steer, th):
     return min(steer, -back) if heading > 0.0 else max(steer, back)
 
 
-def yellow_wall(lines, th_obs):
+def yellow_wall(lines, th_obs, ystart=None, only_side=0.0):
     """노란 선은 벽: 3차선에서 넘어도 되는 것은 흰 점선뿐이다 (노란 선 = 바깥 선 또는 섬 테두리).
     노란 선에 닿기 전에 나란해질 수 없을 만큼 가까워지면, 위치 추정과 상관없이 그 선 반대쪽으로 꺾는다.
+    ystart: 선마다 실제로 시작하는 곳 [m]. 내가 그 선 자리를 넘는 지점보다 한참 앞에서 시작하는 선(섬 테두리)은 벽이 아니다.
     반환: None 또는 (조향각[왼쪽 +], 설명)."""
     worst = None
     for u, n, ratio in lines:
         if ratio < 0.75 or n < 50 or abs(u) > 0.60:
             continue
         side = 1.0 if u > 0 else -1.0                 # 선이 차의 왼쪽(+) / 오른쪽(-)
+        if only_side and side != only_side:
+            continue
         approach = -side * th_obs                     # 그 선 쪽으로 향한 각 (+ 면 다가가는 중)
+        start = ystart.get(u) if ystart else None
+        if start is not None:
+            if approach > math.radians(3.0):
+                if start > abs(u) / math.tan(approach) + WALL_AHEAD_MARGIN:
+                    continue                          # 선이 시작하기 전에 그 자리를 지나간다
+            elif start > WALL_BESIDE_MAX:
+                continue                              # 아직 옆에 없는 선
         need = WALL_MARGIN
         if approach > 0.0:
             need += WALL_RADIUS * (1.0 - math.cos(approach)) + WALL_LAG_M * math.sin(approach)
@@ -545,6 +574,7 @@ class ThreeLane:
         self.lane_run = 1.0          # 지금 목표 차로로 정한 뒤 앞으로 간 거리 (이만큼은 뒤가 비어 있다).
                                      # 처음에는 지나온 길 1.0 m 가 비어 있다고 본다
         self._last_target = None
+        self._wall_side = 0.0        # 노란 선 벽에 걸려 있는 쪽 (+1 왼쪽 선, -1 오른쪽 선, 0 없음)
 
     def reset(self):
         self.road = RoadState()
@@ -643,7 +673,14 @@ class ThreeLane:
         out = ThreeLaneOutput(lines=obs['lines'] if obs else [])
         out.white_seen = bool(obs) and any(
             ratio <= 0.3 and n >= 50 and abs(u) < 0.50 for u, n, ratio in obs['lines'])
-        wall = yellow_wall(obs['lines'], obs['th']) if obs else None
+        # 노란 선 벽: 앞에서 시작하는 선(섬 테두리)은 그 자리를 먼저 지나가면 벽이 아니다. 다만 한 번 걸린 쪽은
+        # 풀릴 때까지 시작 지점을 따지지 않는다 (코앞의 선은 카메라 사각 때문에 '앞에서 시작'으로 보인다)
+        wall = None
+        if obs:
+            wall = yellow_wall(obs['lines'], obs['th'], obs.get('ystart'))
+            if wall is None and self._wall_side:
+                wall = yellow_wall(obs['lines'], obs['th'], None, self._wall_side)
+            self._wall_side = (1.0 if wall[0] < 0 else -1.0) if wall is not None else 0.0
         if wall is not None:
             out.wall, out.wall_text = wall
         if scan is not None:
@@ -660,7 +697,8 @@ class ThreeLane:
         out.island = island
         if island is not None:                   # 가운데 차로는 섬에서 끝난다 -> 장애물로 취급
             ahead[1], side[1] = min(ahead[1], island), min(side[1], island)
-        plan = self.planner.update(lane, self.road.c, ahead, side, goal, have_scan=scan is not None)
+        plan = self.planner.update(lane, self.road.c, ahead, side, goal, have_scan=scan is not None,
+                                   may_center=goal is None)
         if out.front < GUARD_DIST and plan.speed > 0.0:
             # 위치를 잘못 알아 '빈 차로'라고 믿고 장애물로 가는 것을 막는다 (11/15 06:01 실차: 장애물을 밀고 지나감)
             plan = Plan(plan.target, 0.0, 'STOP', f'정면 {out.front:.2f} m 에 물체 -> 정지')
@@ -683,14 +721,41 @@ class ThreeLane:
 # ---------------------------------------------------------------------------
 # simple_lane.py 와 잇는 부분: 언제 3차선 주행을 켜고 끌지
 # ---------------------------------------------------------------------------
+SIGN_MIN_H = 27.0          # 표지판 상자 높이 [px]. 이보다 작게(= 약 2 m 보다 멀리) 보일 때 읽은 값은 쓰지 않는다
+SIGN_WINDOW = 5            # 최근 이만큼 중
+SIGN_NEED = 4              # 이만큼이 같은 쪽이면 확정
 ARM_AFTER_M = 1.4          # M7 시작(횡단보도 출발) 후 이만큼 간 뒤부터 3차선 선을 찾는다 (그 전은 코너)
 ENTRY_FRAMES = 3           # 가까운 흰 점선이 연속 이만큼 보이면 3차선 주행 시작
 EXIT_FRAMES = 4            # 바깥 차로에서 양쪽 노란 선(갈림길 차로)이 연속 이만큼 보이면 기본 주행으로 넘김
-DEFAULT_GOAL_AFTER_M = 1.8 # 표지판을 못 읽은 채 이만큼 가면 갈 쪽을 스스로 정한다
-DEFAULT_SIDE = 2           # 그때 가운데 차로에 있으면 갈 쪽 (2 = 오른쪽 = B)
+DEFAULT_SIDE = 2           # 표지판을 끝까지 못 읽었고 양쪽이 똑같이 비어 있을 때 갈 쪽 (2 = 오른쪽 = B)
 MAX_ON_M = 6.5             # 3차선 주행을 이 거리 넘게 하고 있으면 끝낸다 (도면상 점선 구간 약 3.7 m)
 LOST_FRAMES = 30           # 위치를 못 잡은 채 이만큼 지나면 끝낸다
 SIDE_TOL = 0.13
+
+
+class SignVote:
+    """갈림길 표지판(A/B) 판정. 멀리서는 모델이 표지판과 상관없이 A 라고 답한다 (11/15 측정: 실제 B 인데
+    3.2 m 밖에서 정답 5 %, 2.1~1.7 m 에서 86 %, 1.4 m 안에서 100 %). 그래서 작게 보일 때 읽은 값은 버리고,
+    최근 SIGN_WINDOW 개 중 SIGN_NEED 개가 같은 쪽일 때만 확정한다. 확정 뒤에도 같은 규칙으로만 바뀐다."""
+
+    def __init__(self):
+        self.recent = deque(maxlen=SIGN_WINDOW)
+        self.goal: Optional[int] = None
+
+    def reset(self) -> None:
+        self.recent.clear()
+        self.goal = None
+
+    def add(self, label: str, height: float) -> Optional[int]:
+        """label: 'a' 또는 'b', height: 상자 높이 [px]. 이번에 새로 확정되면 차로 번호(0 = A, 2 = B), 아니면 None."""
+        if label not in ('a', 'b') or height < SIGN_MIN_H:
+            return None
+        self.recent.append(label)
+        for name, lane in (('a', 0), ('b', 2)):
+            if self.recent.count(name) >= SIGN_NEED and self.goal != lane:
+                self.goal = lane
+                return lane
+        return None
 
 
 class Lane3Supervisor:
@@ -700,7 +765,9 @@ class Lane3Supervisor:
         self.tl = ThreeLane()
         self.forced = forced
         self.mode = 'armed' if forced else 'off'
-        self.sign_goal = goal             # 0 = A(왼쪽), 2 = B(오른쪽), None = 아직 모름
+        self.sign_goal = goal             # 확정된 갈림길 방향: 0 = A(왼쪽), 2 = B(오른쪽), None = 아직 모름
+        self.fixed_goal = goal is not None    # 실행할 때 goal_a / goal_b 로 정해 둠 -> 표지판을 보지 않는다
+        self.vote = SignVote()
         self.arm_travel = 0.0
         self._pose = None
         self._white = self._both = self._lost = 0
@@ -718,14 +785,32 @@ class Lane3Supervisor:
                 self.tl.reset()
                 self._white = self._both = self._lost = 0
                 self._seen = None
+                self.vote.reset()             # 3차선에 들어오기 전에 읽은 것은 버린다
+                if not self.fixed_goal:
+                    self.sign_goal = None
         elif name != 'M2':
             self.mode = 'off'
 
     def set_sign(self, event):
+        """갈림길 방향을 직접 정한다 (시험용). 주행 중에는 see_signs 로 판정한다."""
         if event == 'sign_a':
             self.sign_goal = 0
         elif event == 'sign_b':
             self.sign_goal = 2
+
+    def see_signs(self, detections):
+        """YOLO 한 프레임의 결과 [{'label', 'confidence', 'bbox': [x1, y1, x2, y2]}, ...] 로 표지판을 판정한다."""
+        if self.fixed_goal or self.mode not in ('armed', 'on'):
+            return
+        signs = [d for d in detections if d.get('label') in ('a', 'b') and len(d.get('bbox', ())) == 4]
+        if not signs:
+            return
+        best = max(signs, key=lambda d: d.get('confidence', 0.0))
+        height = float(best['bbox'][3]) - float(best['bbox'][1])
+        decided = self.vote.add(best['label'], height)
+        if decided is not None:
+            self.sign_goal = decided
+            self.message = f"[3차선] 표지판 {'A(왼쪽)' if decided == 0 else 'B(오른쪽)'} 확정 (상자 높이 {height:.0f} px)"
 
     @property
     def latch_off(self):
@@ -769,10 +854,7 @@ class Lane3Supervisor:
             self.steer = 0.0
             self.message = (f'[3차선] 시작: 차로 {self.tl.road.lane} (도로 가운데에서 {seen[0] * 100:+.0f} cm, '
                             f'도로 방향 {math.degrees(seen[1]):+.0f}도)')
-        goal = self.sign_goal
-        if goal is None and self.tl.travel >= DEFAULT_GOAL_AFTER_M:
-            lane = self.tl.road.lane
-            goal = lane if lane in (0, 2) else DEFAULT_SIDE
+        goal = self.sign_goal                 # 확정 전에는 None -> 가운데 차로에서 기다린다 (Planner.update)
         out = self.tl.step(image, pose, scan, goal, tune)
         self.last = out
         if not out.ok:
