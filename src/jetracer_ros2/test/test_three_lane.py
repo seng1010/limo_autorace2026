@@ -368,9 +368,12 @@ def test_sign_vote_ignores_small_boxes_and_needs_four_of_five():
     for _ in range(10):                                   # 멀리서(작게) 읽은 A 는 몇 번이 와도 쓰지 않는다
         assert vote.add('a', 16.0) is None
     assert vote.goal is None
-    assert vote.add('b', 30.0) is None and vote.add('a', 30.0) is None
-    assert vote.add('b', 31.0) is None and vote.add('b', 32.0) is None
-    assert vote.add('b', 33.0) == 2                       # 최근 5개 중 4개가 B
+    for _ in range(6):                                    # 11/15 실차: B 표지판을 29 px 에서 A 로 읽음 -> 이 크기도 버린다
+        assert vote.add('a', 29.0) is None
+    big = T.SIGN_MIN_H + 2.0
+    assert vote.add('b', big) is None and vote.add('a', big) is None
+    assert vote.add('b', big) is None and vote.add('b', big) is None
+    assert vote.add('b', big) == 2                        # 최근 5개 중 4개가 B
     assert vote.add('a', 60.0) is None and vote.goal == 2     # 한 번 튄 값으로는 안 바뀐다
 
 
@@ -385,7 +388,7 @@ def test_supervisor_decides_sign_from_detections_only_inside_three_lane():
         sup.see_signs(det('a', 15))                       # 멀리서 읽은 A
     assert sup.sign_goal is None
     for _ in range(4):
-        sup.see_signs(det('b', 30))
+        sup.see_signs(det('b', T.SIGN_MIN_H + 5))
     assert sup.sign_goal == 2 and 'B' in sup.message
     fixed = T.Lane3Supervisor(forced=True, goal=0)        # goal_a 로 정해 두면 표지판을 보지 않는다
     for _ in range(6):
@@ -469,3 +472,74 @@ def test_yellow_wall_stays_on_once_triggered():
     assert T.yellow_wall(blind['lines'], blind['th'], blind['ystart']) is None
     out = tl.step_obs(blind, (0.0, 0.0, 0.0), None)
     assert out.wall is not None and out.wall < 0
+
+
+def test_side_lane_counts_as_clear_once_obstacle_is_almost_passed_and_well_aside():
+    # 11/15 실차: 가운데 차로 장애물을 다 지나칠 때까지 기다리는 사이 왼쪽 차로 앞 장애물이 0.8 m 안으로 들어와 못 옮김
+    c = T.LANE_CENTER[0]
+    tail = [(0.05, -0.35), (0.00, -0.35), (-0.05, -0.35)]              # 옆 장애물의 끝이 라이다 바로 옆, 차 옆면에서 24 cm
+    ranges, a0, inc, rmin = scan_with(tail)
+    _, side = T.lane_free(ranges, a0, inc, rmin, c=c, th=0.0)
+    assert side[1] == T.LIDAR_MAX
+    close = [(0.05, -0.22), (0.00, -0.22), (-0.05, -0.22)]             # 차가 가운데 차로 쪽으로 붙어 있어 옆면에서 11 cm
+    ranges, a0, inc, rmin = scan_with(close)
+    _, side = T.lane_free(ranges, a0, inc, rmin, c=0.40, th=0.0)       # -> 아직 못 꺾는다
+    assert side[1] < 0.2
+    ahead_of_car = [(0.30, -0.35), (0.35, -0.35)]                      # 아직 앞에 있는 장애물은 그대로 막힘
+    ranges, a0, inc, rmin = scan_with(ahead_of_car)
+    _, side = T.lane_free(ranges, a0, inc, rmin, c=c, th=0.0)
+    assert side[1] < 0.5
+
+
+def test_escape_starts_closer_than_before_and_steers_harder():
+    planner = T.Planner()
+    ahead, side = clear()
+    ahead[0] = side[0] = 0.70                             # 예전 기준(0.8 m)보다 가깝다
+    plan = planner.update(0, T.LANE_CENTER[0], ahead, side)
+    assert plan.state == 'CHANGE' and plan.target == 1 and planner.tight
+    planner = T.Planner()
+    ahead[0] = side[0] = T.MIN_START - 0.05               # 이보다 가까우면 여전히 시작하지 않는다
+    assert planner.update(0, T.LANE_CENTER[0], ahead, side).state == 'BLOCKED'
+    planner = T.Planner()
+    ahead[0] = side[0] = 1.2                              # 여유 있을 때는 평소대로
+    planner.update(0, T.LANE_CENTER[0], ahead, side)
+    assert planner.changing and not planner.tight
+    tight = T.steer_to_lane(T.LANE_CENTER[0], 0.0, 1, T.LOOKAHEAD_TIGHT)
+    normal = T.steer_to_lane(T.LANE_CENTER[0], 0.0, 1, T.LOOKAHEAD_CHANGE)
+    assert abs(tight) >= abs(normal)
+
+
+def drive(tl, scans_by_step, steps, x0=0.0):
+    """obs(왼쪽 차로 가운데) 로 steps 번 호출. scans_by_step(k, x) -> 라이다. 반환: 상태 목록과 마지막 x."""
+    x, states = x0, []
+    for k in range(steps):
+        out = tl.step_obs(obs(T.LANE_CENTER[0]), (x, 0.0, 0.0), scans_by_step(k, x))
+        states.append(out.state)
+        x += out.speed / 22.0                             # odom: 후진이면 x 가 줄어든다
+    return states, x
+
+
+def test_reverse_keeps_backing_until_there_is_room_then_goes():
+    # 앞 장애물 0.36 m, 옆(가운데) 차로는 비어 있음: 후진을 시작하면 곧 옮길 수 있지만 REVERSE_GO_AHEAD 까지는 더 물러난다
+    tl = T.ThreeLane()
+    face = 0.36
+    def scan(k, x):
+        d = face - x
+        return scan_with([(d, 0.0), (d, 0.05), (d, -0.05)])
+    states, x = drive(tl, scan, 400)
+    assert 'REVERSE' in states and 'CHANGE' in states
+    first_change = states.index('CHANGE', states.index('REVERSE'))
+    assert all(s != 'CHANGE' for s in states[:first_change])
+    backed = -min(0.0, min(_x for _x in [x]))             # 끝 위치로는 알 수 없으니 후진 프레임 수로 확인
+    reverse_frames = sum(1 for s in states[:first_change] if s == 'REVERSE')
+    assert reverse_frames * T.V_REVERSE / 22.0 >= T.REVERSE_GO_AHEAD - face - 0.08
+
+
+def test_no_straight_reverse_right_after_a_lane_change():
+    # 옮기는 중에 지나온 길은 곧지 않다 -> 똑바로 후진하면 방금 피한 장애물에 닿는다 (시뮬레이션에서 2건)
+    tl = T.ThreeLane()
+    tl.step_obs(obs(0.0), (0.0, 0.0, 0.0), None)
+    tl.lane_run = 2.0
+    tl.planner.target, tl.planner.changing = 0, True      # 왼쪽 차로로 옮기는 중
+    tl.step_obs(obs(0.2), (0.0, 0.0, 0.0), scan_with([(2.0, 0.3)]))
+    assert tl.lane_run == 0.0

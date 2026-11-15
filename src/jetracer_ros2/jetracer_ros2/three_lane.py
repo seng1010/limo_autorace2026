@@ -69,6 +69,8 @@ FAR_SHRINK = 1.25
 MAX_STEER = math.radians(25.0)
 LOOKAHEAD = 0.55                            # 목표점: 카메라 앞 이 거리(도로 방향) [m]
 LOOKAHEAD_CHANGE = 0.42                     # 차로를 옮기는 동안은 더 가까운 점을 보고 빨리 꺾는다
+LOOKAHEAD_TIGHT = 0.30                      # 앞 장애물이 가까울 때(TIGHT_BELOW 안)는 더 급하게
+TIGHT_BELOW = 1.00
 
 # 라이다
 LIDAR_MAX = 2.5
@@ -77,11 +79,14 @@ ROAD_HALF = 0.83                            # 이보다 바깥의 점은 도로 
 
 # 판단
 BLOCK_DIST = 1.35                           # 내 차로 앞 장애물이 이보다 가까우면 옮길 차로를 찾는다
-MIN_START = 0.80                            # 앞 장애물이 이보다 가까우면 옮기기 시작하지 않는다 (옮기는 데 약 0.7 m 필요)
+MIN_START = 0.65                            # 앞 장애물이 이보다 가까우면 옮기기 시작하지 않는다 (급하게 꺾어도 0.6 m 는 필요)
 TRANSIT_CLEAR = 1.40                        # 두 칸 옮길 때 가로지르는 가운데 차로에 필요한 빈 거리
 FAR_CLEAR = 2.20                            # 두 칸 옮길 때 도착 차로에 필요한 빈 거리
 SIDE_CLEAR = 1.05                           # 옮길 차로는 옆~앞 이 거리까지 비어 있어야 한다
 SIDE_BEHIND = -0.10                         # 옆 차로 확인을 시작하는 위치 (라이다보다 뒤 -). 지나친 장애물은 곧 시야(좌우 110도)에서 사라진다
+SIDE_PASSED = 0.10                          # 옆 장애물의 끝이 라이다 앞 이 거리 안까지 왔고
+SIDE_GAP = 0.18                             # 차 옆면과 이만큼 떨어져 있으면 지나친 것으로 본다 (꺾는 동안 차 뒤쪽이 닿지 않는다)
+CAR_HALF_WIDTH = 0.11
 GAIN_MIN = 0.45                             # 옮길 차로가 내 차로보다 이만큼은 더 비어 있어야 한다
 GUARD_HALF = 0.15                           # 정면 통로 반폭 (차 반폭 0.11 + 여유)
 GUARD_DIST = 0.30                           # 정면 통로 안 이 거리(라이다 기준)에 물체가 있으면 위치 추정과 상관없이 선다
@@ -95,6 +100,7 @@ STUCK_FRAMES = 25                           # 정지 상태가 이만큼(약 1.2
 REVERSE_MIN = 0.25                          # 최소 후진 거리 [m]
 REVERSE_MAX = 1.20                          # 최대 후진 거리 [m]
 REVERSE_KEEP = 0.35                         # 지나온 길 중 이만큼은 남기고 후진 (라이다는 뒤를 못 본다)
+REVERSE_GO_AHEAD = 0.90                     # 후진 중 옮길 길이 보여도, 앞 장애물과 이만큼 벌어질 때까지는 더 물러난다 (넉넉히 꺾으려고)
 V_REVERSE = 0.12
 ARRIVE_TOL = 0.10                           # 목표 차로 가운데에서 이 안이면 옮기기 끝
 V_KEEP, V_CHANGE, V_SLOW = 0.22, 0.20, 0.12
@@ -380,7 +386,10 @@ def lane_free(ranges, angle_min, angle_increment, range_min, c, th):
         in_lane = (np.abs(lateral - center) <= LANE_HALF) & (np.abs(lateral) <= ROAD_HALF)
         d = np.sort(along[in_lane & (along > 0.10) & (along < LIDAR_MAX)])
         ahead.append(float(d[1]) if d.size >= 2 else LIDAR_MAX)       # 점 2개 이상일 때만 (잡음 1개는 무시)
-        d = np.sort(along[in_lane & (along > SIDE_BEHIND) & (along < LIDAR_MAX)])
+        # 옆~앞: 거의 다 지나친 장애물(끝이 라이다 바로 앞까지 왔고 차 옆면과 떨어져 있음)은 세지 않는다.
+        # 예전에는 끝이 라이다 뒤 10 cm 로 빠질 때까지 기다려, 그 사이 앞 장애물이 가까워져 못 옮겼다 (11/15 실차)
+        passed = (along < SIDE_PASSED) & (np.abs(lateral - c) - CAR_HALF_WIDTH >= SIDE_GAP)
+        d = np.sort(along[in_lane & (along > SIDE_BEHIND) & (along < LIDAR_MAX) & ~passed])
         side.append(float(d[1]) if d.size >= 2 else LIDAR_MAX)
     return ahead, side
 
@@ -397,6 +406,7 @@ class Planner:
     def __init__(self):
         self.target: Optional[int] = None
         self.changing = False
+        self.tight = False           # 앞 장애물이 가까운 상태에서 옮기는 중 (급하게 꺾는다)
         self._goal_clear = 0         # 갈림길 방향 옆 차로가 연속으로 비어 보인 프레임 수
 
     def _escape(self, cur, c, ahead, side, goal):
@@ -438,7 +448,7 @@ class Planner:
             self._goal_clear = 0
             return Plan(self.target, V_SLOW, 'CHANGE' if self.changing else 'KEEP', '라이다 없음 -> 서행')
         if self.changing and abs(c - LANE_CENTER[self.target]) <= ARRIVE_TOL:
-            self.changing = False
+            self.changing = self.tight = False
         cur = self.target
         if ahead[cur] >= BLOCK_DIST:
             if self.changing:
@@ -465,6 +475,7 @@ class Planner:
         # cur 가 막힘 (가는 중이든 옮기는 중이든)
         best = self._escape(cur, c, ahead, side, goal)
         if best is not None:
+            self.tight = ahead[cur] < TIGHT_BELOW        # 앞이 가까운 채로 빠져나감 -> 급하게 꺾는다
             self.target, self.changing = best, True
             return Plan(best, V_CHANGE, 'CHANGE', f'차로 {cur} 앞 {ahead[cur]:.2f} m 막힘 -> 차로 {best}')
         if ahead[cur] < STOP_DIST and abs(c - LANE_CENTER[cur]) < LANE_HALF:
@@ -570,8 +581,9 @@ class ThreeLane:
         self.reverse_count = 0
         self.gave_up = False         # 후진해도 길이 없었음 -> 그 자리에 선다
         self.dead_lane = None        # 막혔던 차로
+        self.reverse_saw_way = False # 이번 후진 중에 옮길 길이 보인 적이 있다
         self.stuck = 0               # 정지 상태가 이어진 프레임 수
-        self.lane_run = 1.0          # 지금 목표 차로로 정한 뒤 앞으로 간 거리 (이만큼은 뒤가 비어 있다).
+        self.lane_run = 1.0          # 지금 차로에 들어선 뒤(옮기기를 마친 뒤) 곧게 간 거리 (이만큼은 뒤가 비어 있다).
                                      # 처음에는 지나온 길 1.0 m 가 비어 있다고 본다
         self._last_target = None
         self._wall_side = 0.0        # 노란 선 벽에 걸려 있는 쪽 (+1 왼쪽 선, -1 오른쪽 선, 0 없음)
@@ -623,7 +635,7 @@ class ThreeLane:
         self.lane_run = max(0.0, self.lane_run + ds)
         self.road.predict(ds, dyaw)
 
-    def _recover(self, plan, out) -> bool:
+    def _recover(self, plan, out, ahead=None) -> bool:
         """막혀서 선 상태가 이어지면 지나온 길로 조금 후진해 다시 길을 찾는다. True 면 후진 명령을 냈다."""
         if plan.target != self._last_target:
             if self._last_target is not None:
@@ -640,7 +652,16 @@ class ThreeLane:
         if self.reversing:
             # 뒤로 물러나 앞이 비어 보이는 것은 '갈 수 있다'가 아니다. 다른 차로로 옮길 수 있어야 한다
             can_go = plan.state == 'CHANGE' and plan.target != self.dead_lane
-            if can_go and self.reverse_done >= REVERSE_MIN:
+            gap = ahead[self.dead_lane] if (ahead is not None and self.dead_lane is not None) else LIDAR_MAX
+            if can_go and self.reverse_done >= REVERSE_MIN and (
+                    gap >= REVERSE_GO_AHEAD or self.reverse_done >= self.reverse_room):
+                self.reversing, self.stuck = False, 0
+                return False
+            if can_go:
+                self.reverse_saw_way = True
+            elif self.reverse_saw_way:
+                # 길이 보였다가 다시 닫혔다 (방금 피한 옆 장애물 옆으로 되돌아옴). 더 물러나면 손해 ->
+                # 여기서 후진을 끝내고, 다시 천천히 다가가다 길이 열리는 순간 나간다
                 self.reversing, self.stuck = False, 0
                 return False
             if self.reverse_done >= self.reverse_room:
@@ -662,6 +683,7 @@ class ThreeLane:
             self.gave_up, self.dead_lane = True, plan.target
             return False
         self.reversing, self.reverse_done, self.reverse_room = True, 0.0, room
+        self.reverse_saw_way = False
         self.dead_lane = plan.target
         self.reverse_count += 1
         out.speed, out.steer, out.state = -V_REVERSE, 0.0, 'REVERSE'
@@ -699,15 +721,20 @@ class ThreeLane:
             ahead[1], side[1] = min(ahead[1], island), min(side[1], island)
         plan = self.planner.update(lane, self.road.c, ahead, side, goal, have_scan=scan is not None,
                                    may_center=goal is None)
+        if self.planner.changing and not self.reversing:
+            self.lane_run = 0.0                  # 옮기는 중에 지나온 길은 곧지 않다 -> 똑바로 후진하면 방금 피한 장애물에 닿는다
         if out.front < GUARD_DIST and plan.speed > 0.0:
             # 위치를 잘못 알아 '빈 차로'라고 믿고 장애물로 가는 것을 막는다 (11/15 06:01 실차: 장애물을 밀고 지나감)
             plan = Plan(plan.target, 0.0, 'STOP', f'정면 {out.front:.2f} m 에 물체 -> 정지')
         out.ok = True
         out.speed, out.state, out.reason = plan.speed, plan.state, plan.reason
-        out.steer = steer_to_lane(self.road.c, self.road.th, plan.target,
-                                  LOOKAHEAD_CHANGE if plan.state == 'CHANGE' else LOOKAHEAD)
+        if plan.state != 'CHANGE':
+            lookahead = LOOKAHEAD
+        else:
+            lookahead = LOOKAHEAD_TIGHT if self.planner.tight else LOOKAHEAD_CHANGE
+        out.steer = steer_to_lane(self.road.c, self.road.th, plan.target, lookahead)
         out.steer = limit_heading(out.steer, self.road.th)
-        if self._recover(plan, out):
+        if self._recover(plan, out, ahead):
             out.wall = None                      # 후진 중에는 조향을 풀고 곧게 물러난다
         elif wall is not None:
             out.steer = wall[0]
@@ -721,7 +748,8 @@ class ThreeLane:
 # ---------------------------------------------------------------------------
 # simple_lane.py 와 잇는 부분: 언제 3차선 주행을 켜고 끌지
 # ---------------------------------------------------------------------------
-SIGN_MIN_H = 27.0          # 표지판 상자 높이 [px]. 이보다 작게(= 약 2 m 보다 멀리) 보일 때 읽은 값은 쓰지 않는다
+SIGN_MIN_H = 33.0          # 표지판 상자 높이 [px]. 이보다 작게(= 약 1.7 m 보다 멀리) 보일 때 읽은 값은 쓰지 않는다
+                           # (27 로 두었더니 실차에서 B 표지판을 29 px 에서 A 로 먼저 확정했다가 바꿈 - 11/15)
 SIGN_WINDOW = 5            # 최근 이만큼 중
 SIGN_NEED = 4              # 이만큼이 같은 쪽이면 확정
 ARM_AFTER_M = 1.4          # M7 시작(횡단보도 출발) 후 이만큼 간 뒤부터 3차선 선을 찾는다 (그 전은 코너)
