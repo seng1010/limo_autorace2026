@@ -339,6 +339,54 @@ def test_refined_forward_search_finds_narrow_band_and_reuses_checks():
     assert all(call.kwargs['horizon'] == .20 for call in seen.call_args_list)
 
 
+def test_entry_far_search_is_time_and_odometry_bounded():
+    window = cone_corridor.EntrySearchWindow()
+    for phase in ('watch_entry', 'approach', 'exit_lane', 'off'):
+        window.set_phase(phase)
+        assert not window.allows(10., (0., 0., 0.))
+    window.set_phase('cone')
+    assert not window.allows(10., None)
+    for i in range(8):
+        assert window.allows(10.1+i*.1, (i*.05, 0., 0.))
+    assert not window.allows(11., (.41, 0., 0.))
+    assert not window.allows(11.1, (0., 0., 0.))
+    window.set_phase('cone')
+    assert window.allows(10., (0., 0., 0.))
+    assert not window.allows(18., (0., 0., 0.))
+    window.set_phase('cone')
+    assert window.allows(10., (0., 0., 0.))
+    assert not window.allows(10.1, None)
+    assert not window.allows(10.2, (0., 0., 0.))
+
+
+def test_far_entry_gate_does_not_leak_into_history_and_is_bounded():
+    planner = Planner(P)
+    far = observed([(1.33,-.30), (1.33,.30)])
+    pose = (.1, 0., 0.)
+    assert planner.update(A, far, 1., pose)['state'] == 'no_gate'
+    z = planner.update(A, far, 1.1, pose, entry_far_search=True)
+    assert z['state'] == 'tracking' and z['entry_far_gate']
+    assert 1.15 < z['road']['gate'][0] <= 1.40
+    assert planner.memory is None and planner.previous_curvature is None
+    assert planner.update(A, far, 1.2, pose)['state'] == 'no_gate'
+    too_far = observed([(1.47,-.30), (1.47,.30)])
+    assert planner.update(A, too_far, 1.3, pose, entry_far_search=True)['speed'] == 0.
+
+
+def test_far_entry_never_overrides_ordinary_gate_or_safety_checks():
+    pose = (.1, 0., 0.)
+    cones = [(1.33,-.30), (1.33,.30)]
+    both = observed(cones + [(.65,-.30), (.65,.30)])
+    old = Planner(P).update(A, both, 1., pose)
+    new = Planner(P).update(A, both, 1., pose, entry_far_search=True)
+    assert old['curvature'] == new['curvature']
+    assert not new.get('entry_far_gate')
+    with patch.object(cone_corridor, '_prefix_observed', return_value=False):
+        assert Planner(P).update(A, observed(cones), 1., pose, entry_far_search=True)['speed'] == 0.
+    blocked = observed(cones + [(.40, 0.)])
+    assert Planner(P).update(A, blocked, 1., pose, entry_far_search=True)['speed'] == 0.
+
+
 def test_normal_pass_never_pays_for_dense_search():
     z = plan_m8(A, observed(parallel()), P)
     assert z['state'] == 'tracking'

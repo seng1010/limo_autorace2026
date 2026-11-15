@@ -17,7 +17,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Header, String
 
 from jetracer_ros2.cone_corridor import (
-    Params, Planner, ResumeGate, approach_clearance_low, checked_exit_lane, safe_lane_arc)
+    EntrySearchWindow, Params, Planner, ResumeGate, approach_clearance_low, checked_exit_lane, safe_lane_arc)
 from jetracer_ros2.m8_entry import (
     M8_APPROACH_RISK_TOPIC, M8_COMMAND_TIMEOUT, M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
     M8_LANE_HINT_TOPIC, M8_LANE_PATH_FRAME, M8_LANE_PATH_TOPIC, M8_PHASE_TOPIC,
@@ -58,6 +58,7 @@ class MissionConeAvoidNode(Node):
             target_hold_sec=p('target_hold_sec'), target_hold_distance=p('target_hold_distance_m'),
             rear_from_odom_x=p('rear_from_odom_x_m'))
         self.planner = Planner(self.config)
+        self.entry_search = EntrySearchWindow()
         self.odom = deque(maxlen=100)
         self.create_subscription(Odometry, p('odom_topic'), self._observe_odom, 5)
         self.scan_timeout, self.scan_frame = p('scan_timeout_sec'), p('scan_frame')
@@ -166,6 +167,7 @@ class MissionConeAvoidNode(Node):
     def _change_phase(self, msg):
         if msg.data != self.m8_phase:
             self.planner.reset()
+            self.entry_search.set_phase(msg.data)
             preflight_handoff = self.m8_phase == 'preflight' and msg.data == 'approach'
             self.m8_phase = msg.data
             if not preflight_handoff:
@@ -253,7 +255,9 @@ class MissionConeAvoidNode(Node):
         started = time.monotonic_ns()
         try:
             ranges = np.asarray(scan.ranges, dtype=float)
-            result = self.planner.update(a, ranges, stamp/1e9, self._pose_at_scan(stamp))
+            pose = self._pose_at_scan(stamp)
+            result = self.planner.update(a, ranges, stamp/1e9, pose,
+                entry_far_search=self.entry_search.allows(stamp/1e9, pose))
             if self.exit_check:
                 result['scan'] = a, ranges
             speed = result['speed']
@@ -311,6 +315,7 @@ class MissionConeAvoidNode(Node):
                 goal=result['road']['gate'].tolist() if result and result['road'] else None,
                 clearance=result.get('min_clearance') if result else None,
                 search_stage=result.get('search_stage') if result else None,
+                entry_far_gate=bool(result and result.get('entry_far_gate')),
                 candidate_count=result.get('candidate_count', 0) if result else 0), separators=(',', ':'))))
 
 

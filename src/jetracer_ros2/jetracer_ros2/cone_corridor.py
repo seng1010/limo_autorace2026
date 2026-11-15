@@ -16,6 +16,10 @@ COARSE_CURVATURE_SAMPLES = 11
 REFINED_CURVATURE_SAMPLES = 81
 TARGET_CURVATURE_WEIGHT = .08
 GATE_ALIGNMENT_WEIGHT = .45
+GATE_MAX_X_M = 1.15
+ENTRY_GATE_MAX_X_M = 1.40
+ENTRY_SEARCH_MAX_M = .40
+ENTRY_SEARCH_MAX_SEC = 8.
 
 @dataclass(frozen=True)
 class Params:
@@ -234,13 +238,49 @@ def _rotation(yaw):
     return np.array([[c, -s], [s, c]])
 
 
-def _gates(groups, points, p):
+class EntrySearchWindow:
+    """One odom-bounded window after cone ownership; planner resets do not reopen it."""
+    def __init__(self):
+        self.set_phase('off')
+
+    def set_phase(self, phase):
+        self.open = phase == 'cone'
+        self.started = None
+        self.last_xy = None
+        self.travel = 0.
+
+    def allows(self, stamp, pose):
+        if not self.open:
+            return False
+        if self.started is None:
+            self.started = stamp
+        if not 0. <= stamp-self.started < ENTRY_SEARCH_MAX_SEC:
+            self.open = False
+            return False
+        if pose is None or not np.isfinite(pose).all():
+            # Once armed, a gap in odometry could hide travel; do not rearm.
+            if self.last_xy is not None:
+                self.open = False
+            return False
+        xy = np.asarray(pose[:2])
+        if self.last_xy is not None:
+            step = math.hypot(*(xy-self.last_xy))
+            self.travel += step
+            if self.travel >= ENTRY_SEARCH_MAX_M or step > .12:
+                self.open = False
+                return False
+        self.last_xy = xy
+        return True
+
+
+def _gates(groups, points, p, *, far_gates=None):
     """Observed cross-track pairs, not independent left/right line fits."""
     ids = [i for i,g in enumerate(groups) if -.08 < np.median(g[:,0]) < 1.50]
     # Bound pairing work, never discard raw returns from collision checks.
     ids = sorted(ids,key=lambda i:np.linalg.norm(np.median(groups[i],axis=0)))[:24]
     centers = {i: np.median(groups[i],axis=0) for i in ids}
     margin = p.half_width+p.cone_padding+p.clearance
+    max_x = GATE_MAX_X_M if far_gates is None else ENTRY_GATE_MAX_X_M
     choices = []
     for ai,i in enumerate(ids):
         for j in ids[ai+1:]:
@@ -265,7 +305,7 @@ def _gates(groups, points, p):
             middle = (left+right)/2
             gate = station*forward+middle*across
             x,y = gate
-            if not .12 <= x <= 1.15 or abs(y) > .95*x:
+            if not .12 <= x <= max_x or abs(y) > .95*x:
                 continue
             # Never connect two cones over a third obstacle in the opening.
             inside = (abs(points@forward-station) < .10) & (abs(points@across-middle) < margin)
@@ -279,7 +319,11 @@ def _gates(groups, points, p):
                   +.35*abs(normal_angle-2*angle)+.45*abs(distance-.62))
             # Advance toward the next gate once the bumper reaches this one.
             cost += .22 if x < p.front+.05 else 0.
-            choices.append(dict(gate=gate, normal=forward, ends=np.array([l,r]), cost=cost))
+            candidate = dict(gate=gate, normal=forward, ends=np.array([l,r]), cost=cost)
+            if x <= GATE_MAX_X_M:
+                choices.append(candidate)
+            else:
+                far_gates.append(candidate)
     return sorted(choices,key=lambda g:g['cost'])[:8]
 
 
@@ -307,7 +351,7 @@ class Planner:
         pose[:2] += _rotation(pose[2])@np.array([self.p.rear_from_odom_x,0.])
         return pose
 
-    def update(self, a, ranges, stamp, odom_pose=None):
+    def update(self, a, ranges, stamp, odom_pose=None, *, entry_far_search=False):
         p = self.p
         pose = self._pose(odom_pose)
         if not math.isfinite(stamp) or (self.last_time is not None and
@@ -325,7 +369,9 @@ class Planner:
         measured=np.isfinite(ranges)&(ranges>=a[5])&(ranges<=a[6])
         if np.count_nonzero(measured) < 4:
             return {**result,'state':'insufficient_scan'}
-        gates = _gates(groups,points,p)
+        far_gates = []
+        gates = (_gates(groups, points, p, far_gates=far_gates) if entry_far_search
+                 else _gates(groups, points, p))
         predicted = None
         if self.memory is not None and pose is not None:
             m = self.memory
@@ -349,6 +395,10 @@ class Planner:
                 result['points'] = points
         if len(points) and swept_clearance(points,np.zeros((1,3)),p) < p.clearance:
             return {**result,'state':'footprint_blocked'}
+        using_far = not gates and bool(far_gates)
+        if using_far:
+            gates = sorted(far_gates, key=lambda g:g['cost'])[:8]
+            result['entry_far_gate'] = True
         if not gates:
             return result
         result['road'] = gates[0]
@@ -407,11 +457,14 @@ class Planner:
             result['search_stage'] = 'refined'
         result['candidate_count'] = len(checked)
         if best is None:
-            self.previous_curvature = None
+            if not using_far:
+                self.previous_curvature = None
             return {**result,'state':'path_blocked'}
         _,g,clear,k,arc = best
-        self.previous_curvature = k
-        if pose is not None and not g.get('predicted'):
+        # An entry-only candidate may not leak into normal temporal tracking.
+        if not using_far:
+            self.previous_curvature = k
+        if pose is not None and not using_far and not g.get('predicted'):
             rot = _rotation(pose[2])
             self.memory = dict(stamp=stamp,pose=pose.copy(),
                 world_gate=g['gate']@rot.T+pose[:2],world_normal=g['normal']@rot.T,
