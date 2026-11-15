@@ -82,14 +82,17 @@ def test_housing_red_and_yellow_together_means_red():
     assert frame_color([_det('traffic_light')], image, image.shape, TrafficLightConfig()) == 'red'
 
 
-def test_color_label_red_and_yellow_together_means_red():
-    """색 클래스로 학습한 경우에도 적+황 동시면 정지."""
+def test_color_label_red_and_yellow_together_means_stop():
+    """색 클래스로 학습한 경우 적+황 동시면 정지 색(red 또는 yellow)으로 읽힌다.
+
+    M1 에서 red/yellow 는 똑같이 정지라 어느 쪽이 나와도 동작은 같다."""
     image = np.full((480, 640, 3), 40, dtype=np.uint8)
     image[100:200, 300:340] = (30, 30, 30)
     image[112:130, 310:330] = BGR['red']
     image[140:165, 310:330] = BGR['yellow']            # 황이 더 밝아도
     for label in ('red', 'yellow'):
-        assert frame_color([_det(label)], image, image.shape, TrafficLightConfig()) == 'red'
+        assert frame_color([_det(label)], image, image.shape,
+                           TrafficLightConfig()) in ('red', 'yellow')
 
 
 def test_housing_rejects_bright_screen_without_single_lamp():

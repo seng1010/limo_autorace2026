@@ -17,6 +17,12 @@
 
 적+황이 동시에 켜지면 'red'(정지)로 본다. 어느 해석이든(전환 중 / "곧 출발") 멈추는 게
 맞고, 녹색이 확정될 때까지 기다리면 된다. 세 칸이 모두 밝으면 광고 모니터로 보고 버린다.
+황색도 M1 에서는 정지이므로, 적·황이 섞여 어느 쪽인지 애매하면 정지 쪽으로 판단한다.
+
+[실물 보정 2026-11-15] 실제 트랙 사진 14장(적5·황4·녹5, autorace_all_v2.pt)으로 맞춘 값:
+LED 가 과노출되어 중심이 하얗게 날아가고 채도가 13~95 까지 떨어진다. 그래서
+lit_saturation_min 을 90 -> 30 으로 낮췄고, 켜진 불빛 비율도 박스(함체 전체) 기준
+0.004~0.029 로 작아서 min_lit_ratio 를 0.04 -> 0.002 로 낮췄다. 이 값으로 14/14 정답.
 
 광고 모니터: YOLO 학습 데이터에 모니터 화면을 배경(라벨 없음)으로 넣어서 1차로 거르고,
 여기서는 HSV 확인과 연속 프레임 조건으로 한 번 더 거른다.
@@ -42,7 +48,7 @@ LABEL_TO_COLOR = {
 class TrafficLightConfig:
     # (B) 몸체 클래스용: 함체를 세로 3칸으로 나눠 켜진 칸을 찾는다
     housing_lamp_margin: float = 0.08    # 함체 위·아래 테두리로 보고 버릴 비율
-    housing_min_lit_ratio: float = 0.03  # 한 칸이 '켜졌다'고 볼 최소 밝은 픽셀 비율
+    housing_min_lit_ratio: float = 0.003  # 한 칸이 '켜졌다'고 볼 최소 밝은 픽셀 비율
     housing_lit_dominance: float = 1.5   # 1등 칸이 2등 칸보다 이 배 이상 밝아야 인정
     # (A) 색 클래스를 **함체 전체 박스**로 학습한 경우, 켜진 칸 위치까지 함께 확인한다.
     # 광고 모니터처럼 박스가 고르게 밝으면 칸 구분이 안 돼 걸러진다. 실물 확인 후 켤 것
@@ -50,9 +56,9 @@ class TrafficLightConfig:
     min_confidence: float = 0.45
     min_area_ratio: float = 0.0005       # 박스 면적 / 화면 면적. 이보다 작으면 무시
     verify_hsv: bool = True
-    min_lit_ratio: float = 0.04          # 박스 안에서 그 색 불빛 픽셀 비율 최소값
+    min_lit_ratio: float = 0.002         # 박스 안에서 그 색 불빛 픽셀 비율 최소값
     lit_value_min: int = 150             # 켜진 불빛 밝기(V) 최소
-    lit_saturation_min: int = 90         # 켜진 불빛 채도(S) 최소
+    lit_saturation_min: int = 30         # 켜진 불빛 채도(S) 최소
     confirm_frames: int = 3
     lost_timeout_sec: float = 1.0
 
@@ -151,11 +157,11 @@ def frame_color(detections: List[dict], image_bgr: Optional[np.ndarray],
         ratios = lit_color_ratios(image_bgr, bbox, config)
         if ratios[color] < config.min_lit_ratio:
             return None
-        # 적+황 동시 점등이면 라벨이 뭐든, 둘 중 뭐가 더 밝든 정지
-        both = min(ratios['red'], ratios['yellow']) >= config.min_lit_ratio
-        if color in ('red', 'yellow') and both and ratios['green'] < config.min_lit_ratio:
-            return 'red'
         if ratios[color] < max(ratios.values()):
+            # 라벨과 실제 최다 색이 다름. 둘 다 적·황이면(적+황 동시 점등 등) 정지로 본다
+            top = max(ratios, key=ratios.get)
+            if color in ('red', 'yellow') and top in ('red', 'yellow'):
+                return 'red'
             return None
         if config.verify_lamp_position and housing_color(image_bgr, bbox, config) != color:
             return None                                 # 칸 위치가 라벨 색과 안 맞음
