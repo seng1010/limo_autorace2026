@@ -20,7 +20,7 @@ from launch_ros.actions import Node
 #     ros2 run jetracer_ros2 simple_lane drive --topic inference/cmd_vel
 #
 # 3차선(M7):
-#   기본은 기존 three_lane.py. 단순 버전(three_lane_simple.py)으로 돌리려면  lane3:=simple
+#   기본은 가려짐을 고려하는 mapped. 비교 실행: lane3:=simple 또는 lane3:=full
 
 
 def generate_launch_description():
@@ -32,8 +32,8 @@ def generate_launch_description():
             'lane', default_value='true',
             description='false: 차선 노드를 이 launch 에서 켜지 않음 (따로 켤 때)'),
         DeclareLaunchArgument(
-            'lane3', default_value='full',
-            description='full: 기존 3차선(three_lane.py) / simple: 단순 버전(three_lane_simple.py)'),
+            'lane3', default_value='mapped',
+            description='mapped: M7 가려짐 지도 / full: 기존 3차선 / simple: 단순 버전'),
         DeclareLaunchArgument(
             'section', default_value='true',
             description='false: 구간 전환 노드(section_node)를 켜지 않음'),

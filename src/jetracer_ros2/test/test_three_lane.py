@@ -259,7 +259,7 @@ def test_no_lane_decision_without_lidar():
     planner = T.Planner()
     for _ in range(30):                   # 라이다가 아직 없으면 '전부 비었음'으로 보고 옮기지 않는다
         plan = planner.update(1, 0.0, [far] * 3, [far] * 3, goal=2, have_scan=False)
-        assert plan.target == 1 and plan.speed == T.V_SLOW
+        assert plan.target == 1 and plan.speed == 0.0
 
 
 def test_dead_end_is_not_entered_again_after_reversing():

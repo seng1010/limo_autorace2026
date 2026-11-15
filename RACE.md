@@ -3,6 +3,9 @@
 `m1-traffic-light`(매니저 + M1 + M3 + 정지선) + `common-yolo` 를 합치고, 조향 수정과 `simple_lane` 노드를 넣은 브랜치.
 main 과 기존 브랜치는 건드리지 않았다. 차에서 확인된 것만 여기에 올린다.
 
+> `fix-m7-occlusion-planning`의 M7 변경은 별도 검증 브랜치다. 새 기본값 `lane3:=mapped`,
+> 정확히 7개 장애물·가려짐·합류 시뮬레이션 결과 및 실차 검증 범위는 [M7_OCCLUSION.md](M7_OCCLUSION.md)를 참고한다.
+
 ## 1. 조향 수정 (모든 노드에 해당)
 
 | | 최대 조향에서 실제 회전반경 |

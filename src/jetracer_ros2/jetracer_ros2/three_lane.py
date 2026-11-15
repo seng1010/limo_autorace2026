@@ -619,7 +619,7 @@ class Planner:
             self.target = lane
         if not have_scan:
             self._goal_clear = 0
-            return Plan(self.target, V_SLOW, 'CHANGE' if self.changing else 'KEEP', '라이다 없음 -> 서행')
+            return Plan(self.target, 0.0, 'STOP', '라이다 없음 -> 정지')
         if self.changing and abs(c - LANE_CENTER[self.target]) <= ARRIVE_TOL:
             self.changing = self.tight = False
         cur = self.target
@@ -647,7 +647,7 @@ class Planner:
                 if reach is not None:    # 옮기는 중에도 경로를 다시 본다: 좁아졌으면 더 급하게, 그래도 안 되면 천천히
                     how = reach(cur)
                     if how is None:
-                        return Plan(cur, V_SLOW, 'CHANGE', f'차로 {lane} -> {cur} (경로가 좁아 서행)')
+                        return Plan(cur, 0.0, 'STOP', f'차로 {lane} -> {cur} 경로 검증 실패')
                     if how[0] == 'tight':
                         self.tight = True
                 return Plan(cur, V_CHANGE, 'CHANGE', f'차로 {lane} -> {cur}')
@@ -824,6 +824,8 @@ class ThreeLane:
         self._reset_recovery()
 
     def step(self, image, pose, scan, goal=None, tune=None) -> ThreeLaneOutput:
+        if pose is None or scan is None:
+            return ThreeLaneOutput(ok=True, speed=0.0, state='STOP', reason='M7 sensor unavailable')
         self._advance(pose)
         # 선으로 맞춘 지 얼마 안 됐으면 그 방향 근처만, 아니면 넓게 찾는다 (odom 방향이 틀어졌을 수 있다)
         prior = self.road.th if (self.road.c is not None and self.road.blind_m < 0.3) else None
@@ -918,7 +920,7 @@ class ThreeLane:
             return False
         room = min(REVERSE_MAX, self.lane_run - REVERSE_KEEP)
         if self._points is not None:                 # 지나오며 기억한 점으로 확인한 만큼은 곧게 물러날 수 있다
-            room = max(room, reverse_room(*self._points, REVERSE_SEEN_MAX))
+            room = min(room, reverse_room(*self._points, REVERSE_SEEN_MAX))
         if self.reverse_count >= 2 or room < REVERSE_MIN:
             self.gave_up, self.dead_lane = True, plan.target
             return False
@@ -1195,8 +1197,7 @@ class Lane3Supervisor:
         if not out.ok:
             self._lost += 1
             if self._lost >= LOST_FRAMES:
-                self.mode, self.message = 'done', '[3차선] 끝: 차로 선을 못 찾음 -> 기본 주행'
-                return None
+                return dict(v=0.0, steer=0.0, state='LANE3', reason='M7 localisation lost; waiting', note='L3 localise')
             if out.front < GUARD_DIST:
                 return dict(v=0.0, steer=self.steer, state='LANE3',
                             reason=f'3차선: 위치 모름, 정면 {out.front:.2f} m 에 물체 -> 정지', note='L3 lost guard')
@@ -1223,8 +1224,7 @@ class Lane3Supervisor:
             self.message = f"[3차선] 끝: 갈림길 {'A(왼쪽)' if out.target == 0 else 'B(오른쪽)'} 차로 진입 -> 기본 주행"
             return None
         if self.tl.travel >= MAX_ON_M:
-            self.mode, self.message = 'done', '[3차선] 끝: 최대 거리 -> 기본 주행'
-            return None
+            return dict(v=0.0, steer=0.0, state='LANE3', reason='M7 exit not confirmed', note='L3 exit_unconfirmed')
         if out.wall is not None:
             self.steer = out.steer                # 벽 반사는 늦추지 않는다
         else:

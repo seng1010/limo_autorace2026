@@ -184,16 +184,18 @@ class SimpleThreeLane:
             self.pose = pose
             return
         ds = math.hypot(pose[0] - self.pose[0], pose[1] - self.pose[1])
+        forward = ((pose[0]-self.pose[0])*math.cos(self.pose[2])
+                   + (pose[1]-self.pose[1])*math.sin(self.pose[2]))
         dyaw = pose[2] - self.pose[2]
         self.pose = pose
         if ds > 0.5 or abs(dyaw) > 1.0:           # odom 튐
             return
-        if self.reversing:                          # odom 거리에는 부호가 없다
+        if forward < 0:                            # actual motion, including coast after a stop
             ds = -ds
             self.reverse_left -= abs(ds)
         # odom 기준점(뒤 차축)을 옮긴 뒤 카메라 투영점을 다시 구한다. 차가 틀어지면 카메라는 뒤 차축보다 옆으로 더 움직인다
         psi0 = -self.th
-        psi_mid = psi0 - dyaw / 2.0
+        psi_mid = psi0 + dyaw / 2.0
         so = self.s - CAM_FROM_ODOM * math.cos(psi0) + ds * math.cos(psi_mid)
         yo = self.c - CAM_FROM_ODOM * math.sin(psi0) + ds * math.sin(psi_mid)
         self.th -= dyaw
@@ -216,7 +218,7 @@ class SimpleThreeLane:
         -> 어느 선이 어느 차로 선인지 헷갈려 한 차로씩 튀는 일(three_lane.py 의 실패)은 생기지 않는다.
         odom 방향은 차로를 바꾸며 크게 틀 때 수십 cm 씩 밀린다 (11/15 실차: 오른쪽 -> 가운데로 옮기는 동안 0.5 m)."""
         if not obs or abs(self.th) > LINE_TH_MAX:
-            return
+            return False
         short = obs.get('short', ())
         ystart = obs.get('ystart') or {}
         beside_island = self.s > self.island_at - 0.30
@@ -237,7 +239,7 @@ class SimpleThreeLane:
             if abs(best - self.c) <= LINE_GATE:
                 cands.append((best, min(n, 300) * (1.0 if abs(u) <= 0.45 else 0.4)))
         if not cands:
-            return
+            return False
         cands.sort()
         half, acc = sum(w for _, w in cands) / 2.0, 0.0
         for cc, w in cands:                        # 가중 중앙값 (선 하나가 틀려도 끌려가지 않게)
@@ -245,6 +247,7 @@ class SimpleThreeLane:
             if acc >= half:
                 break
         self.c += LINE_GAIN * (cc - self.c)
+        return True
 
     def _camera_island(self, obs):
         if not obs or obs.get('yellow_xy') is None:
@@ -455,9 +458,8 @@ class SimpleThreeLane:
         self.map.virtual = [(self.island_at, self.island_at + ISLAND_LEN, -T.ISLAND_HALF + 0.05, T.ISLAND_HALF - 0.05)]
         self.map.refresh()
         if scan is None:
-            self.state, self.reason = 'NOSCAN', '라이다 없음 -> 서행'
-            speed = V_SLOW
-            self.ahead = [self._free(j) for j in range(3)]
+            self.state, self.reason = 'NOSCAN', '라이다 없음 -> 정지'
+            return dict(v=0.0, steer=0.0, state=self.state, reason=self.reason, wall_text='')
         else:
             speed = self._decide(goal, front)
         merging = self.s >= self.island_at + MERGE_TURN
@@ -514,7 +516,7 @@ class Lane3SimpleSupervisor:
     def __init__(self, forced=False, goal=None):
         self.fitter = T.LineFitter()
         self._look = T.ThreeLane()          # 진입 판단(look)에만 쓴다
-        self.core = SimpleThreeLane()
+        self.core = self.make_core()
         self.forced = forced
         self.mode = 'armed' if forced else 'off'
         self.sign_goal = goal
@@ -529,13 +531,18 @@ class Lane3SimpleSupervisor:
         self.last = None                    # see_signs 가 쓰는 .ok / .c
         self.message = ''
 
+    smooth_output = True
+
+    def make_core(self):
+        return SimpleThreeLane()
+
     def set_mission(self, name):
         if self.forced:
             return
         if name == 'M7':
             if self.mode == 'off':
                 self.mode, self.arm_travel = 'armed', 0.0
-                self.core = SimpleThreeLane()
+                self.core = self.make_core()
                 self._white = self._both = self._lost = 0
                 self._seen = None
                 self.vote.reset()
@@ -553,6 +560,7 @@ class Lane3SimpleSupervisor:
     def see_signs(self, detections):
         if self.fixed_goal or self.mode not in ('armed', 'on'):
             return
+        detections = [dict(d, label={'sign_a': 'a', 'sign_b': 'b'}.get(d.get('label'), d.get('label'))) for d in detections]
         signs = [d for d in detections if d.get('label') in ('a', 'b') and len(d.get('bbox', ())) == 4]
         if not signs:
             return
@@ -593,7 +601,7 @@ class Lane3SimpleSupervisor:
         # 시작선 기준 위치: 흰 점선 시작이 앞 d m 에 보이면 지금 s = 0.30 - d. 이미 점선 안이면 점선 시작으로 본다
         d = dash_start_ahead(self._look.fitter, self._look.fitter.fit(image, th0, tune))
         s0 = START_TO_DASH - d if d is not None else START_TO_DASH
-        self.core = SimpleThreeLane()
+        self.core = self.make_core()
         self.core.start(c, th0, pose, s0)
         self.mode = 'on'
         self.message = (f'[3차선S] 시작: 차로 {self.core.lane} (가운데에서 {c * 100:+.0f} cm, '
@@ -623,16 +631,15 @@ class Lane3SimpleSupervisor:
         core = self.core
         if pose is None:
             self._lost += 1
-            if self._lost >= LOST_FRAMES:
-                self.mode, self.message = 'done', '[3차선S] 끝: odom 없음 -> 기본 주행'
-                return None
+            if hasattr(core, 'diagnostics'):
+                core.diagnostics.update(state='NO_ODOM',reason='odometry unavailable; M7 retained')
             return dict(v=0.0, steer=self.steer, state='LANE3', reason='3차선S: odom 없음 -> 정지', note='L3S noodom')
         self._lost = 0
         out = core.step_obs(obs, pose, scan, self.sign_goal, now)
         self.last = type('L', (), dict(ok=True, c=core.c))()
         if core.s < core.island_at + MERGE_TURN and core.lane in (0, 2):
             self.side_taken = core.lane                 # 갈림길에서 고른 쪽 (기록용)
-        merged = (core.s >= core.island_at + MERGE_END + 0.20 and core.lane == 1
+        merged = (out['v'] > 0 and core.s >= core.island_at + MERGE_END + 0.20 and core.lane == 1
                   and abs(core.c) < 0.12 and abs(core.th) < math.radians(15.0))
         self._both = self._both + 1 if merged else 0
         if self._both >= EXIT_FRAMES:
@@ -641,9 +648,8 @@ class Lane3SimpleSupervisor:
             self.message = f"[3차선S] 끝: 갈림길 {side} 지나 합류 완료 -> 기본 주행"
             return None
         if core.travel >= MAX_ON_M:
-            self.mode, self.message = 'done', '[3차선S] 끝: 최대 거리 -> 기본 주행'
-            return None
-        if out['wall_text']:
+            return dict(v=0.0, steer=0.0, state='LANE3', reason='M7 exit not confirmed', note='L3S exit_unconfirmed')
+        if out['wall_text'] or not self.smooth_output:
             self.steer = out['steer']
         else:
             self.steer += 0.7 * (out['steer'] - self.steer)

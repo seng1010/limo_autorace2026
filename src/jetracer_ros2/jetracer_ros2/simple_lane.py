@@ -138,6 +138,7 @@ PP_DISAGREE = math.radians(5.0)   # 경로 추종이 커브 반대 방향으로 
 MEM = False                     # 실행할 때 mem 을 붙이면 켜짐
 LANE3 = False                   # 실행할 때 lane3 를 붙이면 처음부터 3차선 선을 찾아 3차선 주행 (3차선 입구에 놓고 시험)
 LANE3_GOAL = None               # goal_a / goal_b 를 붙이면 갈림길 방향을 정해 둠 (표지판 인식 없이 시험)
+LANE3_MAPPED = False
 LANE3_SIMPLE = False            # l3simple 을 붙이면 3차선을 단순 버전(three_lane_simple.py: odom 위치 + 라이다 지도)으로
 SCAN_TOPIC = '/scan'
 ODOM_TOPIC = '/odom'
@@ -1707,8 +1708,16 @@ def run_ros(mode, topic, record=False):
             self.warned_odom = 0.0
             self.scan = None                    # 가장 최근 라이다 (ranges, angle_min, angle_increment, range_min)
             self.scan_t = 0.0
+            self.scan_id = 0
             self.lane3 = None
-            if LANE3_SIMPLE and _three_lane_simple is not None:
+            if LANE3_MAPPED:
+                try:
+                    from jetracer_ros2.m7_navigation import MappedSupervisor
+                except ImportError:
+                    from m7_navigation import MappedSupervisor
+                self.lane3 = MappedSupervisor(forced=LANE3, goal=LANE3_GOAL)
+                print('[M7] visibility map + footprint planner')
+            elif LANE3_SIMPLE and _three_lane_simple is not None:
                 self.lane3 = _three_lane_simple.Lane3SimpleSupervisor(forced=LANE3, goal=LANE3_GOAL)
                 print('[3차선] 단순 버전(three_lane_simple.py)을 씁니다')
             elif _three_lane is not None:
@@ -1729,6 +1738,8 @@ def run_ros(mode, topic, record=False):
                                    'ld,vmax,ff_cm,latch,latch_deg,curve_v,smooth,in_deg,out,'
                                    'ox,oy,oyaw_deg,mem_used,mem_deg,mem_err_cm,mem_ld,single_w_cm,note\n')
                 print(f'[기록] 프레임과 상태를 저장합니다: {self.rec_dir}')
+            self.m7_log = (open(os.path.join(self.rec_dir, 'm7.jsonl'), 'w')
+                           if self.rec_dir is not None and LANE3_MAPPED else None)
             qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                              history=HistoryPolicy.KEEP_LAST, depth=1)
             self.create_subscription(CompressedImage, IMAGE_TOPIC, self.on_image, qos)
@@ -1766,6 +1777,9 @@ def run_ros(mode, topic, record=False):
         def on_scan(self, msg):
             self.scan = (np.asarray(msg.ranges, dtype=np.float32), msg.angle_min, msg.angle_increment, msg.range_min)
             self.scan_t = time.monotonic()
+            self.scan_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            self.scan_range_max = float(msg.range_max)
+            self.scan_id += 1
 
         def on_mission(self, msg):
             self.lane3.set_mission(msg.data.strip())
@@ -1787,6 +1801,10 @@ def run_ros(mode, topic, record=False):
                 if topic != ODOM_TOPIC:
                     print(f'\n[odom] {ODOM_TOPIC} 가 아직 없어 {topic} 를 씁니다')
             elif topic != self.odom_src:
+                # A map cannot survive an unaligned odom-frame switch. During M7
+                # keep the selected stream; stale odom stops M7 until it returns.
+                if self.lane3 is not None and self.lane3.mode in ('armed', 'on'):
+                    return
                 if topic == ODOM_TOPIC:
                     why = f'{ODOM_TOPIC} 가 들어와서'
                 elif now - self.odom_seen.get(self.odom_src, 0.0) > 1.0:
@@ -1893,7 +1911,10 @@ def run_ros(mode, topic, record=False):
                 if self.lane3 is not None:
                     both = (res['left'] is not None and res['right'] is not None
                             and 0.42 <= res['lane_width'] <= 0.62)
-                    scan = self.scan if now - self.scan_t < 0.5 else None
+                    scan = self.scan if now - self.scan_t < (0.25 if LANE3_MAPPED else 0.5) else None
+                    if scan is not None and LANE3_MAPPED:
+                        scan_pose = self.pose_for(self.scan_stamp, now)
+                        scan = None if scan_pose is None else scan + (scan_pose, self.scan_id, self.scan_range_max)
                     l3 = self.lane3.step(image, pose, scan, both, self.tune)
                     if self.lane3.message:
                         print('\n' + self.lane3.message)
@@ -1908,6 +1929,11 @@ def run_ros(mode, topic, record=False):
             if self.drive and now - self.t_start < RESET_SEC:
                 cmd = (0.0, 0.0, 'WAIT', '시작 전 조향 초기화')
             self.send(cmd[0], cmd[1])
+            if self.m7_log is not None and self.lane3.mode == 'on':
+                self.m7_log.write(json.dumps(dict(t=now-self.t_start, scan_id=self.scan_id,
+                                                  odom_source=self.odom_src, v=cmd[0], steer=cmd[1],
+                                                  **self.lane3.core.diagnostics)) + '\n')
+                self.m7_log.flush()
             if self.rec_dir is not None:
                 self.rec_n += 1
                 cv2.imwrite(os.path.join(self.rec_dir, f'{self.rec_n:05d}.jpg'), image,
@@ -1978,6 +2004,8 @@ def run_ros(mode, topic, record=False):
         if node.rec_csv is not None:
             node.rec_csv.close()
             print(f'[기록 저장됨] {node.rec_dir}  ({node.rec_n}프레임)')
+        if node.m7_log is not None:
+            node.m7_log.close()
         try:
             cv2.destroyAllWindows()
         except cv2.error:
@@ -1988,8 +2016,10 @@ def run_ros(mode, topic, record=False):
 
 
 def main():
-    global STEER_GAIN, PRESET, MEM, LANE3, LANE3_GOAL, LANE3_SIMPLE, ODOM_TOPIC
+    global STEER_GAIN, PRESET, MEM, LANE3, LANE3_GOAL, LANE3_SIMPLE, LANE3_MAPPED, ODOM_TOPIC
     args = sys.argv[1:]
+    if 'l3mapped' in args:
+        LANE3_MAPPED = True
     if 'l3simple' in args:
         LANE3_SIMPLE = True
     if 'mem' in args:
