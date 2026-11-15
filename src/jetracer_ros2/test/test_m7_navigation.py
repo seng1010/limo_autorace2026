@@ -338,3 +338,149 @@ def test_stopped_recovery_can_use_two_weak_but_consistent_dashes(monkeypatch):
         sup._try_relocalise(np.zeros((480,640,3),np.uint8),(0,0,0),None,n*.1)
     assert sup.core.c==pytest.approx(.14) and sup.core.relocalizations==1
     assert central_white_pair(obs,.95) is None  # Entry still requires stronger evidence.
+
+
+def identified_scan(pose, objects, ident):
+    x,y,th = pose
+    scan = raycast(x+S.CAM_FROM_ODOM*math.cos(th),y+S.CAM_FROM_ODOM*math.sin(th),th,objects)
+    return scan+(pose,ident)
+
+
+def test_new_obstacle_stops_even_when_another_lane_remains_drivable(monkeypatch):
+    k = core()
+    pose = (0.,0.,0.)
+    assert k.step_obs(white_observation(),pose,identified_scan(pose,[],1),now=0.)['v']>0
+    objects = [rect(1.1,.535,0.,.32,.55)]
+    with monkeypatch.context() as patch:
+        def premature_plan(*args):
+            pytest.fail('braking command must be returned before expensive replanning')
+        patch.setattr(k.planner,'plan',premature_plan)
+        out = k.step_obs(white_observation(),pose,identified_scan(pose,objects,2),now=.1)
+    assert out['v']==0 and out['state']=='OBSERVE_STOP'
+    assert k.review_active and k.review_count==1 and k.visibility.hits
+    assert k.diagnostics['new_obstacle_points']
+    # A held image/scan cannot stand in for independent observations.
+    for i in range(2,12):
+        out = k.step_obs(white_observation(),pose,identified_scan(pose,objects,2),now=i*.1)
+        assert out['v']==0
+    # With fresh scans and unchanged geometry, resume without repeated stops.
+    for i in range(12,24):
+        out = k.step_obs(white_observation(),pose,identified_scan(pose,objects,i),now=i*.1)
+    assert out['v']>0 and not k.review_active and k.review_count==1
+
+
+def test_zero_command_does_not_count_coasting_as_a_stopped_vehicle():
+    k = core()
+    pose = (0.,0.,0.)
+    k.step_obs(white_observation(),pose,identified_scan(pose,[],1),now=0.)
+    objects = [rect(1.1,.535,0.,.32,.55)]
+    for i in range(1,12):
+        pose = (i*.015,0.,0.)
+        out = k.step_obs(white_observation(),pose,identified_scan(pose,objects,i+1),now=i*.1)
+        assert out['v']==0 and k.review_active
+    for i in range(12,24):
+        out = k.step_obs(white_observation(),pose,identified_scan(pose,objects,i+1),now=i*.1)
+    assert out['v']>0
+
+
+def test_new_face_of_known_object_invalidating_command_corridor_stops():
+    k = core()
+    k.pose = (5.,-2.,1.3)
+    path,_ = k.planner.rollout(k.s,k.c,k.th,1)
+    k._command_world,k._command_angles = k.planner.world_path(path[:20],k)
+    k.visibility.sequence = 2
+    k.visibility.novel = np.empty((0,2))  # Close to previously mapped surface.
+    k.visibility.added = k._command_world[10:11].copy()
+    assert len(k.discovery())==1
+
+
+def test_reverse_completion_requires_rest_and_replanning_before_forward():
+    k = core()
+    pose = k.pose
+    k.review_active,k.reversing,k.reverse_since,k.reverse_left = True,True,0.,0.
+    out = k.step_obs(white_observation(),pose,identified_scan(pose,[],1),now=.1)
+    assert out['v']==0 and out['state']=='OBSERVE_STOP' and k.review_active
+    for i in range(2,6):
+        out = k.step_obs(white_observation(),pose,identified_scan(pose,[],i),now=i*.1)
+        assert out['v']==0
+    for i in range(6,12):
+        out = k.step_obs(white_observation(),pose,identified_scan(pose,[],i),now=i*.1)
+    assert out['v']>0
+
+
+def test_old_free_cells_cannot_certify_reverse_space():
+    m = VisibilityMap()
+    m.free[(10,0)] = 0.
+    point = np.array([[.525,.025]])
+    assert m.known(point,1.)[0]
+    assert not m.known(point,1.,m.cfg.reverse_free_age)[0]
+
+
+def test_sensor_loss_breaks_stop_confirmation():
+    k = core()
+    k.begin_review('new obstacle',0.)
+    pose = k.pose
+    for i in range(4):
+        assert k.step_obs(white_observation(),pose,identified_scan(pose,[],i),now=i*.1)['v']==0
+    assert k.step_obs(white_observation(),pose,None,now=.4)['state']=='NO_SCAN'
+    out = k.step_obs(white_observation(),pose,identified_scan(pose,[],5),now=.5)
+    assert out['v']==0 and out['state']=='OBSERVE_STOP'
+
+
+def test_new_detection_with_braking_inertia_waits_until_vehicle_has_stopped():
+    k = core()
+    x,velocity,rest_time = 0.,.18,0.
+    k.step_obs(white_observation(),(x,0,0),identified_scan((x,0,0),[],0),now=0.)
+    objects = [rect(1.2,0.,0.,.32,.55)]
+    resumed = False
+    for i in range(1,40):
+        pose = (x,0.,0.)
+        out = k.step_obs(white_observation(),pose,identified_scan(pose,objects,i),now=i*.1)
+        if out['v']>0:
+            assert velocity==0 and rest_time>=.5
+            resumed = True
+            break
+        # Independent longitudinal response: a zero command does not stop instantly.
+        next_velocity = max(0.,velocity-.35*.1)
+        x += (velocity+next_velocity)*.05
+        velocity = next_velocity
+        rest_time = rest_time+.1 if velocity==0 else 0.
+        assert x+.26 < 1.2-.16  # Front bumper remains short of obstacle front.
+    assert resumed and 0 < x < .06
+
+
+def test_blocked_front_can_reverse_only_after_rest_with_fresh_rear_observation():
+    k = core()
+    objects = [rect(.65,y,0.,.32,.55) for y in T.LANE_CENTER]
+    x = 0.
+    reversed_at = None
+    stopped_after_reverse = False
+    for i in range(70):
+        pose = (x,0.,0.)
+        scan = raycast(x+S.CAM_FROM_ODOM+S.LIDAR_AHEAD,0.,0.,objects,
+                       n=720,a0=-math.pi,inc=2*math.pi/720)+(pose,i)
+        out = k.step_obs(white_observation(),pose,scan,now=i*.1)
+        if out['v']<0:
+            if reversed_at is None:
+                reversed_at = i*.1
+                assert reversed_at>=k.config.wait_before_reverse
+            x += out['v']*.1
+        elif reversed_at is not None:
+            assert out['v']==0 and out['state']=='OBSERVE_STOP'
+            stopped_after_reverse = True
+            break
+    assert reversed_at is not None and stopped_after_reverse
+    assert -.27 < x < 0 and k.reverse_count==1
+
+
+def test_supervisor_odom_loss_interrupts_reverse_and_requires_rest_again():
+    sup = MappedSupervisor(forced=True)
+    sup.mode = 'on'
+    sup.core.start(0.,0.,(0.,0.,0.),1.)
+    sup.core.review_active,sup.core.reversing,sup.core.reverse_since = True,True,0.
+    sup.core.reverse_left = .2
+    assert sup.step_obs(None,None,None,False,now=.1)['v']==0
+    assert not sup.core.reversing
+    pose = (0.,0.,0.)
+    out = sup.step_obs(white_observation(),pose,identified_scan(pose,[],1),False,now=.2)
+    assert out['v']==0 and sup.core.state=='OBSERVE_STOP'

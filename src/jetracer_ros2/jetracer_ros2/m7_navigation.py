@@ -19,7 +19,7 @@ except ImportError:
     import three_lane as T
     import three_lane_simple as S
 
-CONTROLLER_VERSION = 'm7-mapped-20261116-entry-recovery'
+CONTROLLER_VERSION = 'm7-mapped-20261116-stop-replan'
 
 
 class EntryLineFitter(T.LineFitter):
@@ -74,6 +74,10 @@ class NavigationConfig:
     reverse_timeout: float = 4.0
     reverse_attempts: int = 3
     blind_distance: float = 1.2
+    discovery_radius: float = .15
+    review_rest_sec: float = .5
+    review_departure_m: float = .45
+    reverse_free_age: float = .3
 
 
 class VisibilityMap:
@@ -90,11 +94,15 @@ class VisibilityMap:
         self.clears = {}
         self.last_scan_id = None
         self.points = np.empty((0, 2))
+        self.sequence = 0
+        self.added = np.empty((0, 2))
+        self.novel = np.empty((0, 2))
 
     def keys(self, points):
         return np.floor(np.asarray(points) / self.cfg.resolution).astype(np.int64)
 
     def observe(self, scan, pose, now):
+        self.added = self.novel = np.empty((0, 2))
         if scan is None or pose is None:
             return False
         ranges = np.asarray(scan[0], dtype=float)
@@ -124,6 +132,14 @@ class VisibilityMap:
         hit = np.isfinite(measured) & (measured <= max_range)
         ends = origin + directions[hit] * limits[hit, None]
         occupied = {tuple(k) for k in self.keys(ends)}
+        added = occupied - self.hits.keys()
+        self.added = (np.asarray(list(added),dtype=float).reshape(-1,2)+.5)*self.cfg.resolution
+        # Nearby new cells are often another face of the same object or lidar
+        # quantisation. Still put every cell in collision checking below.
+        self.novel = self.added
+        if len(self.added) and len(self.points):
+            distance = np.linalg.norm(self.added[:,None,:]-self.points[None,:,:],axis=2)
+            self.novel = self.added[distance.min(axis=1)>self.cfg.discovery_radius]
         distances = np.arange(0.0, self.cfg.scan_range, self.cfg.resolution * 0.5)
         # Leave the endpoint cell (and its quantisation uncertainty) un-cleared.
         stop = limits - np.where(hit, self.cfg.resolution * 1.5, 0.0)
@@ -152,6 +168,7 @@ class VisibilityMap:
         self.points = ((np.asarray(list(self.hits), dtype=float) + 0.5) * self.cfg.resolution
                        if self.hits else np.empty((0, 2)))
         self.last_scan_id = scan_id
+        self.sequence += 1
         return True
 
     def mark_footprint(self, pose, now):
@@ -166,10 +183,11 @@ class VisibilityMap:
             if k not in self.hits:
                 self.free[k] = now
 
-    def known(self, points, now):
+    def known(self, points, now, max_age=None):
         shape = np.asarray(points).shape[:-1]
         keys = self.keys(np.asarray(points).reshape(-1, 2))
-        return np.array([k not in self.hits and now - self.free.get(k, -1e9) <= self.cfg.free_age
+        age = self.cfg.free_age if max_age is None else max_age
+        return np.array([k not in self.hits and now - self.free.get(k, -1e9) <= age
                          for k in map(tuple, keys)]).reshape(shape)
 
 
@@ -218,8 +236,8 @@ class FootprintPlanner:
             path.append((x, y, psi))
         return np.asarray(path), command
 
-    def assess(self, path, core, now, reverse=False):
-        cfg = self.cfg
+    @staticmethod
+    def world_path(path, core):
         # Convert a road-frame plan to the fixed odom frame. Camera corrections
         # therefore move the road model, never smear stored lidar obstacles.
         yaw = core.pose[2]
@@ -231,6 +249,25 @@ class FootprintPlanner:
         world = cam + np.column_stack((delta[:, 0] * cs - delta[:, 1] * sn,
                                        delta[:, 0] * sn + delta[:, 1] * cs))
         angles = path[:, 2] + road_yaw
+        return world, angles
+
+    def touches(self, points, world, angles):
+        cfg = self.cfg
+        if not len(points) or not len(world):
+            return np.zeros(len(world),dtype=bool)
+        c,s = np.cos(angles),np.sin(angles)
+        margin = cfg.margin+cfg.resolution*math.sqrt(2)/2
+        dx,dy = points[:,0]-world[:,0,None],points[:,1]-world[:,1,None]
+        bx = dx*c[:,None]+dy*s[:,None]-cfg.body_center
+        by = -dx*s[:,None]+dy*c[:,None]
+        return np.any((np.abs(bx)<=cfg.body_length/2+margin)&
+                      (np.abs(by)<=cfg.body_width/2+margin),axis=1)
+
+    def assess(self, path, core, now, reverse=False):
+        cfg = self.cfg
+        world,angles = self.world_path(path,core)
+        yaw = core.pose[2]
+        cam = np.asarray(core.pose[:2])+S.CAM_FROM_ODOM*np.array([math.cos(yaw),math.sin(yaw)])
         c, s = np.cos(angles), np.sin(angles)
         margin = cfg.margin + cfg.resolution * math.sqrt(2) / 2
         collision = np.zeros(len(path), dtype=bool)
@@ -289,7 +326,7 @@ class FootprintPlanner:
         local = np.asarray(local)
         sample = world[:, None, :] + np.stack((local[:, 0] * c[:, None] - local[:, 1] * s[:, None],
                                                 local[:, 0] * s[:, None] + local[:, 1] * c[:, None]), axis=2)
-        observed = core.visibility.known(sample, now)
+        observed = core.visibility.known(sample, now, cfg.reverse_free_age if reverse else None)
         # Overlap with the current body envelope is not newly swept space.
         # Do not label its unobserved surroundings free in the persistent map.
         delta0 = sample - np.asarray(core.pose[:2])
@@ -336,7 +373,7 @@ class FootprintPlanner:
                     # Prefer a safe view from between the two white dashed lines
                     # while the sign is unknown. A blocked centre still loses.
                     score -= 0.20 * abs(first-1)
-                candidates.append(dict(first=first, second=second, path=path, steer=steer,
+                candidates.append(dict(first=first, second=second, delay=delay, path=path, steer=steer,
                                        certified=certified, collision=collision, score=score,
                                        merge_offset=offset,merge_look=look,
                                        command_lane=1 if self.merge_distance<=0 else first))
@@ -369,6 +406,72 @@ class MappedThreeLane(S.SimpleThreeLane):
         self.goal = None
         self.recovery_status = ''
         self.relocalizations = 0
+        self.review_active = False
+        self.review_count = 0
+        self.review_reason = ''
+        self.review_points = []
+        self._rest_anchor = None
+        self._rest_last = None
+        self._rest_since = None
+        self._rest_scans = 0
+        self._rest_seq = -1
+        self._plan_key = None
+        self._plan_seq = -1
+        self._plan_count = 0
+        self._command_world = np.empty((0,2))
+        self._command_angles = np.empty(0)
+
+    def begin_review(self, reason, now, points=()):
+        self.review_active = True
+        self.review_count += 1
+        self.review_reason = reason
+        self.review_points = np.asarray(points).reshape(-1,2).round(3).tolist()
+        self._rest_anchor = None
+        self._plan_key,self._plan_count = None,0
+        self.reversing = False
+        self.stop_since = now
+        self._command_world = np.empty((0,2))
+        self._command_angles = np.empty(0)
+
+    def review_stationary(self, pose, now):
+        # A zero command is not proof of rest: include coast and callback gaps.
+        if (self._rest_anchor is None or self._rest_last is None or
+                not 0 < now-self._rest_last <= .25 or
+                math.hypot(pose[0]-self._rest_anchor[0],pose[1]-self._rest_anchor[1])>.005 or
+                abs(pose[2]-self._rest_anchor[2])>math.radians(1)):
+            self._rest_anchor,self._rest_since,self._rest_scans = pose,now,0
+            self._rest_seq = self.visibility.sequence
+            self._plan_key,self._plan_count = None,0
+        elif self._rest_seq != self.visibility.sequence:
+            self._rest_scans += 1
+            self._rest_seq = self.visibility.sequence
+        self._rest_last = now
+        return now-self._rest_since>=self.config.review_rest_sec and self._rest_scans>=2
+
+    def discovery(self):
+        m = self.visibility
+        if m.sequence<=1:
+            return np.empty((0,2))  # First scan establishes the stationary entry map.
+        novel = m.novel
+        if len(novel):
+            yaw = self.pose[2]+self.th
+            cam = np.asarray(self.pose[:2])+S.CAM_FROM_ODOM*np.array([
+                math.cos(self.pose[2]),math.sin(self.pose[2])])
+            delta = novel-cam
+            along = delta[:,0]*math.cos(yaw)+delta[:,1]*math.sin(yaw)
+            lateral = self.c-delta[:,0]*math.sin(yaw)+delta[:,1]*math.cos(yaw)
+            novel = novel[(along>-.10)&(along<self.config.horizon)&
+                          (np.abs(lateral)<self.config.road_half+self.config.margin)]
+        # Even an extension of a known object must stop us if it invalidates
+        # the previously cleared command corridor. Use its fixed odom frame.
+        if self.planner.touches(m.added,self._command_world,self._command_angles).any():
+            return m.added
+        return novel
+
+    def review_diagnostics(self):
+        return dict(review_active=self.review_active,review_count=self.review_count,
+                    review_reason=self.review_reason,new_obstacle_points=self.review_points,
+                    stationary_scans=self._rest_scans,plan_confirmations=self._plan_count)
 
     def stopped_diagnostics(self, state, reason, pose_valid=True):
         # A stopped frame must not retain the last moving frame's pose/path.
@@ -378,7 +481,8 @@ class MappedThreeLane(S.SimpleThreeLane):
                                 line_accepted=False,pose_valid=pose_valid,observed_m=None,collision_m=None,
                                 next_lane=None,path=[],obstacles=[],reverse_count=self.reverse_count,
                                 occupied_cells=len(self.visibility.hits),free_cells=len(self.visibility.free),
-                                recovery=self.recovery_status,relocalizations=self.relocalizations)
+                                recovery=self.recovery_status,relocalizations=self.relocalizations,
+                                **self.review_diagnostics())
 
     def _camera_island(self, obs):
         before = self.island_s
@@ -430,6 +534,9 @@ class MappedThreeLane(S.SimpleThreeLane):
         def stopped(state, reason):
             self.state, self.reason = state, reason
             self.reversing = False
+            self.planner.previous_steer = 0.
+            if state in ('NO_ODOM','ODOM_JUMP','NO_SCAN','LOCALISE'):
+                self._rest_anchor = None
             self.stopped_diagnostics(state,reason,state not in ('NO_ODOM','ODOM_JUMP'))
             self.diagnostics['line_accepted'] = bool(line_accepted)
             return dict(v=0.0, steer=0.0, state=state, reason=reason, wall_text='')
@@ -453,10 +560,16 @@ class MappedThreeLane(S.SimpleThreeLane):
         if not self.visibility.observe(scan, pose, now):
             return stopped('NO_SCAN', 'lidar unavailable/invalid; M7 retained')
         self.visibility.mark_footprint(pose, now)
+        discoveries = self.discovery()
+        if len(discoveries):
+            self.begin_review('new occupied space; stop before changing the route',now,discoveries)
         merge_reacquire = self.island_at+1.1 < self.s < self.island_at+S.MERGE_END+.6
         if self.blind_travel > (2.0 if merge_reacquire else self.config.blind_distance):
             return stopped('LOCALISE', 'lane observations needed; M7 retained')
         self.goal = goal
+        # Return the braking command before running the candidate search.
+        if self.review_active and not self.reversing and not self.review_stationary(pose,now):
+            return stopped('OBSERVE_STOP','waiting for odom rest and new lidar scans')
         speed, steer, best = self.planner.plan(self, now, goal)
         reading = goal is None and abs(self.c)<T.SIGN_CENTER_HALF and 0<self.island_at-self.s<S.READ_SLOW_BELOW
         if reading:
@@ -464,15 +577,29 @@ class MappedThreeLane(S.SimpleThreeLane):
         self.lane = self.planner.target
         self.changing = abs(self.c - T.LANE_CENTER[self.lane]) > S.ARRIVE_TOL or abs(self.th) > math.radians(10)
         self.ahead = [max((a['certified'] for a in self.planner.candidates if a['command_lane']==j),default=0.) for j in range(3)]
+        if not self.review_active and not self.reversing and speed<=0:
+            self.begin_review('forward corridor unavailable; stop before recovery',now)
+            return stopped('OBSERVE_STOP',self.review_reason)
+        if self.review_active and not self.reversing:
+            if best['certified']>=self.config.review_departure_m:
+                key = (best['first'],best['second'],best['delay'],best['merge_offset'],best['merge_look'])
+                if self._plan_seq != self.visibility.sequence:
+                    self._plan_count = self._plan_count+1 if key==self._plan_key else 1
+                    self._plan_key,self._plan_seq = key,self.visibility.sequence
+                if self._plan_count<2:
+                    return stopped('REPLAN','confirming a departure corridor in two scans')
+                self.review_active = False
+            else:
+                self._plan_key,self._plan_count = None,0
+                speed = 0.
         if self.reversing:
             # Every reverse tick needs a fresh footprint check and a time bound.
             path, _ = self.planner.rollout(self.s, self.c, self.th, self.lane, reverse=True)
             room = self.planner.assess(path, self, now, reverse=True)[0]
             if (self.reverse_left <= 0.0 or now - self.reverse_since >= self.config.reverse_timeout
                     or room < 0.15):
-                self.reversing = False
-                self.stop_since = now
-                speed, steer = 0.0, 0.0
+                self.begin_review('reverse ended; stop and re-observe before departure',now)
+                return stopped('OBSERVE_STOP',self.review_reason)
             else:
                 speed, steer = -self.config.reverse_speed, 0.0
         elif speed <= 0.0:
@@ -490,6 +617,9 @@ class MappedThreeLane(S.SimpleThreeLane):
         else:
             self.stop_since = None
         self.planner.previous_steer = steer
+        if speed>0:
+            count = max(0,int(min(best['certified']-self.config.stop_buffer,1.5)/self.config.step))
+            self._command_world,self._command_angles = self.planner.world_path(best['path'][:count],self)
         self.state = 'REVERSE' if self.reversing else ('CHANGE' if speed > 0 and self.changing else
                                                      'KEEP' if speed > 0 else 'BLOCKED')
         self.reason = f"observed={best['certified']:.2f}m collision={best['collision']:.2f}m next={best['second']}"
@@ -502,7 +632,7 @@ class MappedThreeLane(S.SimpleThreeLane):
                                 goal=goal, reading_sign=reading,
                                 pose_valid=True,recovery=self.recovery_status,relocalizations=self.relocalizations,
                                 obstacles=self.obstacle_report(), path=best['path'].round(3).tolist(),
-                                reason=self.reason)
+                                reason=self.reason,**self.review_diagnostics())
         return dict(v=speed, steer=steer, state=self.state, reason=self.reason, wall_text='')
 
 
@@ -625,5 +755,9 @@ class MappedSupervisor(S.Lane3SimpleSupervisor):
 
     def step_obs(self, obs, pose, scan, both_yellow, now=None):
         if pose is None:
+            # The parent returns early without calling core.step_obs.
+            self.core._rest_anchor = None
+            self.core.reversing = False
+            self.core.planner.previous_steer = 0.
             self.core.stopped_diagnostics('NO_ODOM','odometry unavailable; M7 retained',False)
         return super().step_obs(obs,pose,scan,both_yellow,now)
