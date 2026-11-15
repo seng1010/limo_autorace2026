@@ -221,13 +221,14 @@ class M8StopLineObserver:
         from std_msgs.msg import Float32
         stamp=header.stamp.sec*10**9+header.stamp.nanosec
         age=(self.node.get_clock().now().nanoseconds-stamp)/1e9
-        if self.phase not in ('watch_entry','preflight','approach','cone') or stamp<=0 or not 0<=age<=.25:
+        if self.phase not in ('watch_entry','preflight','approach','cone','exit_prepare','exit_lane') or stamp<=0 or not 0<=age<=.25:
             return
         # During cone ownership keep the original entry-anchor fallback;
         # the relaxed geometry is for M2 approach only.
         if self.phase == 'cone':
             entry=detect_m8_stop_line(image,self.config.roi_top_ratio,allow_oblique=False)
-        else:
+            self.entry.publish(Float32(data=self.model.front_distance(entry.row_ratio) if entry else -1.))
+        elif self.phase in ('watch_entry','preflight','approach'):
             entry,partial=detect_m8_entry_candidates(image,self.config.roi_top_ratio)
             cue=PointStamped()
             cue.header.stamp=header.stamp
@@ -235,8 +236,8 @@ class M8StopLineObserver:
             cue.point.x=(self.model.front_distance(partial.row_ratio)
                          if partial and self.model.calibrated else -1.)
             self.partial.publish(cue)
-        self.entry.publish(Float32(data=self.model.front_distance(entry.row_ratio) if entry else -1.))
-        if self.phase=='cone':
+            self.entry.publish(Float32(data=self.model.front_distance(entry.row_ratio) if entry else -1.))
+        if self.phase in ('cone','exit_prepare','exit_lane'):
             detected=detect_m8_exit_stop_line(image)
             if detected:
                 msg=PointStamped()

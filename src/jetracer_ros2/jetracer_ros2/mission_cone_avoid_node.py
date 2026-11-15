@@ -9,7 +9,7 @@ from collections import deque
 import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import PolygonStamped, Twist, TwistStamped
+from geometry_msgs.msg import PointStamped, PolygonStamped, Twist, TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -21,9 +21,11 @@ from jetracer_ros2.cone_corridor import (
     lane_forward_recovery, safe_lane_arc)
 from jetracer_ros2.m8_entry import (
     M8_APPROACH_RISK_TOPIC, M8_COMMAND_TIMEOUT, M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
+    M8_EXIT_PROGRESS_TOPIC,
     M8_LANE_HINT_TOPIC, M8_LANE_PATH_FRAME, M8_LANE_PATH_TOPIC, M8_PHASE_TOPIC,
     M8_PLANNER_TIMING_TOPIC, M8_RECOVERY_COMMAND_TOPIC, MAX_M8_SPEED, MIN_M8_SPEED, OBSERVED_LANE_TOPIC)
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
+from jetracer_ros2.m8_exit_memory import ConeExitMemory
 
 
 def _stamp_ns(stamp):
@@ -59,6 +61,7 @@ class MissionConeAvoidNode(Node):
             target_hold_sec=p('target_hold_sec'), target_hold_distance=p('target_hold_distance_m'),
             rear_from_odom_x=p('rear_from_odom_x_m'))
         self.planner = Planner(self.config)
+        self.exit_memory = ConeExitMemory(self.config)
         self.entry_search = EntrySearchWindow()
         self.odom = deque(maxlen=100)
         self.create_subscription(Odometry, p('odom_topic'), self._observe_odom, 5)
@@ -83,6 +86,7 @@ class MissionConeAvoidNode(Node):
             Twist, self.get_parameter('output_topic').value, 10)
         self.safe_cmd_pub = self.create_publisher(TwistStamped, p('validated_output_topic'), 1)
         self.exit_cmd_pub = self.create_publisher(TwistStamped, M8_EXIT_COMMAND_TOPIC, 1)
+        self.exit_progress_pub = self.create_publisher(PointStamped, M8_EXIT_PROGRESS_TOPIC, 1)
         self.recovery_pub = self.create_publisher(TwistStamped, M8_RECOVERY_COMMAND_TOPIC, 1)
         self.recovery_sent = False
         self.approach_risk_pub = self.create_publisher(Header, M8_APPROACH_RISK_TOPIC, 1)
@@ -169,15 +173,20 @@ class MissionConeAvoidNode(Node):
 
     def _change_phase(self, msg):
         if msg.data != self.m8_phase:
-            self.planner.reset()
-            self.entry_search.set_phase(msg.data)
+            inside = ('cone', 'exit_prepare', 'exit_lane')
+            exit_transition = self.m8_phase in inside and msg.data in inside
+            if not exit_transition:
+                self.planner.reset()
+                self.exit_memory.reset()
+                self.entry_search.set_phase(msg.data)
             preflight_handoff = self.m8_phase == 'preflight' and msg.data == 'approach'
             self.m8_phase = msg.data
             self._publish_recovery()
-            if not preflight_handoff:
+            if not preflight_handoff and not exit_transition:
                 self.exit_resume.update(False)
-            self.lane_center = None
-            self.lane_hint = None
+            if not exit_transition:
+                self.lane_center = None
+                self.lane_hint = None
 
     def _enable_exit_check(self, msg):
         self.exit_check = msg.data
@@ -212,7 +221,7 @@ class MissionConeAvoidNode(Node):
                         requested, result['points'], self.config):
                     risk = Header(stamp=stamp, frame_id=M8_LANE_PATH_FRAME)
 
-            if (not command[0] and self.m8_phase == 'exit_lane' and fresh(lidar)
+            if (not command[0] and self.m8_phase in ('exit_prepare', 'exit_lane') and fresh(lidar)
                     and self.lane_center is not None):
                 geom_stamp, points = self.lane_center
                 hint = next((m for m in (lane, self.lane_hint) if m is not None
@@ -265,6 +274,8 @@ class MissionConeAvoidNode(Node):
     def _watchdog(self):
         if self.last_scan is None or time.monotonic() - self.last_scan > self.scan_timeout:
             self.planner.reset()
+            self.exit_memory.reset()
+            self._publish_exit_progress()
             self._publish_exit()
             self._stop('scan_timeout')
             self._publish_recovery()
@@ -294,7 +305,10 @@ class MissionConeAvoidNode(Node):
             pose = self._pose_at_scan(stamp)
             result = self.planner.update(a, ranges, stamp/1e9, pose,
                 entry_far_search=self.entry_search.allows(stamp/1e9, pose),
-                recovery=self.motion_enabled and self.m8_phase == 'cone')
+                recovery=self.motion_enabled and self.m8_phase in ('cone', 'exit_prepare'))
+            if self.m8_phase in ('cone', 'exit_prepare', 'exit_lane'):
+                result['exit_progress'] = self.exit_memory.update(
+                    stamp/1e9, pose, result, (a, ranges))
             if self.exit_check:
                 result['scan'] = a, ranges
             speed = result['speed']
@@ -337,13 +351,14 @@ class MissionConeAvoidNode(Node):
             published_ns, command_stamp_ns = self._publish(state, reason)
         else:
             published_ns, command_stamp_ns = self._stop(reason, state)
+        self._publish_exit_progress(result, scan_stamp)
         exit_ms = None
         recovery = None
         if self.exit_check:
             t = time.monotonic_ns()
             recovery = self._publish_exit(result, scan_stamp)
             exit_ms = (time.monotonic_ns()-t)/1e6
-        if (self.m8_phase == 'cone' and result is not None
+        if (self.m8_phase in ('cone', 'exit_prepare') and result is not None
                 and result.get('recovery_curvature') is not None):
             recovery = result['recovery_curvature'], scan_stamp
         recovery_offered = self._publish_recovery(recovery)
@@ -359,7 +374,20 @@ class MissionConeAvoidNode(Node):
                 search_stage=result.get('search_stage') if result else None,
                 entry_far_gate=bool(result and result.get('entry_far_gate')),
                 recovery_offered=recovery_offered,
-                candidate_count=result.get('candidate_count', 0) if result else 0), separators=(',', ':'))))
+                candidate_count=result.get('candidate_count', 0) if result else 0,
+                exit_progress=result.get('exit_progress') if result else None), separators=(',', ':'))))
+
+    def _publish_exit_progress(self, result=None, scan_stamp=None):
+        if self.m8_phase not in ('cone', 'exit_prepare', 'exit_lane'):
+            return
+        status = result.get('exit_progress') if result else None
+        msg = PointStamped()
+        msg.header.frame_id = 'rear_axle'
+        msg.header.stamp = scan_stamp if scan_stamp is not None else self.get_clock().now().to_msg()
+        msg.point.x = float(bool(status and status['cleared']))
+        msg.point.y = float(status['gates']) if status else 0.
+        msg.point.z = float(status['rear_clearance'] or 0.) if status else 0.
+        self.exit_progress_pub.publish(msg)
 
 
 def main(args=None):

@@ -35,8 +35,9 @@
 | ARM_M8/M2_DONE/NEXT 또는 지정 거리로 준비 | 차선 인식 유지, LiDAR 검사한 접근 차선 명령 |
 | 준비 상태에서 콘 통과점 확보 | 첫 정지선 통과를 추가로 기다리지 않고 M8 콘 제어 |
 | 콘 내부 | 콘 명령만 사용, 없거나 오래되거나 0이면 정지 |
-| 서로 다른 출구 정지선 확인 | 새 관측 차선을 LiDAR로 검사하여 인계, 없으면 대기 |
-| 출구 선 통과 + 차선 진행 거리 충족 | 기존 순서의 다음 미션 |
+| 서로 다른 출구 정지선 또는 누적 콘·odom 통과 확인 | `exit_prepare`: 콘 제어를 유지하고 차선 연결 경로 병행 검사 |
+| 준비 상태에서 안전한 새 차선 명령 확보 | `exit_lane`: 차선으로 인계, 이후 차선 명령 유실은 정지 |
+| 출구 선 통과 또는 콘 통과 확인 + 차선 진행 거리 충족 | 기존 순서의 다음 미션 |
 
 `Planner → mission/cone/safe_cmd_vel(TwistStamped) → M8Control → mission_manager_node /cmd_vel → 기존 cmdvel_to_ackermann → /limo/ack_cmd`
 
@@ -146,6 +147,7 @@ control_mode=1에 한정하면 첫 bag은 273개 중 173→271, 둘째는 266개
 | mission_cone_avoid_node.py | 센서 수신, 단일 계획기, 시간 검사, 명령 발행 |
 | m8_control.py | 매니저 인계·ESTOP·진입/출구 |
 | m8_entry.py | 순수 명령/정지선 정책 |
+| m8_exit_memory.py | 최대 16개 관측 통로의 odom 좌표·차체 전체 통과 증거 (이동 허가와 분리) |
 | m8_observers.py | 기존 차선 결과와 해독된 영상에서 M8 관측 전달 |
 | params/m8.yaml | 콘 설정 |
 | launch/m8_cone.launch.py | 접근·콘·출구 시험과 bag 기록 |

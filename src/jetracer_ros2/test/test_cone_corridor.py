@@ -120,16 +120,16 @@ class TestConeCorridor(unittest.TestCase):
         self.assertIsNone(gate.line_s)
         self.assertEqual(gate.decide(2.0, True, True), 'search_exit')
 
-    def test_exit_owns_lane_only_after_distinct_line_pass_and_checked_lane(self):
+    def test_exit_prepares_then_owns_only_a_checked_lane(self):
         gate = M8ExitGate(.60, .30, .15)
         gate.reset(1.0)
         for t, s in enumerate((1.40, 1.41, 1.42)):
             gate.observe(s, 1.80-s, t*.05)
         self.assertAlmostEqual(gate.line_s, 1.80)
-        self.assertEqual(gate.decide(1.90, True, True), 'approach_exit')
+        self.assertEqual(gate.decide(1.90, True, False), 'prepare_exit')
+        self.assertFalse(gate.owns_lane)
         self.assertEqual(gate.decide(2.11, False, True), 'wait_odom')
-        self.assertEqual(gate.decide(2.11, True, False), 'wait_exit_lane')
-        self.assertEqual(gate.decide(2.05, True, True), 'wait_exit_lane')
+        self.assertEqual(gate.decide(2.11, True, False), 'prepare_exit')
         self.assertEqual(gate.decide(2.11, True, True), 'exit_lane')
         self.assertEqual(gate.decide(2.27, True, False), 'wait_exit_lane')
         self.assertEqual(gate.decide(2.27, True, True), 'complete')
@@ -146,20 +146,20 @@ class TestConeCorridor(unittest.TestCase):
         self.assertEqual(checked_exit_lane((.20,-.10), points, P, scan=unobserved), (0., 0.))
 
     def test_exit_detection_hands_over_before_passing_but_waits_without_a_safe_lane(self):
-        gate = M8ExitGate(.60, .30, .15, handoff_on_detection=True)
+        gate = M8ExitGate(.60, .30, .15)
         gate.reset(1.)
         self.assertFalse(gate.owns_lane)
         for t,s in enumerate((1.40, 1.41, 1.42)):
             gate.observe(s, 1.80-s, t*.05)
-        self.assertTrue(gate.owns_lane)
-        self.assertEqual(gate.decide(1.43, True, False), 'wait_exit_lane')
+        self.assertFalse(gate.owns_lane)
+        self.assertEqual(gate.decide(1.43, True, False), 'prepare_exit')
         self.assertEqual(gate.decide(1.43, True, True), 'exit_lane')
         self.assertEqual(gate.decide(1.65, True, False), 'wait_exit_lane')
         self.assertEqual(gate.decide(1.70, True, True), 'exit_lane')
         self.assertEqual(gate.decide(2.11, True, True), 'complete')
 
     def test_exit_longer_range_requires_three_consistent_distinct_frames_in_window(self):
-        gate = M8ExitGate(.60, .30, .15, handoff_on_detection=True)
+        gate = M8ExitGate(.60, .30, .15)
         gate.reset(1.)
         gate.observe(1.15, .82, 1.00)  # Too early relative to entry.
         gate.observe(1.30, .86, 1.01)  # Beyond exit search range.
@@ -170,10 +170,10 @@ class TestConeCorridor(unittest.TestCase):
         self.assertIsNone(gate.line_s)
         gate.observe(1.34, .78, 1.20)
         self.assertAlmostEqual(gate.line_s, 2.12)
-        self.assertEqual(m8_phase(True, gate.owns_lane), 'exit_lane')
+        self.assertEqual(m8_phase(True, gate.owns_lane), 'cone')
         self.assertEqual(m8_phase(True, False), 'cone')
         self.assertEqual(m8_phase(False, True), 'off')
-        self.assertEqual(gate.decide(1.35, True, False), 'wait_exit_lane')
+        self.assertEqual(gate.decide(1.35, True, False), 'prepare_exit')
         gate.reset(1.)
         for t in (1.0, 1.13, 1.26):
             gate.observe(1.30, .82, t)

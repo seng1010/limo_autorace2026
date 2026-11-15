@@ -575,7 +575,7 @@ def test_partial_needs_fresh_odometry_and_no_motion_still_holds(owner):
     assert owner.output[-1]==(0.,0.) and owner._active=='M2'
 
 
-def test_exit_line_transfers_only_to_fresh_checked_lane_and_waits_otherwise(owner):
+def confirm_exit(owner):
     owner.m8._m8_exit.reset(0.)
     owner._odom.s=.8
     for t in (0,.06,.12):
@@ -586,12 +586,98 @@ def test_exit_line_transfers_only_to_fresh_checked_lane_and_waits_otherwise(owne
         msg.header.stamp=NS(sec=owner.now//10**9,nanosec=owner.now%10**9)
         msg.point.x=.3
         owner.m8._m8_exit_line_callback(msg)
-    assert owner.m8._m8_exit.owns_lane
-    proposal(owner)
-    assert owner.output[-1]==(0.,0.)
+    assert not owner.m8._m8_exit.owns_lane
+    assert owner.m8._m8_phase_sent == 'exit_prepare'
+
+
+def exit_proposal(owner, v=.1, age=0.):
     lane=Stamped()
-    lane.header.stamp=NS(sec=owner.now//10**9,nanosec=owner.now%10**9)
-    lane.twist.linear.x=.1
-    lane.twist.angular.z=.04
+    t=owner.now-int(age*1e9)
+    lane.header.stamp=NS(sec=t//10**9,nanosec=t%10**9)
+    lane.twist.linear.x=v
+    lane.twist.angular.z=.04 if v else 0.
     owner.m8._store_exit_lane(lane)
+
+
+def test_exit_line_keeps_cone_until_a_fresh_checked_lane(owner):
+    confirm_exit(owner)
+    proposal(owner)
+    assert owner.output[-1]==(.10,-.13)
+    exit_proposal(owner, v=0.)
+    assert owner.output[-1]==(.10,-.13)
+    exit_proposal(owner, age=.30)
+    assert owner.output[-1]==(.10,-.13)
+    exit_proposal(owner)
     assert owner.output[-1]==(.1,.04)
+    assert owner.m8._m8_phase_sent == 'exit_lane'
+    assert owner.m8._m8_exit.owns_lane
+    # Once committed, a cone callback cannot overwrite the lane trajectory.
+    proposal(owner)
+    assert owner.output[-1]==(.1,.04)
+    recovery_tick(owner, dt=.30)
+    owner.m8.tick(owner.now)
+    assert owner.output[-1]==(0.,0.)
+
+
+def progress(owner, clear=True, age=0., frame='rear_axle'):
+    msg=Stamped()
+    t=owner.now-int(age*1e9)
+    msg.header.stamp=NS(sec=t//10**9,nanosec=t%10**9)
+    msg.header.frame_id=frame
+    msg.point.x=float(clear)
+    msg.point.y=2.
+    msg.point.z=.03
+    owner.m8._store_exit_progress(msg)
+
+
+def test_lane_alone_cannot_leave_cones_but_measured_passage_can(owner):
+    proposal(owner)
+    exit_proposal(owner)
+    owner.m8.tick(owner.now)
+    assert owner.output[-1]==(.10,-.13)
+    progress(owner, age=.30)
+    assert owner.m8._m8_phase_sent == 'cone'
+    progress(owner, frame='odom')
+    assert owner.m8._m8_phase_sent == 'cone'
+    progress(owner)
+    assert owner.m8._m8_phase_sent == 'exit_prepare'
+    assert owner.output[-1]==(.10,-.13)
+    exit_proposal(owner)
+    assert owner.output[-1]==(.1,.04)
+    recovery_tick(owner, dt=.1, move=.16)
+    progress(owner)
+    exit_proposal(owner)
+    assert owner._active=='M1'
+
+
+def test_expired_or_retracted_map_evidence_cannot_start_handoff(owner):
+    progress(owner)
+    recovery_tick(owner, dt=.30)
+    proposal(owner)
+    exit_proposal(owner)
+    assert not owner.m8._m8_exit.owns_lane
+    assert owner.output[-1]==(.10,-.13)
+    progress(owner)
+    assert owner.m8._m8_exit.owns_lane
+
+
+def test_estop_during_exit_preparation_blocks_both_sources(owner):
+    confirm_exit(owner)
+    proposal(owner)
+    owner.m8.event('ESTOP')
+    exit_proposal(owner)
+    assert owner.output[-1]==(0.,0.)
+    assert not owner.m8._m8_exit.owns_lane
+
+
+def test_exit_observer_remains_available_after_map_based_preparation(owner, monkeypatch):
+    import numpy as np
+    from jetracer_ros2 import m8_observers as obs
+    monkeypatch.setattr(obs,'detect_m8_exit_stop_line',lambda im:NS(row_ratio=.8))
+    observer=obs.M8StopLineObserver(owner,NS(calibrated=True,front_distance=lambda row:.3),
+                                   NS(roi_top_ratio=.58))
+    for phase in ('exit_prepare','exit_lane'):
+        observer._phase(NS(data=phase))
+        observer.update(np.zeros((480,640,3),np.uint8),NS(stamp=NS(sec=10,nanosec=0)))
+    assert len(observer.exit.messages)==2
+    assert not observer.entry.messages and not observer.partial.messages

@@ -17,6 +17,7 @@ M8_PHASE_TOPIC = 'mission/cone/phase'
 M8_EXIT_LINE_TOPIC = 'mission/cone/exit_line'
 M8_PARTIAL_ENTRY_TOPIC = 'mission/cone/partial_entry_line'
 M8_EXIT_COMMAND_TOPIC = 'mission/cone/safe_exit_cmd_vel'
+M8_EXIT_PROGRESS_TOPIC = 'mission/cone/exit_progress'
 M8_RECOVERY_COMMAND_TOPIC = 'mission/cone/recovery_cmd_vel'
 M8_EXIT_CHECK_TOPIC = 'mission/cone/exit_check_enabled'
 M8_APPROACH_RISK_TOPIC = 'mission/cone/approach_risk'
@@ -232,13 +233,12 @@ class M8PartialEntryGate:
 
 
 class M8ExitGate:
-    """Require a distinct exit line and a verified lane handover, never a fallback."""
+    """Exit line OR measured cone passage arms a fresh checked lane handover."""
 
-    def __init__(self, min_gap, pass_margin, settle_distance, *, handoff_on_detection=False):
+    def __init__(self, min_gap, pass_margin, settle_distance):
         self.min_gap = min_gap
         self.pass_margin = pass_margin
         self.settle_distance = settle_distance
-        self.handoff_on_detection = handoff_on_detection
         self.reset()
 
     def reset(self, entry_line=None):
@@ -247,10 +247,11 @@ class M8ExitGate:
         self.observations = []
         self.passed = False
         self.lane_start_s = None
+        self.lane_owned = False
 
     @property
     def owns_lane(self):
-        return self.passed or (self.handoff_on_detection and self.line_s is not None)
+        return self.lane_owned
 
     def observe(self, s, distance, now):
         if self.entry_line is None or self.line_s is not None:
@@ -273,21 +274,22 @@ class M8ExitGate:
             self.line_s = sorted(q for _, q in self.observations)[1]
             self.observations.clear()
 
-    def decide(self, s, odom_fresh, lane_safe):
+    def decide(self, s, odom_fresh, lane_safe, cones_clear=False):
         if not odom_fresh or not math.isfinite(s):
             return 'wait_odom'
-        if self.entry_line is None:
+        if self.entry_line is None and not cones_clear and not self.owns_lane:
             return 'no_entry_anchor'
-        if self.line_s is None:
+        if self.line_s is None and not cones_clear and not self.owns_lane:
             return 'search_exit'
-        crossed = s >= self.line_s + self.pass_margin
-        if not crossed and not self.owns_lane:
-            return 'approach_exit'
-        if (self.passed and not crossed) or not lane_safe:
-            self.passed |= crossed
+        crossed = self.line_s is not None and s >= self.line_s + self.pass_margin
+        # Exit context alone never suppresses a still-usable cone command.
+        if not lane_safe:
+            return 'wait_exit_lane' if self.owns_lane else 'prepare_exit'
+        if self.passed and not crossed and not cones_clear:
             return 'wait_exit_lane'
+        self.lane_owned = True
         self.passed |= crossed
-        if self.lane_start_s is None:
+        if self.lane_start_s is None or s < self.lane_start_s:
             self.lane_start_s = s
-        return ('complete' if crossed and s-self.lane_start_s >= self.settle_distance
+        return ('complete' if (crossed or cones_clear) and s-self.lane_start_s >= self.settle_distance
                 else 'exit_lane')
