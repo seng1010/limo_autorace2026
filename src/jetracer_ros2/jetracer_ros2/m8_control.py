@@ -11,8 +11,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from jetracer_ros2.m8_entry import (
     M8_APPROACH_RISK_TOPIC, M8_COMMAND_TIMEOUT, M8_CONTROL_TIMING_TOPIC,
     M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
-    M8_EXIT_LINE_TOPIC, M8_PHASE_TOPIC, M8_PARTIAL_ENTRY_TOPIC,
-    MIN_M8_SPEED, M8EntryGate, M8ExitGate, M8PartialEntryGate,
+    M8_EXIT_LINE_TOPIC, M8_PHASE_TOPIC, M8_PARTIAL_ENTRY_TOPIC, M8_RECOVERY_COMMAND_TOPIC,
+    MIN_M8_SPEED, M8EntryGate, M8ExitGate, M8PartialEntryGate, M8RecoveryBudget,
     m8_entry_policy, m8_phase, select_m8_command)
 
 M8_REVERSE_SPEED = -.02
@@ -41,6 +41,8 @@ class M8Control:
         self._exit_lane_cmd = None
         self._exit_lane_stamp_ns = 0
         self._exit_lane_rx_ns = 0
+        self._recovery_offer = None
+        self._recovery_budget = M8RecoveryBudget()
         self._exit_check_enabled = False
         self._m8_phase_sent = None
         self._m8_exit_handoff_ns = 0
@@ -79,6 +81,7 @@ class M8Control:
         self._m8_operator_stop = False
         self.node.create_subscription(TwistStamped, 'mission/cone/safe_cmd_vel', self._store_cone_cmd, 1)
         self.node.create_subscription(TwistStamped, M8_EXIT_COMMAND_TOPIC, self._store_exit_lane, 1)
+        self.node.create_subscription(TwistStamped, M8_RECOVERY_COMMAND_TOPIC, self._store_recovery, 1)
         self.node.create_subscription(Header, M8_APPROACH_RISK_TOPIC, self._store_approach_risk, 1)
         self.node.create_subscription(Float32, 'mission/stop_line_visual_distance', self._m8_visual_line_callback, 1)
         self.node.create_subscription(PointStamped, M8_EXIT_LINE_TOPIC, self._m8_exit_line_callback, 1)
@@ -177,6 +180,28 @@ class M8Control:
         if self.node._active == 'M8' and self._m8_exit.owns_lane:
             self._publish_m8_control(self._exit_lane_rx_ns, trigger='exit_rx')
 
+    def _store_recovery(self, msg):
+        phase = msg.header.frame_id
+        if phase != self._m8_phase_sent or phase not in ('approach', 'cone', 'exit_lane'):
+            return
+        now = self.node.get_clock().now().nanoseconds
+        stamp = msg.header.stamp.sec*10**9 + msg.header.stamp.nanosec
+        command, _ = select_m8_command((msg.twist.linear.x, msg.twist.angular.z), (now-stamp)/1e9)
+        self._recovery_offer = (phase, stamp, command) if command[0] and abs(command[1]) <= .20 else None
+        if self.node._active == 'M8':
+            self._publish_m8_control(now, trigger='recovery_rx')
+
+    def _recovery_command(self, now, normal, *, eligible=True, after_stamp=0):
+        n = self.node
+        phase = self._m8_phase_sent
+        offer = None
+        if eligible and not (n._blocked or self._m8_operator_stop) and self._recovery_offer:
+            p, stamp, cmd = self._recovery_offer
+            if p == phase and stamp >= after_stamp and 0 <= (now-stamp)/1e9 <= M8_COMMAND_TIMEOUT:
+                offer = stamp, cmd
+        return self._recovery_budget.step(now, phase, n._odom.s, n._odom_speed,
+            self._odom_fresh(now) and now-n._odom_ns <= 100_000_000, normal, offer)
+
     def _store_approach_risk(self, msg):
         if self.node._active != 'M2' or self._m8_phase_sent != 'preflight':
             return
@@ -198,6 +223,7 @@ class M8Control:
 
     def _set_m8_phase(self, phase):
         if self._m8_phase_sent != phase:
+            self._recovery_offer = None
             self._m8_phase_sent = phase
             self.m8_phase_pub.publish(String(data=phase))
 
@@ -278,6 +304,13 @@ class M8Control:
         if v > 0 and not 0 <= (published_ns-stamp_ns)/1e9 <= M8_COMMAND_TIMEOUT:
             v, omega, source = 0.0, 0.0, 'stop'
             reason = 'exit_lane:stale_cone' if exit_input else 'stale_cone'
+        recovery = self._recovery_command(published_ns, v > 0, eligible=exit_state != 'wait_odom',
+            after_stamp=self._m8_exit_handoff_ns if exit_input else 0)
+        if not v and recovery[0]:
+            v, omega = recovery
+            _, stamp_ns, _ = self._recovery_offer
+            rx_ns = 0
+            source, reason = 'recovery', 'forward_recovery'
         command = Twist()
         command.linear.x, command.angular.z = v, omega
         self.node._publish(command)
@@ -314,6 +347,7 @@ class M8Control:
 
     def enter(self,mission):
         if mission == 'M2':
+            self._recovery_budget.reset()
             self._m8_entry.reset()
             self._m8_partial.reset()
             self._m8_entry_state='off'
@@ -346,6 +380,7 @@ class M8Control:
         if n._active!='M2':
             return False
         if n._blocked:
+            self._recovery_command(now, False, eligible=False)
             return False  # The original manager applies the operator stop.
         if self._odom_fresh(now) and math.isfinite(n._odom_speed):
             reversing = n._odom_speed < M8_REVERSE_SPEED
@@ -353,6 +388,7 @@ class M8Control:
                 self._m8_post_reverse_ns = now
             self._m8_reversing = reversing
         if self._m8_reversing:
+            self._recovery_command(now, False, eligible=False)
             self._m8_entry.observations.clear()
             self._m8_partial.reset()
             if self._m8_phase_sent == 'preflight':
@@ -381,12 +417,19 @@ class M8Control:
         action=m8_entry_policy(gate,self._m8_entry.started_s is not None,
                                self._odom_fresh(now),cone[0]>0,lane[0]>0 and limit>=MIN_M8_SPEED)
         if action=='cone':
+            self._recovery_command(now, True, eligible=False)
             n._advance('M8 local cone gate acquired')
             self._publish_m8_control(now,trigger='entry')
         else:
             v,w=lane if action=='guarded_lane' else (0.,0.)
+            recovery = self._recovery_command(now, v > 0,
+                eligible=gate == 'approach' and limit >= MIN_M8_SPEED, after_stamp=fresh_after)
+            source = 'lane' if v else 'stop'
+            if not v and recovery[0]:
+                v, w = recovery
+                source, lane_reason = 'recovery', 'forward_recovery'
             cmd=Twist()
             cmd.linear.x,cmd.angular.z=v,w
             n._publish(cmd)
-            n._debug(f'source={"lane" if v else "stop"} entry={gate} reason={lane_reason} v={v:.3f}')
+            n._debug(f'source={source} entry={gate} reason={lane_reason} v={v:.3f}')
         return True

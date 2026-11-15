@@ -394,6 +394,47 @@ def test_normal_pass_never_pays_for_dense_search():
     assert z['candidate_count'] <= 11 + 2*8
 
 
+def test_two_leg_recovery_keeps_forward_clearance_and_requires_blocked_target():
+    rays = np.full(250, 4.)
+    points = np.array([[.34,-.14], [1.6,1.], [1.6,-1.], [1.5,0.]])
+    target = np.array([.8,-.25])
+    recover = cone_corridor._forward_recovery
+    for horizon in (.20,.40):
+        k = recover((A,rays), points, P, target, -1.4, horizon=horizon, min_progress=.07)
+        assert k>0  # Right is blocked; a checked left prefix can make space.
+        assert cone_corridor.swept_clearance(points, rollout(k,horizon), P)>=P.clearance
+        assert recover((A,np.full(250,np.inf)), points, P, target, -1.4,
+                       horizon=horizon, min_progress=.07) is None
+        assert recover((A,rays), points+np.array([1.,0.]), P, target, -1.4,
+                       horizon=horizon, min_progress=.07) is None
+        assert recover((A,rays), np.vstack([points,[.27,0.]]), P, target, -1.4,
+                       horizon=horizon, min_progress=.07) is None
+
+
+def test_recovery_not_offered_without_verified_target():
+    a = Planner(P).update(A, np.full(250,4.), 1., (0.,0.,0.), recovery=True)
+    assert a['state']=='no_gate' and a.get('recovery_curvature') is None
+    assert cone_corridor.lane_forward_recovery(
+        (A,np.full(250,4.)), np.ones((4,2)), P, [], (.1,-.1)) is None
+
+
+def test_both_lane_phases_require_measured_rejoin_geometry():
+    scan = A, np.full(250,4.)
+    points = np.array([[.34,-.14], [1.6,1.], [1.6,-1.], [1.5,0.]])
+    path = np.column_stack((np.linspace(.6,1.2,25), np.full(25,-.2)))
+    for approach in (True, False):
+        assert cone_corridor.lane_forward_recovery(
+            scan, points, P, path, (.1,-.14), approach=approach)>0
+        assert cone_corridor.lane_forward_recovery(
+            scan, points, P, path, (0.,0.), approach=approach) is None
+    # First arc is still clear at 20 cm, but a wall blocks every rejoin.
+    wall = np.column_stack((np.full(25,.55), np.linspace(-.6,.6,25)))
+    k = curvature_limit(P)
+    assert cone_corridor.swept_clearance(np.vstack([points,wall]), rollout(k,.20), P)>=P.clearance
+    assert cone_corridor._forward_recovery(scan, np.vstack([points,wall]), P,
+        np.array([.8,-.25]), -1.4, horizon=.20, min_progress=.07) is None
+
+
 def test_alignment_turns_early_but_releases_once_aligned_and_is_symmetric():
     for sign in (-1, 1):
         gate = {'gate': np.array([.75, sign*.18]),

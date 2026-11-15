@@ -20,6 +20,8 @@ GATE_MAX_X_M = 1.15
 ENTRY_GATE_MAX_X_M = 1.40
 ENTRY_SEARCH_MAX_M = .40
 ENTRY_SEARCH_MAX_SEC = 8.
+# Commanded distance stops earlier in the manager to leave room for transport/braking.
+RECOVERY_STEP_M = .10
 
 @dataclass(frozen=True)
 class Params:
@@ -141,6 +143,10 @@ def _prefix_observed(a, ranges, p, k, horizon=.12):
     """Require finite clear-space evidence across the commanded front sector."""
     yaw = k*horizon
     x,y = (horizon,0.) if abs(k)<1e-8 else (np.sin(yaw)/k,(1-np.cos(yaw))/k)
+    return _footprint_observed(a, ranges, p, x, y, yaw)
+
+
+def _footprint_observed(a, ranges, p, x, y, yaw):
     c, s = np.cos(yaw), np.sin(yaw)
     side = np.array([-p.half_width, p.half_width])
     fx = x + p.front*c - side*s - p.lidar_x
@@ -156,6 +162,82 @@ def _prefix_observed(a, ranges, p, k, horizon=.12):
     observed = np.isfinite(ranges) & (ranges >= distance) & (ranges <= a[6])
     return all(np.any(observed & (angles >= lo) & (angles <= hi))
                for lo, hi in zip(edges[:-1], edges[1:]))
+
+
+def _forward_recovery(scan, points, p, target, nominal_k, *, horizon,
+                      min_progress, lane_path=None, lane_angle=None, blocked_horizon=None):
+    """Return first curvature only; the second leg is evidence, never a command."""
+    limit = curvature_limit(p)
+    if (len(points) < 4 or abs(nominal_k) > limit
+            or swept_clearance(points, np.zeros((1,3)), p) < p.clearance):
+        return None
+    if swept_clearance(points, rollout(nominal_k, blocked_horizon or horizon), p) >= p.clearance:
+        return None  # Not a clearance-blocked target.
+    distance = np.linalg.norm(target)
+    direction = float(np.sign(nominal_k))
+    first_choices = [0., -.5*direction*limit, -direction*limit] if abs(nominal_k) > .03 else [
+        0., -.5*limit, .5*limit, -limit, limit]
+    best = None
+    for k1 in first_choices:
+        first = rollout(k1, max(LOCAL_SWEEP_M, horizon))
+        gap1 = swept_clearance(points, first, p)
+        if (gap1 < p.clearance
+                or not _footprint_observed(*scan, p, *first[-1])):
+            continue
+        for distance1 in (.06, RECOVERY_STEP_M):
+            # The stop reserve means the realized first leg need not be exactly 10 cm.
+            offset = rollout(k1, distance1)[-1]
+            rot = _rotation(offset[2])
+            x, y = (target-offset[:2]) @ rot
+            if x <= .08:
+                break
+            desired = float(np.clip(2*y/(x*x+y*y),-limit,limit))
+            # Rejoining the same geometry is required, not the old steering sign
+            # measured from the pre-recovery pose.
+            options = np.unique([desired, nominal_k, *np.linspace(-limit, limit, 15)])
+            candidates = []
+            for k2 in options:
+                local = rollout(k2, horizon)
+                second = np.column_stack((local[:,:2] @ rot.T + offset[:2], local[:,2] + offset[2]))
+                end = second[-1]
+                progress = distance - np.linalg.norm(target-end[:2])
+                if progress < min_progress:
+                    continue
+                if lane_path is not None and (np.linalg.norm(lane_path-end[:2], axis=1).min() > .42
+                        or abs(end[2]-lane_angle) > math.radians(44)):
+                    continue
+                gap2 = swept_clearance(points, second, p)
+                if (gap2 >= p.clearance and _footprint_observed(*scan, p, *second[len(second)//2])
+                        and _footprint_observed(*scan, p, *end)):
+                    candidates.append((progress + .35*min(gap2, .10), gap2))
+            if not candidates:
+                break
+            if distance1 == .06:
+                near_score = max(candidates)[0]
+            else:
+                score = min(near_score, max(candidates)[0]) + .35*min(gap1, .10) - .015*abs(k1)
+                if best is None or score > best[0]:
+                    best = score, k1
+    return None if best is None else float(best[1])
+
+
+def lane_forward_recovery(scan, points, p, center, command, *, approach=False):
+    v, w = command
+    path = np.asarray(center, dtype=float)
+    if (not np.isfinite(command).all() or v < p.speed or path.ndim != 2
+            or path.shape[1] != 2 or not np.isfinite(path).all()):
+        return None
+    path = path[(path[:,0] >= .30) & (path[:,0] <= 1.30)]
+    if len(path) < 8:
+        return None
+    delta = path[min(15,len(path)-1)] - path[0]
+    angle = math.atan2(delta[1], delta[0])
+    if np.linalg.norm(delta) < .05 or abs(angle) > math.radians(65):
+        return None
+    target = path[np.argmin(np.linalg.norm(path, axis=1))]
+    return _forward_recovery(scan, points, p, target, w/v,
+        horizon=LOCAL_SWEEP_M if approach else .40, min_progress=.07 if approach else .14,
+        lane_path=path, lane_angle=angle, blocked_horizon=LOCAL_SWEEP_M if approach else .30)
 
 
 def safe_lane_arc(scan, points, p, measured_center, nominal_command):
@@ -351,7 +433,7 @@ class Planner:
         pose[:2] += _rotation(pose[2])@np.array([self.p.rear_from_odom_x,0.])
         return pose
 
-    def update(self, a, ranges, stamp, odom_pose=None, *, entry_far_search=False):
+    def update(self, a, ranges, stamp, odom_pose=None, *, entry_far_search=False, recovery=False):
         p = self.p
         pose = self._pose(odom_pose)
         if not math.isfinite(stamp) or (self.last_time is not None and
@@ -459,6 +541,12 @@ class Planner:
         if best is None:
             if not using_far:
                 self.previous_curvature = None
+            if recovery and pose is not None and not gates[0].get('predicted'):
+                target = gates[0]['gate']
+                x, y = target
+                desired = float(np.clip(2*y/(x*x+y*y), -limit, limit))
+                result['recovery_curvature'] = _forward_recovery(
+                    (a, ranges), points, p, target, desired, horizon=LOCAL_SWEEP_M, min_progress=.07)
             return {**result,'state':'path_blocked'}
         _,g,clear,k,arc = best
         # An entry-only candidate may not leak into normal temporal tracking.

@@ -89,6 +89,101 @@ def test_safe_cone_is_immediately_forwarded_without_lane_overwrite(owner):
     assert owner.output[-1]==(.10,-.13)
 
 
+def recovery_proposal(n, phase='cone', v=.10, w=.09, age=.1):
+    msg=Stamped()
+    t=n.now-int(age*1e9)
+    msg.header.stamp=NS(sec=t//10**9,nanosec=t%10**9)
+    msg.header.frame_id=phase
+    msg.twist.linear.x,msg.twist.angular.z=v,w
+    n.m8._store_recovery(msg)
+
+
+def recovery_tick(n, dt=.10, move=0.):
+    n.now+=int(dt*1e9)
+    n._odom_ns=n.now
+    n._odom.s+=move
+
+
+def test_recovery_confirms_distinct_scans_and_stops_at_odom_limit(owner):
+    recovery_proposal(owner)
+    owner.m8.tick(owner.now)
+    assert owner.output[-1]==(0.,0.)
+    recovery_tick(owner)
+    recovery_proposal(owner)
+    assert owner.output[-1]==(.10,.09)
+    recovery_tick(owner,move=.066)
+    recovery_proposal(owner)
+    assert owner.output[-1]==(0.,0.)
+    recovery_tick(owner)
+    recovery_proposal(owner)
+    assert owner.output[-1]==(0.,0.)
+    # Only independently authorized ordinary travel can rearm.
+    proposal(owner)
+    recovery_tick(owner,dt=.05,move=.151)
+    proposal(owner)
+    proposal(owner,v=0.)
+    recovery_tick(owner,dt=.11)
+    recovery_proposal(owner)
+    assert owner.output[-1]==(0.,0.)
+    recovery_tick(owner)
+    recovery_proposal(owner)
+    assert owner.output[-1]==(.10,.09)
+
+
+@pytest.mark.parametrize('stop_by',['timeout','stale','estop','reverse','expired_odom','invalid_offer'])
+def test_active_recovery_fails_closed(owner,stop_by):
+    recovery_proposal(owner)
+    recovery_tick(owner)
+    recovery_proposal(owner)
+    assert owner.output[-1]==(.10,.09)
+    if stop_by=='timeout':
+        recovery_tick(owner,dt=.65)
+        recovery_proposal(owner)
+    elif stop_by=='stale':
+        recovery_tick(owner,dt=.16)
+        owner.m8.tick(owner.now)
+    elif stop_by=='estop':
+        owner.m8.event('ESTOP')
+    elif stop_by=='reverse':
+        owner._odom_speed=-.05
+        recovery_proposal(owner)
+    elif stop_by=='expired_odom':
+        owner._odom_ns-=120_000_000
+        owner.m8.tick(owner.now)
+    else:
+        recovery_proposal(owner,v=-.10)
+    assert owner.output[-1]==(0.,0.)
+
+
+def test_guarded_approach_recovery_cannot_arm_or_transfer_ownership(owner):
+    owner._active='M2'
+    owner.m8.enter('M2')
+    for _ in range(2):
+        recovery_tick(owner)
+        recovery_proposal(owner,phase='approach')
+        assert not owner.m8.tick(owner.now)
+    owner.m8.event('ARM_M8')
+    assert owner.m8.tick(owner.now)
+    for _ in range(2):
+        recovery_tick(owner)
+        recovery_proposal(owner,phase='approach')
+        assert owner.m8.tick(owner.now)
+    assert owner.output[-1]==(.10,.09) and owner._active=='M2'
+
+
+def test_exit_recovery_does_not_count_as_verified_lane(owner):
+    owner.m8._m8_exit.reset(.10)
+    owner.m8._m8_exit.line_s=.9
+    owner._odom.s=1.30
+    owner.m8._set_m8_phase('exit_lane')
+    for _ in range(2):
+        recovery_tick(owner)
+        recovery_proposal(owner,phase='exit_lane')
+    assert owner.output[-1]==(.10,.09)
+    assert owner.m8._m8_exit.lane_start_s is None
+    assert owner._active=='M8'
+
+
 def test_stale_and_estop_stop_but_clear_and_fresh_proposal_resume(owner):
     proposal(owner)
     owner.m8.event('ESTOP')

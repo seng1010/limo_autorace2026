@@ -17,11 +17,12 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Header, String
 
 from jetracer_ros2.cone_corridor import (
-    EntrySearchWindow, Params, Planner, ResumeGate, approach_clearance_low, checked_exit_lane, safe_lane_arc)
+    EntrySearchWindow, Params, Planner, ResumeGate, approach_clearance_low, checked_exit_lane,
+    lane_forward_recovery, safe_lane_arc)
 from jetracer_ros2.m8_entry import (
     M8_APPROACH_RISK_TOPIC, M8_COMMAND_TIMEOUT, M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
     M8_LANE_HINT_TOPIC, M8_LANE_PATH_FRAME, M8_LANE_PATH_TOPIC, M8_PHASE_TOPIC,
-    M8_PLANNER_TIMING_TOPIC, MAX_M8_SPEED, MIN_M8_SPEED, OBSERVED_LANE_TOPIC)
+    M8_PLANNER_TIMING_TOPIC, M8_RECOVERY_COMMAND_TOPIC, MAX_M8_SPEED, MIN_M8_SPEED, OBSERVED_LANE_TOPIC)
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
 
 
@@ -82,6 +83,8 @@ class MissionConeAvoidNode(Node):
             Twist, self.get_parameter('output_topic').value, 10)
         self.safe_cmd_pub = self.create_publisher(TwistStamped, p('validated_output_topic'), 1)
         self.exit_cmd_pub = self.create_publisher(TwistStamped, M8_EXIT_COMMAND_TOPIC, 1)
+        self.recovery_pub = self.create_publisher(TwistStamped, M8_RECOVERY_COMMAND_TOPIC, 1)
+        self.recovery_sent = False
         self.approach_risk_pub = self.create_publisher(Header, M8_APPROACH_RISK_TOPIC, 1)
         self.timing_pub = self.create_publisher(String, M8_PLANNER_TIMING_TOPIC, 10)
         self.exit_check = False
@@ -170,6 +173,7 @@ class MissionConeAvoidNode(Node):
             self.entry_search.set_phase(msg.data)
             preflight_handoff = self.m8_phase == 'preflight' and msg.data == 'approach'
             self.m8_phase = msg.data
+            self._publish_recovery()
             if not preflight_handoff:
                 self.exit_resume.update(False)
             self.lane_center = None
@@ -188,6 +192,7 @@ class MissionConeAvoidNode(Node):
         now = self.get_clock().now()
         cmd.header.stamp = now.to_msg()
         risk = None
+        recovery = None
         if self.motion_enabled and result is not None and result.get('scan') is not None:
             lidar = _stamp_ns(scan_stamp)
             stamp = scan_stamp
@@ -217,6 +222,18 @@ class MissionConeAvoidNode(Node):
                     command = safe_lane_arc(result['scan'], result['points'], self.config, points,
                                             (hint.twist.linear.x, hint.twist.angular.z))
                     stamp = min((scan_stamp, hint.header.stamp), key=_stamp_ns)
+            if (not command[0] and self.m8_phase in ('approach', 'exit_lane')
+                    and fresh(lidar) and self.lane_center is not None):
+                geom_stamp, center = self.lane_center
+                hint = next((m for m in (lane, self.lane_hint) if m is not None
+                             and _stamp_ns(m.header.stamp) == geom_stamp
+                             and m.twist.linear.x > 0), None)
+                if hint is not None and fresh(geom_stamp):
+                    k = lane_forward_recovery(result['scan'], result['points'], self.config,
+                        center, (hint.twist.linear.x, hint.twist.angular.z),
+                        approach=self.m8_phase == 'approach')
+                    if k is not None:
+                        recovery = k, min((scan_stamp, hint.header.stamp), key=_stamp_ns)
             if (command[0] and 0 <= (self.get_clock().now().nanoseconds-_stamp_ns(stamp))/1e9
                     <= M8_COMMAND_TIMEOUT):
                 cmd.twist.linear.x, cmd.twist.angular.z = command
@@ -226,12 +243,31 @@ class MissionConeAvoidNode(Node):
         self.exit_cmd_pub.publish(cmd)
         if risk is not None:
             self.approach_risk_pub.publish(risk)
+        return recovery
+
+    def _publish_recovery(self, candidate=None):
+        msg = TwistStamped()
+        now = self.get_clock().now()
+        msg.header.stamp = now.to_msg()
+        msg.header.frame_id = self.m8_phase
+        if candidate is not None and self.motion_enabled:
+            k, stamp = candidate
+            if 0 <= (now.nanoseconds-_stamp_ns(stamp))/1e9 <= M8_COMMAND_TIMEOUT:
+                msg.header.stamp = stamp
+                msg.twist.linear.x = self.config.speed
+                msg.twist.angular.z = msg.twist.linear.x*k
+        offered = msg.twist.linear.x > 0.
+        if offered or self.recovery_sent:
+            self.recovery_pub.publish(msg)
+        self.recovery_sent = offered
+        return offered
 
     def _watchdog(self):
         if self.last_scan is None or time.monotonic() - self.last_scan > self.scan_timeout:
             self.planner.reset()
             self._publish_exit()
             self._stop('scan_timeout')
+            self._publish_recovery()
 
     def _callback(self, scan):
         rx_mono = time.monotonic_ns()
@@ -257,7 +293,8 @@ class MissionConeAvoidNode(Node):
             ranges = np.asarray(scan.ranges, dtype=float)
             pose = self._pose_at_scan(stamp)
             result = self.planner.update(a, ranges, stamp/1e9, pose,
-                entry_far_search=self.entry_search.allows(stamp/1e9, pose))
+                entry_far_search=self.entry_search.allows(stamp/1e9, pose),
+                recovery=self.motion_enabled and self.m8_phase == 'cone')
             if self.exit_check:
                 result['scan'] = a, ranges
             speed = result['speed']
@@ -301,10 +338,15 @@ class MissionConeAvoidNode(Node):
         else:
             published_ns, command_stamp_ns = self._stop(reason, state)
         exit_ms = None
+        recovery = None
         if self.exit_check:
             t = time.monotonic_ns()
-            self._publish_exit(result, scan_stamp)
+            recovery = self._publish_exit(result, scan_stamp)
             exit_ms = (time.monotonic_ns()-t)/1e6
+        if (self.m8_phase == 'cone' and result is not None
+                and result.get('recovery_curvature') is not None):
+            recovery = result['recovery_curvature'], scan_stamp
+        recovery_offered = self._publish_recovery(recovery)
         if self.timing_pub.get_subscription_count():
             self.timing_pub.publish(String(data=json.dumps(dict(
                 scan_ns=stamp, command_stamp_ns=command_stamp_ns,
@@ -316,6 +358,7 @@ class MissionConeAvoidNode(Node):
                 clearance=result.get('min_clearance') if result else None,
                 search_stage=result.get('search_stage') if result else None,
                 entry_far_gate=bool(result and result.get('entry_far_gate')),
+                recovery_offered=recovery_offered,
                 candidate_count=result.get('candidate_count', 0) if result else 0), separators=(',', ':'))))
 
 

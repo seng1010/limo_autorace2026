@@ -5,6 +5,10 @@ MIN_M8_SPEED = .10
 # This is still the tested upper bound of the current cone planner.
 MAX_M8_SPEED = .10
 M8_COMMAND_TIMEOUT = .25
+# Spend at most 6.5 cm / 0.65 s of the 10 cm recovery budget under command.
+# Leave 3.5 cm nominal reserve for observation, scheduling and deceleration.
+M8_RECOVERY_CUTOFF_M = .065
+M8_RECOVERY_TIMEOUT_NS = 650_000_000
 OBSERVED_LANE_TOPIC = 'mission/lane/observed_cmd_vel'
 M8_LANE_PATH_TOPIC = 'mission/lane/observed_center'
 M8_LANE_HINT_TOPIC = 'mission/lane/geometry_hint'
@@ -13,6 +17,7 @@ M8_PHASE_TOPIC = 'mission/cone/phase'
 M8_EXIT_LINE_TOPIC = 'mission/cone/exit_line'
 M8_PARTIAL_ENTRY_TOPIC = 'mission/cone/partial_entry_line'
 M8_EXIT_COMMAND_TOPIC = 'mission/cone/safe_exit_cmd_vel'
+M8_RECOVERY_COMMAND_TOPIC = 'mission/cone/recovery_cmd_vel'
 M8_EXIT_CHECK_TOPIC = 'mission/cone/exit_check_enabled'
 M8_APPROACH_RISK_TOPIC = 'mission/cone/approach_risk'
 M8_PLANNER_TIMING_TOPIC = 'mission/cone/timing'
@@ -72,6 +77,57 @@ def select_m8_command(command, age, operator_stop=False):
     if v < MIN_M8_SPEED:
         return stop, 'below_min_speed'
     return command, 'cone_tracking'
+
+
+class M8RecoveryBudget:
+    """Bound only the recovery command stream; ordinary commands always win."""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.pending = None
+        self.started = None
+        self.spent = False
+        self.normal_start_s = None
+        self.newer_than = 0
+
+    def step(self, now, phase, s, speed, fresh_odom, normal, offer):
+        stop = (0., 0.)
+        if self.started is not None:
+            start_ns, start_s, start_phase, w = self.started
+            if (not fresh_odom or not offer or normal or phase != start_phase
+                    or not -.005 <= s-start_s < M8_RECOVERY_CUTOFF_M
+                    or not 0 <= now-start_ns < M8_RECOVERY_TIMEOUT_NS
+                    or not -.02 <= speed <= .13 or abs(offer[1][1]-w) > .03):
+                self.started = None
+                self.spent = True
+            else:
+                return offer[1]
+        if self.spent:
+            if normal and fresh_odom and speed >= -.02:
+                if self.normal_start_s is None:
+                    self.normal_start_s = s
+                elif s-self.normal_start_s >= .15:
+                    self.reset()
+                    self.newer_than = now
+            else:
+                self.normal_start_s = None
+            return stop
+        if normal or not fresh_odom or not offer or not -.02 <= speed <= .03:
+            self.pending = None
+            return stop
+        stamp, command = offer
+        if stamp <= self.newer_than:
+            return stop
+        if self.pending is not None:
+            last_stamp, last_phase, last_w = self.pending
+            if (last_phase == phase and abs(command[1]-last_w) <= .03
+                    and 0 < stamp-last_stamp <= 250_000_000):
+                self.started = now, s, phase, command[1]
+                self.pending = None
+                return command
+        self.pending = stamp, phase, command[1]
+        return stop
 
 
 class M8EntryGate:
