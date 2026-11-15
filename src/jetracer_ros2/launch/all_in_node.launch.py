@@ -18,6 +18,9 @@ from launch_ros.actions import Node
 #   (둘을 동시에 켜면 inference/cmd_vel 에 명령이 섞이므로 하나만 켠다)
 #   슬라이더 창을 보며 튜닝하려면 lane:=false 로 켜고 NoMachine 터미널에서 따로 실행:
 #     ros2 run jetracer_ros2 simple_lane drive --topic inference/cmd_vel
+#
+# 3차선(M7):
+#   기본은 기존 three_lane.py. 단순 버전(three_lane_simple.py)으로 돌리려면  lane3:=simple
 
 
 def generate_launch_description():
@@ -28,6 +31,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'lane', default_value='true',
             description='false: 차선 노드를 이 launch 에서 켜지 않음 (따로 켤 때)'),
+        DeclareLaunchArgument(
+            'lane3', default_value='full',
+            description='full: 기존 3차선(three_lane.py) / simple: 단순 버전(three_lane_simple.py)'),
         DeclareLaunchArgument(
             'section', default_value='true',
             description='false: 구간 전환 노드(section_node)를 켜지 않음'),
@@ -52,7 +58,7 @@ def generate_launch_description():
         Node(
             package='jetracer_ros2',
             executable='simple_lane',
-            arguments=['drive', '--topic', 'inference/cmd_vel'],
+            arguments=['drive', '--topic', 'inference/cmd_vel', ['l3', LaunchConfiguration('lane3')]],
             output='screen',
             emulate_tty=True,
             condition=IfCondition(PythonExpression([

@@ -38,6 +38,7 @@
 3차선 구간 (three_lane.py 가 같은 폴더/패키지에 있어야 함, /scan 필요)
   ros2 run jetracer_ros2 simple_lane drive lane3 rec          3차선 입구(또는 안)에 놓고 시험. 갈림길 차로에 들어가면 기본 주행으로 돌아감
   ros2 run jetracer_ros2 simple_lane drive lane3 goal_a rec   갈림길 A(왼쪽)로. goal_b = B(오른쪽)
+  위 명령 뒤에 l3simple 을 붙이면 단순 버전(three_lane_simple.py)으로 (예: drive lane3 l3simple rec)
   매니저와 함께 돌 때는 mission/active 가 M7 이 되면 스스로 켜진다 (표지판은 mission/yolo_event 의 sign_a / sign_b)
 
 디버거 창 키 (NoMachine 터미널에서 실행했을 때)
@@ -59,6 +60,13 @@ except ImportError:
         import three_lane as _three_lane
     except ImportError:
         _three_lane = None
+try:                                    # 3차선 단순 버전 (three_lane_simple.py). 실행 인자 l3simple 로 고른다
+    from jetracer_ros2 import three_lane_simple as _three_lane_simple
+except ImportError:
+    try:
+        import three_lane_simple as _three_lane_simple
+    except ImportError:
+        _three_lane_simple = None
 
 # =====================================================================
 # 파라미터 (트랙에서 바꿀 값은 대부분 디버거 슬라이더로 조절 가능)
@@ -130,6 +138,7 @@ PP_DISAGREE = math.radians(5.0)   # 경로 추종이 커브 반대 방향으로 
 MEM = False                     # 실행할 때 mem 을 붙이면 켜짐
 LANE3 = False                   # 실행할 때 lane3 를 붙이면 처음부터 3차선 선을 찾아 3차선 주행 (3차선 입구에 놓고 시험)
 LANE3_GOAL = None               # goal_a / goal_b 를 붙이면 갈림길 방향을 정해 둠 (표지판 인식 없이 시험)
+LANE3_SIMPLE = False            # l3simple 을 붙이면 3차선을 단순 버전(three_lane_simple.py: odom 위치 + 라이다 지도)으로
 SCAN_TOPIC = '/scan'
 ODOM_TOPIC = '/odom'
 MEM_JUMP = 0.15                 # 이번에 본 선의 시작점이 기억한 같은 쪽 선에서 이보다(m) 멀면 일단 무시
@@ -1699,7 +1708,12 @@ def run_ros(mode, topic, record=False):
             self.scan = None                    # 가장 최근 라이다 (ranges, angle_min, angle_increment, range_min)
             self.scan_t = 0.0
             self.lane3 = None
-            if _three_lane is not None:
+            if LANE3_SIMPLE and _three_lane_simple is not None:
+                self.lane3 = _three_lane_simple.Lane3SimpleSupervisor(forced=LANE3, goal=LANE3_GOAL)
+                print('[3차선] 단순 버전(three_lane_simple.py)을 씁니다')
+            elif _three_lane is not None:
+                if LANE3_SIMPLE:
+                    print('[3차선] three_lane_simple.py 를 찾을 수 없어 기존 버전을 씁니다')
                 self.lane3 = _three_lane.Lane3Supervisor(forced=LANE3, goal=LANE3_GOAL)
             elif LANE3:
                 print('[3차선] three_lane.py 를 찾을 수 없어 lane3 를 쓸 수 없습니다')
@@ -1954,8 +1968,10 @@ def run_ros(mode, topic, record=False):
 
 
 def main():
-    global STEER_GAIN, PRESET, MEM, LANE3, LANE3_GOAL
+    global STEER_GAIN, PRESET, MEM, LANE3, LANE3_GOAL, LANE3_SIMPLE
     args = sys.argv[1:]
+    if 'l3simple' in args:
+        LANE3_SIMPLE = True
     if 'mem' in args:
         MEM = True
     if 'lane3' in args:
