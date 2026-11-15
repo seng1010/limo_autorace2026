@@ -1733,8 +1733,12 @@ def run_ros(mode, topic, record=False):
                              history=HistoryPolicy.KEEP_LAST, depth=1)
             self.create_subscription(CompressedImage, IMAGE_TOPIC, self.on_image, qos)
             self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, self.on_info, qos_profile_sensor_data)
-            self.create_subscription(Odometry, ODOM_TOPIC, self.on_odom, qos_profile_sensor_data)
-            self.create_subscription(Odometry, '/limo' + ODOM_TOPIC, self.on_odom, qos_profile_sensor_data)
+            # odom 은 한 토픽만 쓴다. /odom 과 /limo/odom 이 둘 다 나오면 값이 서로 달라서, 한 줄에 섞으면
+            # 위치가 프레임마다 두 좌표계를 오간다 (11/15 22:38 실차 기록: 668 프레임 중 303 번 바뀜)
+            self.odom_src = None
+            self.odom_seen = {}
+            for name in (ODOM_TOPIC, '/limo/odom' if ODOM_TOPIC == '/odom' else '/odom'):
+                self.create_subscription(Odometry, name, lambda m, n=name: self.on_odom(m, n), qos_profile_sensor_data)
             if self.lane3 is not None:
                 self.create_subscription(LaserScan, SCAN_TOPIC, self.on_scan, qos_profile_sensor_data)
                 self.create_subscription(String, 'mission/active', self.on_mission, 10)
@@ -1775,7 +1779,23 @@ def run_ros(mode, topic, record=False):
                 return
             self.lane3.see_signs(detections)
 
-        def on_odom(self, msg):
+        def on_odom(self, msg, topic=ODOM_TOPIC):
+            now = time.monotonic()
+            self.odom_seen[topic] = now
+            if self.odom_src is None:
+                self.odom_src = topic
+                if topic != ODOM_TOPIC:
+                    print(f'\n[odom] {ODOM_TOPIC} 가 아직 없어 {topic} 를 씁니다')
+            elif topic != self.odom_src:
+                if topic == ODOM_TOPIC:
+                    why = f'{ODOM_TOPIC} 가 들어와서'
+                elif now - self.odom_seen.get(self.odom_src, 0.0) > 1.0:
+                    why = f'{self.odom_src} 이 끊겨서'
+                else:
+                    return                                  # 다른 토픽은 섞지 않는다
+                print(f'\n[odom] {why} {topic} 로 바꿉니다')
+                self.odom_src = topic
+                self.odom.clear()
             q = msg.pose.pose.orientation
             yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
             if self.odom:                                   # yaw 를 끊김 없이 이어 붙임 (+-180도 넘어갈 때)
@@ -1968,7 +1988,7 @@ def run_ros(mode, topic, record=False):
 
 
 def main():
-    global STEER_GAIN, PRESET, MEM, LANE3, LANE3_GOAL, LANE3_SIMPLE
+    global STEER_GAIN, PRESET, MEM, LANE3, LANE3_GOAL, LANE3_SIMPLE, ODOM_TOPIC
     args = sys.argv[1:]
     if 'l3simple' in args:
         LANE3_SIMPLE = True
@@ -1980,6 +2000,11 @@ def main():
         LANE3_GOAL = 0
     if 'goal_b' in args:
         LANE3_GOAL = 2
+    if '--odom' in args:
+        i = args.index('--odom')
+        if i + 1 < len(args):
+            ODOM_TOPIC = args[i + 1]
+            print(f'[odom] {ODOM_TOPIC} 를 먼저 씁니다')
     if '--gain' in args:
         i = args.index('--gain')
         if i + 1 < len(args):
