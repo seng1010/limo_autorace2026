@@ -58,7 +58,7 @@ class Owner:
 def owner(monkeypatch):
     modules={
         'geometry_msgs.msg':dict(PointStamped=Stamped,Twist=Twist,TwistStamped=Stamped),
-        'std_msgs.msg':dict(Bool=NS,Float32=NS,String=NS),
+        'std_msgs.msg':dict(Bool=NS,Float32=NS,Header=NS,String=NS),
         'rclpy.qos':dict(DurabilityPolicy=NS(TRANSIENT_LOCAL=1),QoSProfile=lambda **kw:kw)}
     for name,attrs in modules.items():
         mod=types.ModuleType(name)
@@ -147,13 +147,73 @@ def test_visual_watch_leaves_race_in_control_until_a_near_line_is_confirmed(owne
 
 
 def test_no_motion_launch_can_keep_immediate_approach_guard(owner):
-    owner.params.update(m8_entry_arm_after_m=0., m8_entry_arm_near_line_m=.45)
+    owner.params.update(m8_entry_arm_after_m=0., m8_entry_arm_near_line_m=.45,
+                        m8_entry_precheck_m=.55)
     owner.m8 = type(owner.m8)(owner)
     owner._active = 'M2'
     owner.m8.enter('M2')
     assert owner.m8._m8_phase_sent == 'off'
     assert owner.m8.tick(owner.now) is True
     assert owner.m8._m8_phase_sent == 'approach'
+    assert owner.output[-1] == (0., 0.)
+
+
+def _confirm_preflight(owner):
+    owner.params.update(m8_entry_precheck_m=.55, m8_entry_arm_near_line_m=.45)
+    owner.m8 = type(owner.m8)(owner)
+    owner._active = 'M2'
+    owner.m8.enter('M2')
+    for i in range(3):
+        owner.now += 50_000_000
+        owner._odom_ns = owner.now
+        owner._odom.s = .01*i
+        owner.m8._m8_visual_line_callback(NS(data=.54-.01*i))
+        assert not owner.m8.tick(owner.now)
+    assert owner.m8._m8_phase_sent == 'preflight'
+    assert owner.m8._exit_check_enabled
+    assert owner.m8._m8_entry.started_s is None
+
+
+def _checked_lane(owner):
+    lane = Stamped()
+    lane.header.stamp = NS(sec=owner.now//10**9, nanosec=owner.now%10**9)
+    lane.twist.linear.x, lane.twist.angular.z = .10, .05
+    owner.m8._store_exit_lane(lane)
+    return lane.header
+
+
+def test_preflight_keeps_race_then_odom_reuses_recent_checked_command(owner):
+    _confirm_preflight(owner)
+    _checked_lane(owner)
+    assert not owner.m8.tick(owner.now)
+    # No new camera line observation is needed after confirmation.
+    owner._odom.s = .10
+    assert owner.m8.tick(owner.now)
+    assert owner.m8._m8_phase_sent == 'approach'
+    assert owner.output[-1] == (.10, .05)
+
+
+def test_low_lidar_clearance_advances_guard_without_using_older_commands(owner):
+    _confirm_preflight(owner)
+    old = _checked_lane(owner)
+    owner.now += 300_000_000
+    owner._odom_ns = owner.now
+    owner.m8._store_approach_risk(old)
+    assert not owner.m8.tick(owner.now)  # Stale alert.
+    _checked_lane(owner)
+    owner.now += 10_000_000
+    owner.m8._store_approach_risk(NS(stamp=NS(sec=owner.now//10**9,
+                                              nanosec=owner.now%10**9)))
+    assert owner.m8.tick(owner.now)
+    assert owner.m8._m8_phase_sent == 'approach'
+    assert owner.m8._m8_entry.line_s-owner._odom.s > .45
+    assert owner.output[-1] == (0., 0.)  # Pre-alert command is not reused.
+
+
+def test_lost_odometry_after_preflight_stops_instead_of_bypassing_control(owner):
+    _confirm_preflight(owner)
+    owner.now += 600_000_000
+    assert owner.m8.tick(owner.now)
     assert owner.output[-1] == (0., 0.)
 
 

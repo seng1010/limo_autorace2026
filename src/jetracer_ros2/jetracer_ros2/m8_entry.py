@@ -13,6 +13,7 @@ M8_PHASE_TOPIC = 'mission/cone/phase'
 M8_EXIT_LINE_TOPIC = 'mission/cone/exit_line'
 M8_EXIT_COMMAND_TOPIC = 'mission/cone/safe_exit_cmd_vel'
 M8_EXIT_CHECK_TOPIC = 'mission/cone/exit_check_enabled'
+M8_APPROACH_RISK_TOPIC = 'mission/cone/approach_risk'
 M8_PLANNER_TIMING_TOPIC = 'mission/cone/timing'
 M8_CONTROL_TIMING_TOPIC = 'mission/cone/control_timing'
 
@@ -96,7 +97,7 @@ class M8EntryGate:
 
     def observe_near(self, s, distance, now, max_distance):
         """Confirm a nearby entrance while ordinary lane following still owns control."""
-        if self.started_s is not None:
+        if self.started_s is not None or self.line_s is not None:
             return False
         distance = distance if distance is not None and distance <= max_distance else None
         line_s = _observe_line(self.observations, s, distance, now)

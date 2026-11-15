@@ -129,7 +129,7 @@ class M8StopLineObserver:
         from std_msgs.msg import Float32
         stamp=header.stamp.sec*10**9+header.stamp.nanosec
         age=(self.node.get_clock().now().nanoseconds-stamp)/1e9
-        if self.phase not in ('watch_entry','approach','cone') or stamp<=0 or not 0<=age<=.25:
+        if self.phase not in ('watch_entry','preflight','approach','cone') or stamp<=0 or not 0<=age<=.25:
             return
         entry=detect_m8_stop_line(image,self.config.roi_top_ratio)
         self.entry.publish(Float32(data=self.model.front_distance(entry.row_ratio) if entry else -1.))

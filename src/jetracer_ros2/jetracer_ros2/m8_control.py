@@ -6,10 +6,11 @@ race manager; cone state strings cannot latch/overwrite an operator ESTOP.
 import json
 import math
 from geometry_msgs.msg import PointStamped, Twist, TwistStamped
-from std_msgs.msg import Bool, Float32, String
+from std_msgs.msg import Bool, Float32, Header, String
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from jetracer_ros2.m8_entry import (
-    M8_COMMAND_TIMEOUT, M8_CONTROL_TIMING_TOPIC, M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
+    M8_APPROACH_RISK_TOPIC, M8_COMMAND_TIMEOUT, M8_CONTROL_TIMING_TOPIC,
+    M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
     M8_EXIT_LINE_TOPIC, M8_PHASE_TOPIC, MIN_M8_SPEED, M8EntryGate, M8ExitGate,
     m8_entry_policy, m8_phase, select_m8_command)
 
@@ -19,6 +20,7 @@ class M8Control:
         defaults = {
             'm8_entry_arm_after_m': -1.0,
             'm8_entry_arm_near_line_m': -1.0,
+            'm8_entry_precheck_m': -1.0,
             'm8_entry_pass_margin_m': 0.02,
             'm8_entry_search_limit_m': 0.50,
             'm8_entry_approach_speed': 0.10,
@@ -47,9 +49,13 @@ class M8Control:
             raise ValueError('Invalid M8 exit parameters')
         self._m8_arm_after = p('m8_entry_arm_after_m')
         self._m8_near_line = p('m8_entry_arm_near_line_m')
+        self._m8_precheck = p('m8_entry_precheck_m')
+        self._m8_risk_ns = 0
         self._m8_approach_speed = p('m8_entry_approach_speed')
         if not (math.isfinite(self._m8_arm_after) and 0 <= self._m8_entry.pass_margin <= .30
                 and (self._m8_near_line == -1.0 or .15 <= self._m8_near_line <= .60)
+                and (self._m8_precheck == -1.0 or
+                     .15 <= self._m8_near_line <= self._m8_precheck <= .60)
                 and 0 < self._m8_entry.search_limit <= 1.0 and 0 < self._m8_approach_speed <= .10):
             raise ValueError('Invalid M8 entry parameters')
         self._m2_start_s = None
@@ -66,6 +72,7 @@ class M8Control:
         self._m8_operator_stop = False
         self.node.create_subscription(TwistStamped, 'mission/cone/safe_cmd_vel', self._store_cone_cmd, 1)
         self.node.create_subscription(TwistStamped, M8_EXIT_COMMAND_TOPIC, self._store_exit_lane, 1)
+        self.node.create_subscription(Header, M8_APPROACH_RISK_TOPIC, self._store_approach_risk, 1)
         self.node.create_subscription(Float32, 'mission/stop_line_visual_distance', self._m8_visual_line_callback, 1)
         self.node.create_subscription(PointStamped, M8_EXIT_LINE_TOPIC, self._m8_exit_line_callback, 1)
 
@@ -76,9 +83,18 @@ class M8Control:
             if self.node._active == 'M2':
                 s = self.node._odom.s
                 if self._m8_phase_sent == 'watch_entry':
+                    precheck = self._m8_precheck > 0
                     if not self.node._blocked and self._m8_entry.observe_near(
-                            s, msg.data, now/1e9, self._m8_near_line):
-                        self._arm_m8()
+                            s, msg.data, now/1e9,
+                            self._m8_precheck if precheck else self._m8_near_line):
+                        if precheck:
+                            self._set_m8_phase('preflight')
+                            self._set_exit_check(True)
+                            if self.node.get_parameter('auto_start_mission_nodes').value:
+                                self.node._start_process('mission_cone_avoid_node')
+                            self.node.get_logger().info('M8 preflight: checking LiDAR; race lane still owns control')
+                        else:
+                            self._arm_m8()
                 else:
                     self._m8_entry.observe(s, msg.data, now/1e9)
             elif self.node._active == 'M8' and self._m8_exit.entry_line is None:
@@ -128,6 +144,13 @@ class M8Control:
         if self.node._active == 'M8' and self._m8_exit.owns_lane:
             self._publish_m8_control(self._exit_lane_rx_ns, trigger='exit_rx')
 
+    def _store_approach_risk(self, msg):
+        if self.node._active != 'M2' or self._m8_phase_sent != 'preflight':
+            return
+        stamp = msg.stamp.sec * 10**9 + msg.stamp.nanosec
+        now = self.node.get_clock().now().nanoseconds
+        if stamp > 0 and 0 <= (now-stamp)/1e9 <= M8_COMMAND_TIMEOUT:
+            self._m8_risk_ns = max(self._m8_risk_ns, stamp)
 
     def _set_exit_check(self, enabled):
         if self._exit_check_enabled != enabled:
@@ -149,19 +172,26 @@ class M8Control:
                     0 <= (now-self.node._odom_ns)/1e9 <= self.node.get_parameter('odom_timeout_sec').value)
 
 
-    def _arm_m8(self):
+    def _arm_m8(self, reason='explicit or odom arm'):
         if self._m8_entry.started_s is not None:
             return
         self._m8_entry.arm(self.node._odom.s)
         self._set_exit_check(True)
         self._set_m8_phase('approach')
-        self.node.get_logger().info('M8 entry armed: verified cone may take over before the line')
+        self.node.get_logger().info(f'M8 entry armed ({reason}): verified cone may take over before the line')
         if self.node.get_parameter('auto_start_mission_nodes').value:
             self.node._start_process('mission_cone_avoid_node')
 
 
     def _m8_handoff_state(self, now):
         odom_ok = self._odom_fresh(now)
+        if self._m8_phase_sent == 'preflight':
+            if not odom_ok:
+                return 'wait_odom'
+            if self._m8_risk_ns:
+                self._arm_m8('LiDAR clearance low')
+            elif self._m8_entry.line_s-self.node._odom.s <= self._m8_near_line:
+                self._arm_m8('odom distance to entry line')
         auto_arm = (self._m8_arm_after >= 0 and self._m2_start_s is not None and
                     self.node._odom.s-self._m2_start_s >= self._m8_arm_after)
         if odom_ok and (self._m8_arm_requested or auto_arm or self._m8_arm_after == 0):
@@ -241,6 +271,7 @@ class M8Control:
             self._m8_entry.reset()
             self._m8_entry_state='off'
             self._m8_arm_requested=False
+            self._m8_risk_ns=0
             self._m2_start_s=None
         if mission == 'M8':
             self._set_exit_check(False)
@@ -274,6 +305,10 @@ class M8Control:
             (now-self._cone_stamp_ns)/1e9 if self._cone_stamp_ns else float('inf'))
         lane,lane_reason=select_m8_command(self._exit_lane_cmd,
             (now-self._exit_lane_stamp_ns)/1e9 if self._exit_lane_stamp_ns else float('inf'))
+        if self._cone_stamp_ns < self._m8_risk_ns:
+            cone = (0., 0.)
+        if self._exit_lane_stamp_ns < self._m8_risk_ns:
+            lane, lane_reason = (0., 0.), 'pre_risk_lane_command'
         limit=min(self._m8_approach_speed,n.get_parameter('normal_speed').value)
         if n._section_limit is not None and 0 <= (now-n._section_limit_ns)/1e9 <= 1.:
             limit=min(limit,n._section_limit)

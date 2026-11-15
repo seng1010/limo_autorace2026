@@ -100,6 +100,16 @@ def checked_exit_lane(command, points, p, *, scan=None, approach=False):
     return p.speed, k*p.speed
 
 
+def approach_clearance_low(command, points, p):
+    """Use observed obstacles to request guarded ownership, never to grant motion."""
+    v, w = command
+    if v < p.speed or not np.isfinite((v, w)).all() or not len(points):
+        return False
+    # Look beyond the independently checked 20 cm command at race lane speed.
+    horizon = min(.35, LOCAL_SWEEP_M + .45*v)
+    return swept_clearance(points, rollout(w/v, horizon), p) < p.clearance + .02
+
+
 def _prefix_observed(a, ranges, p, k, horizon=.12):
     """Require finite clear-space evidence across the commanded front sector."""
     yaw = k*horizon

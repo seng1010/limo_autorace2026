@@ -14,12 +14,12 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Header, String
 
 from jetracer_ros2.cone_corridor import (
-    Params, Planner, ResumeGate, checked_exit_lane, safe_lane_arc)
+    Params, Planner, ResumeGate, approach_clearance_low, checked_exit_lane, safe_lane_arc)
 from jetracer_ros2.m8_entry import (
-    M8_COMMAND_TIMEOUT, M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
+    M8_APPROACH_RISK_TOPIC, M8_COMMAND_TIMEOUT, M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
     M8_LANE_HINT_TOPIC, M8_LANE_PATH_FRAME, M8_LANE_PATH_TOPIC, M8_PHASE_TOPIC,
     M8_PLANNER_TIMING_TOPIC, MAX_M8_SPEED, MIN_M8_SPEED, OBSERVED_LANE_TOPIC)
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
@@ -81,6 +81,7 @@ class MissionConeAvoidNode(Node):
             Twist, self.get_parameter('output_topic').value, 10)
         self.safe_cmd_pub = self.create_publisher(TwistStamped, p('validated_output_topic'), 1)
         self.exit_cmd_pub = self.create_publisher(TwistStamped, M8_EXIT_COMMAND_TOPIC, 1)
+        self.approach_risk_pub = self.create_publisher(Header, M8_APPROACH_RISK_TOPIC, 1)
         self.timing_pub = self.create_publisher(String, M8_PLANNER_TIMING_TOPIC, 10)
         self.exit_check = False
         self.exit_lane = None
@@ -165,8 +166,10 @@ class MissionConeAvoidNode(Node):
     def _change_phase(self, msg):
         if msg.data != self.m8_phase:
             self.planner.reset()
+            preflight_handoff = self.m8_phase == 'preflight' and msg.data == 'approach'
             self.m8_phase = msg.data
-            self.exit_resume.update(False)
+            if not preflight_handoff:
+                self.exit_resume.update(False)
             self.lane_center = None
             self.lane_hint = None
 
@@ -182,6 +185,7 @@ class MissionConeAvoidNode(Node):
         cmd = TwistStamped()
         now = self.get_clock().now()
         cmd.header.stamp = now.to_msg()
+        risk = None
         if self.motion_enabled and result is not None and result.get('scan') is not None:
             lidar = _stamp_ns(scan_stamp)
             stamp = scan_stamp
@@ -192,10 +196,14 @@ class MissionConeAvoidNode(Node):
 
             lane = self.exit_lane
             if lane is not None and fresh(lidar) and fresh(_stamp_ns(lane.header.stamp)):
-                command = checked_exit_lane(
-                    (lane.twist.linear.x, lane.twist.angular.z), result['points'], self.config,
-                    scan=result['scan'], approach=self.m8_phase in ('off','watch_entry','approach'))
+                requested = lane.twist.linear.x, lane.twist.angular.z
                 stamp = min((scan_stamp, lane.header.stamp), key=_stamp_ns)
+                command = checked_exit_lane(
+                    requested, result['points'], self.config, scan=result['scan'],
+                    approach=self.m8_phase in ('off','watch_entry','preflight','approach'))
+                if self.m8_phase == 'preflight' and approach_clearance_low(
+                        requested, result['points'], self.config):
+                    risk = Header(stamp=stamp, frame_id=M8_LANE_PATH_FRAME)
 
             if (not command[0] and self.m8_phase == 'exit_lane' and fresh(lidar)
                     and self.lane_center is not None):
@@ -214,6 +222,8 @@ class MissionConeAvoidNode(Node):
         if not self.exit_resume.update(cmd.twist.linear.x > 0):
             cmd.twist = Twist()
         self.exit_cmd_pub.publish(cmd)
+        if risk is not None:
+            self.approach_risk_pub.publish(risk)
 
     def _watchdog(self):
         if self.last_scan is None or time.monotonic() - self.last_scan > self.scan_timeout:

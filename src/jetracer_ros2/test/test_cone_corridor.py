@@ -6,7 +6,7 @@ import numpy as np
 from jetracer_ros2 import cone_corridor
 from jetracer_ros2.m8_entry import M8EntryGate, M8ExitGate, m8_entry_policy, m8_phase, select_m8_command
 from jetracer_ros2.cone_corridor import (
-    Params, Planner, ResumeGate, checked_exit_lane, curvature_limit, plan_m8,
+    Params, Planner, ResumeGate, approach_clearance_low, checked_exit_lane, curvature_limit, plan_m8,
     rollout, safe_lane_arc)
 from jetracer_ros2.utils.ackermann_utils import TRACK, WHEELBASE, inner_angle_to_omega
 
@@ -266,6 +266,14 @@ def test_preview_never_scores_or_releases_candidates_with_missing_local_rays():
     assert observed.call_count > 0
     assert all(call.kwargs['horizon'] == .20 for call in observed.call_args_list)
     preview.assert_not_called()
+
+
+def test_approach_risk_observes_beyond_twenty_cm_without_altering_guarded_speed():
+    rays = (A, np.full(250, 4.))
+    points = np.array([[.62, 0.], [.50, .52], [.62, -.55], [1.15, .36]])
+    assert checked_exit_lane((.30, 0.), points, P, scan=rays, approach=True) == (.10, 0.)
+    assert approach_clearance_low((.30, 0.), points, P)
+    assert not approach_clearance_low((.30, 0.), points[1:], P)
 
 def test_inner_and_bridge_central_angles_are_not_the_same_value():
     for k in np.linspace(-curvature_limit(P),curvature_limit(P),11):
