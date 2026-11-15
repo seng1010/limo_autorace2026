@@ -185,17 +185,20 @@ class SimpleThreeLane:
         if self.pose is None:
             self.pose = pose
             return
-        ds = math.hypot(pose[0] - self.pose[0], pose[1] - self.pose[1])
+        dx, dy = pose[0] - self.pose[0], pose[1] - self.pose[1]
         dyaw = pose[2] - self.pose[2]
-        self.pose = pose
-        if ds > 0.5 or abs(dyaw) > 1.0:           # odom 튐
+        prev, self.pose = self.pose, pose
+        if math.hypot(dx, dy) > 0.5 or abs(dyaw) > 1.0:     # odom 튐
             return
-        if self.reversing:                          # odom 거리에는 부호가 없다
-            ds = -ds
+        # 앞뒤 부호가 있는 이동 거리: odom 변위를 차 방향에 투영한다. 서 있을 때 odom 이 떨리면 hypot 은 늘 +로 쌓여
+        # 위치가 조금씩 밀렸다 (11/16 실차: 막혀서 섰다 후진했다 되풀이하는 동안 0.4 m)
+        yaw_mid = prev[2] + dyaw / 2.0
+        ds = dx * math.cos(yaw_mid) + dy * math.sin(yaw_mid)
+        if self.reversing:
             self.reverse_left -= abs(ds)
         # odom 기준점(뒤 차축)을 옮긴 뒤 카메라 투영점을 다시 구한다. 차가 틀어지면 카메라는 뒤 차축보다 옆으로 더 움직인다
         psi0 = -self.th
-        psi_mid = psi0 - dyaw / 2.0
+        psi_mid = psi0 + dyaw / 2.0
         so = self.s - CAM_FROM_ODOM * math.cos(psi0) + ds * math.cos(psi_mid)
         yo = self.c - CAM_FROM_ODOM * math.sin(psi0) + ds * math.sin(psi_mid)
         self.th -= dyaw
@@ -375,7 +378,9 @@ class SimpleThreeLane:
             if abs(self.c - LANE_CENTER[cur]) <= ARRIVE_TOL and abs(self.th) < math.radians(10.0):
                 self.changing = False
             elif (abs(self.c - LANE_CENTER[self.change_from]) < ABORT_BACK
-                    and not self._side_clear(cur, min(a, BLOCK_DIST) + SIDE_FRONT) and a < BLOCK_DIST):
+                    and not self._side_clear(cur, min(a, BLOCK_DIST) + SIDE_FRONT) and a < BLOCK_DIST
+                    and self.ahead[self.change_from] >= a + GAIN):
+                # (원래 차로가 더 비어 있을 때만. 막힌 원래 차로로 돌아가 서 버린 적이 있다 - 11/16 실차)
                 # 막 옮기기 시작했는데 그 차로에 장애물이 새로 보였다 -> 원래 차로로
                 self.lane, self.changing = self.change_from, False
                 self.state, self.reason = 'KEEP', f'차로 {cur} 이 막힘 -> 차로 {self.lane} 로 돌아감'
