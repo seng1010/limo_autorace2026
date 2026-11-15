@@ -83,6 +83,8 @@ class MissionManagerNode(Node):
             'm1_done_distance_m': 0.50,
             'm1_max_approach_distance_m': 2.0,
             'm1_skip_lines': 0,
+            'm1_lost_line_revert_m': 0.30,
+            'm3_lost_line_revert_m': 0.30,
             'm3_hold_sec': 3.5,
             'm3_done_distance_m': 0.50,
         }
@@ -124,7 +126,8 @@ class MissionManagerNode(Node):
                      line_arm_distance_m=p('m3_line_arm_distance_m'),
                      sign_valid_distance_m=p('m3_sign_valid_distance_m'),
                      max_approach_distance_m=p('m3_max_approach_distance_m'),
-                     hold_sec=p('m3_hold_sec'), done_distance_m=p('m3_done_distance_m')),
+                     hold_sec=p('m3_hold_sec'), done_distance_m=p('m3_done_distance_m'),
+                     lost_line_revert_m=p('m3_lost_line_revert_m')),
             approach, FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
         self._m1 = TrafficLightMission(
             M1Config(trigger=p('m1_trigger'),
@@ -135,7 +138,8 @@ class MissionManagerNode(Node):
                      max_wait_sec=p('m1_max_wait_sec'),
                      done_distance_m=p('m1_done_distance_m'),
                      max_approach_distance_m=p('m1_max_approach_distance_m'),
-                     skip_lines=p('m1_skip_lines')),
+                     skip_lines=p('m1_skip_lines'),
+                     lost_line_revert_m=p('m1_lost_line_revert_m')),
             approach, FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
         self._mission_last_state = ''
 

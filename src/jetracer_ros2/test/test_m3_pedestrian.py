@@ -102,11 +102,19 @@ def test_line_only_mode_for_testing_without_yolo():
     assert 'hold' in {state for _, state, _, _ in log}
 
 
-def test_blind_zone_line_lost_means_stop():
-    """정지선 값이 중간에 끊기면(추적 실패) 그 자리에 선다."""
-    log = _simulate(_mission(), line_visible=lambda d: not (0.2 < d < 0.3))
-    stopping = [(d, v) for _, state, d, v in log if state in ('stopping', 'hold')]
-    assert min(d for d, _ in stopping) > 0.1             # 선 앞에서 멈춤 (지나가지 않음)
+def test_line_lost_in_blind_zone_still_stops():
+    """사각지대(가까이)에서 추적이 끊기면 그 자리에 선다 — 지나치지 않는다."""
+    log = _simulate(_mission(), line_visible=lambda d: d > 0.25)
+    held = [d for _, state, d, _ in log if state == 'hold']
+    assert held, 'hold 상태가 없음'
+    assert -0.05 <= held[0] <= 0.30                      # 선을 넘지 않고 그 앞에 섬
+
+
+def test_false_line_far_away_does_not_stop():
+    """멀리서 잡혔다 사라지는 선(노면 글씨·무늬 등)에는 서지 않고 계속 간다."""
+    log = _simulate(_mission(), line_visible=lambda d: d > 0.6, until=10.0)
+    assert 'hold' not in {state for _, state, _, _ in log}
+    assert log[-1][3] > 0.1                              # 계속 달리는 중
 
 
 def test_ignores_sign_after_go():
