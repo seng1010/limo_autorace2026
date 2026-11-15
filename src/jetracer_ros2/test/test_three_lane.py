@@ -21,6 +21,7 @@ _DECIDE_AT_ONCE = {
 
 @pytest.fixture(autouse=True)
 def _decide_at_once(request, monkeypatch):
+    monkeypatch.setattr(T, 'PLANNER', 'old')      # 이 파일은 옛 판단(Planner)을 본다. 새 판단은 test_three_lane_new.py
     if request.node.name in _DECIDE_AT_ONCE:
         monkeypatch.setattr(T, 'BLOCK_FRAMES', 1)
 

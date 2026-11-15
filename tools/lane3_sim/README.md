@@ -19,6 +19,10 @@
 | `e13.py` | 왼쪽·가운데가 섬 앞까지 막혀 오른쪽으로 온 뒤 표지판 A |
 | `e15.py` | sim6 사용. 오른쪽/왼쪽/가운데로 접근 × 표지판 A/B/못 읽음 (섬 앞 대기 로직 확인용) |
 | `score.py` | **성적표**: 배치 200개 × 표지판 A/B = 400회. 완주·멈춤·접촉·섬·바깥선·갈림길 정답을 표로 (sim6 사용, 2코어 약 6분) |
+| `one.py` | 성적표의 배치 하나를 프레임 로그와 함께 본다: `python3 one.py <three_lane.py> <배치 번호> <A\|B> [상수=값]` |
+| `cases.py` | 성적표의 배치 몇 개만 다시 돌린다: `python3 cases.py <three_lane.py>[,상수=값] 100B 173A ...` |
+| `dbg.py` | 새 판단(PathPlanner)이 프레임마다 받은 값과 고른 목표를 찍는다 |
+| `RESULTS.md` | 성적표 결과 (옛/새 비교) |
 | `meas_drive_log.py` | ~/simple_lane_log 의 log.csv 로 회전 반경·조향 지연·차로 폭을 잰 스크립트 |
 | `three_lane_2c767b3.py` | 돌릴 때 쓴 판단 코드 (race 2c767b3 과 같은 내용) |
 
