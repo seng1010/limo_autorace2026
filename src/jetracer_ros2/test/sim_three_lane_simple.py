@@ -20,7 +20,8 @@ from jetracer_ros2 import three_lane_simple as S  # noqa: E402
 CAM = T.CAMERA_FORWARD_OFFSET
 CAR_L, CAR_W = 0.32, 0.22
 BODY_C = 0.10                     # 차체 가운데: 뒤 차축 앞
-ISL_LEN, ISL_HALF = 1.7, 0.27
+ISL_LEN, ISL_HALF = 1.74, 0.27
+JOG0, JOG1 = 1.79, 2.29          # 섬 앞끝 기준: 바깥 선이 45도로 꺾여 합류하는 구간 (도면)
 DT = 0.05
 
 
@@ -158,7 +159,16 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
     cars = layout(rng, isl)
     car_polys = [rect(x, y, 0.0, CAR_L, CAR_W) for x, y in cars]
     post = rect(isl - 0.03, 0.0, 0.0, 0.06, 0.06)
-    island_poly = np.array([(isl, ISL_HALF), (isl + ISL_LEN, ISL_HALF), (isl + ISL_LEN, -ISL_HALF), (isl, -ISL_HALF)])
+    # 섬: 양 끝이 뾰족한 육각형 (도면: 끝 0.21 m 동안 좁아짐)
+    island_poly = np.array([(isl, 0.0), (isl + 0.21, ISL_HALF), (isl + ISL_LEN - 0.21, ISL_HALF), (isl + ISL_LEN, 0.0),
+                            (isl + ISL_LEN - 0.21, -ISL_HALF), (isl + 0.21, -ISL_HALF)])
+
+    def road_half(xx):
+        if xx < isl + JOG0:
+            return 0.80
+        if xx < isl + JOG1:
+            return 0.80 - (xx - isl - JOG0)
+        return 0.27
     goal = int(rng.choice([0, 2])) if goal is None else goal
     read_t = 0.0                              # 가운데(|y|<0.3)에서 섬 1.45~1.75 m 앞에 있던 시간. 0.8 초면 표지판 확정
     # 참 상태 (뒤 차축)
@@ -187,7 +197,7 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
         out = sup.step_obs(obs, (ox, oy, oyaw), scan, both_yellow=False, now=t)
         if out is None:
             if sup.mode == 'done':
-                exit_lane = int(np.argmin([abs(cy - c) for c in T.LANE_CENTER]))
+                exit_lane = sup.side_taken
             break
         v, cmd = out['v'], max(-T.MAX_STEER, min(T.MAX_STEER, out['steer']))
         steer_act += (cmd - steer_act) * min(1.0, DT / 0.15)
@@ -212,7 +222,7 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
             if overlap(body, p) and i not in touched:
                 touched.add(i)
                 contact += 1
-        if np.abs(body[:, 1]).max() > 0.80:
+        if any(abs(py) > road_half(px) for px, py in body):
             out_frames += 1
         if overlap(body, island_poly):
             island_frames += 1

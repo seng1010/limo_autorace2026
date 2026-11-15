@@ -41,6 +41,13 @@ STOP_DIST = 0.35         # 갈 데가 없으면 앞 장애물 이 거리에서 �
 # 도면 (2026Track, 도로 방향 거리). s 는 M7 흰 시작선을 0 으로 잰다
 START_TO_DASH = 0.30     # M7 시작선 -> 흰 점선 시작
 START_TO_ISLAND = 4.36   # M7 시작선 -> 섬 앞끝 (카메라로 섬을 보면 그 값을 쓴다)
+# 섬 뒤 합류 (도면): 섬은 앞끝에서 1.74 m 에서 끝나고, 바깥 선이 앞끝 + 1.79 ~ 2.29 m 에서 45도로 꺾여
+# 차로 하나(가운데 차로 자리, 폭 0.53)로 합쳐진다. 기본 주행은 이 45도를 90도 코너로 보고 60도를 돌아 길을 벗어났다 (11/15 실차)
+ISLAND_LEN = 1.74
+MERGE_TURN = 1.33        # 섬 앞끝 + 이 거리부터 가운데(합류 차로)로 옮긴다 (시뮬레이션: 늦으면 꺾인 바깥 선, 이르면 섬 끝에 닿음)
+MERGE_LOOK = 0.50        # 합류할 때 목표점 거리
+MERGE_HEADING = math.radians(40.0)
+MERGE_END = 2.29         # 섬 앞끝 + 이 거리에서 합류 끝
 CHANGE_FROM_S = 0.20     # 이 위치(카메라 투영점) 전에는 차로를 옮기지 않는다. 시작선까지는 1차선이고, 도로는 시작선 뒤
                          # 0.05~0.57 m 에서 45도로 벌어진다 (도면). 일찍 옮기면 1차선 노란 선을 밟는다 (11/15 실차)
 LEAVE_DIST = 1.45        # 가운데 차로에서 섬이 이 안으로 오면 옆 차로로 빠진다
@@ -94,7 +101,7 @@ ENTRY_FRAMES = 3
 ENTRY_TH_MAX = math.radians(8.0)     # 진입 방향도 이 안으로 자른다 (기본 주행이 1차선을 곧게 따라오는 중)
 ENTRY_C_MAX = 0.10                   # 진입 차로는 가운데 차로 (도면) -> 카메라가 다른 값을 줘도 이 안으로 자른다
 EXIT_FRAMES = 4
-MAX_ON_M = 7.0                       # 이만큼 넘게 가면 끝낸다
+MAX_ON_M = 9.0                       # 이만큼 넘게 가면 끝낸다
 LOST_FRAMES = 30
 
 
@@ -103,7 +110,7 @@ class RoadMap:
 
     def __init__(self):
         self.hits = {}
-        self.virtual = []          # [(s_from, lat_lo, lat_hi)] 섬처럼 라이다에 안 잡히는 막힌 곳
+        self.virtual = []          # [(s_from, s_end, lat_lo, lat_hi)] 섬처럼 라이다에 안 잡히는 막힌 곳
         self.transient = (np.zeros(0), np.zeros(0))    # 이번 프레임의 먼 점 (지도에 안 남김)
 
     def add(self, s, lat):
@@ -128,8 +135,8 @@ class RoadMap:
             sel = (np.abs(lat - center) <= LANE_BAND) & (s >= s_from) & (s <= s_to)
             if sel.any():
                 best = float(s[sel].min())
-        for v_from, lo, hi in self.virtual:
-            if lo <= center <= hi and v_from <= s_to:
+        for v_from, v_end, lo, hi in self.virtual:
+            if lo <= center <= hi and v_from <= s_to and v_end >= s_from:
                 v = max(v_from, s_from)
                 best = v if best is None else min(best, v)
         return best
@@ -329,6 +336,16 @@ class SimpleThreeLane:
         cur = self.lane
         a = self.ahead[cur]
         to_island = self.island_at - self.s
+        if self.s >= self.island_at + MERGE_TURN:
+            # 섬 끝: 바깥 차로에서 가운데(합류 차로)로. 갈림길은 이미 지났고 이 구간에 장애물은 없다
+            if cur != 1:
+                self._begin(1, '합류 -> 가운데')
+            elif self.changing and abs(self.c) <= ARRIVE_TOL and abs(self.th) < math.radians(10.0):
+                self.changing = False
+            # 여기서는 지도의 '섬' 막힘을 보지 않는다 (섬 끝을 비스듬히 지나간다). 정면 물체는 정면 정지(GUARD)가 막는다
+            self.state = 'CHANGE' if self.changing else 'KEEP'
+            self.reason = '합류'
+            return V_CHANGE
         if self.s < CHANGE_FROM_S and not self.changing:
             # 아직 1차선 (도로가 벌어지기 전): 가운데 차로를 따라가기만 한다
             self._pref_count = 0
@@ -431,7 +448,7 @@ class SimpleThreeLane:
         if scan is not None:
             self._scan_to_map(scan)
             front = T.front_gap(scan[0], scan[1], scan[2], scan[3])
-        self.map.virtual = [(self.island_at, -T.ISLAND_HALF + 0.05, T.ISLAND_HALF - 0.05)]
+        self.map.virtual = [(self.island_at, self.island_at + ISLAND_LEN, -T.ISLAND_HALF + 0.05, T.ISLAND_HALF - 0.05)]
         self.map.refresh()
         if scan is None:
             self.state, self.reason = 'NOSCAN', '라이다 없음 -> 서행'
@@ -439,9 +456,10 @@ class SimpleThreeLane:
             self.ahead = [self._free(j) for j in range(3)]
         else:
             speed = self._decide(goal, front)
-        look = LOOKAHEAD_CHANGE if self.changing else LOOKAHEAD_KEEP
+        merging = self.s >= self.island_at + MERGE_TURN
+        look = MERGE_LOOK if merging else (LOOKAHEAD_CHANGE if self.changing else LOOKAHEAD_KEEP)
         steer = T.steer_to_lane(self.c, self.th, self.lane, look)
-        steer = T.limit_heading(steer, self.th, HEADING_MAX)
+        steer = T.limit_heading(steer, self.th, MERGE_HEADING if merging else HEADING_MAX)
         if front < GUARD_DIST and speed > 0.0:
             speed, self.state, self.reason = 0.0, 'STOP', f'정면 {front:.2f} m 에 물체'
         speed, rev = self._recover(speed, now)
@@ -503,6 +521,7 @@ class Lane3SimpleSupervisor:
         self._white = self._both = self._lost = 0
         self._seen = None
         self.steer = 0.0
+        self.side_taken = None
         self.last = None                    # see_signs 가 쓰는 .ok / .c
         self.message = ''
 
@@ -607,13 +626,15 @@ class Lane3SimpleSupervisor:
         self._lost = 0
         out = core.step_obs(obs, pose, scan, self.sign_goal, now)
         self.last = type('L', (), dict(ok=True, c=core.c))()
-        on_side = (core.lane in (0, 2) and not core.changing
-                   and abs(core.c - LANE_CENTER[core.lane]) < T.SIDE_TOL)
-        past = core.s >= core.island_at + 0.20
-        self._both = self._both + 1 if (on_side and (past or (both_yellow and core.s >= core.island_at - 0.30))) else 0
+        if core.s < core.island_at + MERGE_TURN and core.lane in (0, 2):
+            self.side_taken = core.lane                 # 갈림길에서 고른 쪽 (기록용)
+        merged = (core.s >= core.island_at + MERGE_END + 0.20 and core.lane == 1
+                  and abs(core.c) < 0.12 and abs(core.th) < math.radians(15.0))
+        self._both = self._both + 1 if merged else 0
         if self._both >= EXIT_FRAMES:
             self.mode = 'done'
-            self.message = f"[3차선S] 끝: 갈림길 {'A(왼쪽)' if core.lane == 0 else 'B(오른쪽)'} 차로 -> 기본 주행"
+            side = {0: 'A(왼쪽)', 2: 'B(오른쪽)'}.get(self.side_taken, '?')
+            self.message = f"[3차선S] 끝: 갈림길 {side} 지나 합류 완료 -> 기본 주행"
             return None
         if core.travel >= MAX_ON_M:
             self.mode, self.message = 'done', '[3차선S] 끝: 최대 거리 -> 기본 주행'

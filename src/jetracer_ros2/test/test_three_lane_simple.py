@@ -109,15 +109,6 @@ def test_lines_correct_position_only_when_close():
     assert k.c == 0.0
 
 
-def test_supervisor_hands_back_after_island_in_outer_lane():
-    sup = S.Lane3SimpleSupervisor(forced=True)
-    sup.mode = 'on'
-    sup.core.start(-0.535, 0.0, (0.0, 0.0, 0.0))
-    sup.core.s = S.START_TO_ISLAND + 0.3
-    outs = [sup.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), False, now=0.0) for _ in range(S.EXIT_FRAMES)]
-    assert outs[-1] is None and sup.mode == 'done'
-
-
 def test_supervisor_only_in_m7_and_ignores_side_lane_signs():
     sup = S.Lane3SimpleSupervisor()
     sup.set_mission('M3')
@@ -197,3 +188,17 @@ def test_white_dashes_pull_position_back_after_odom_drift():
     for _ in range(25):
         k._camera_lines(obs)
     assert abs(k.c) < 0.01
+
+
+def test_merges_to_center_after_island_then_hands_back():
+    sup = S.Lane3SimpleSupervisor(forced=True)
+    sup.mode = 'on'
+    sup.core.start(-0.535, 0.0, (0.0, 0.0, 0.0), S.START_TO_ISLAND + 1.0)
+    sup.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), False, now=0.0)
+    assert sup.core.lane == 2 and sup.side_taken == 2           # 섬 옆: 아직 B
+    sup.core.s = S.START_TO_ISLAND + S.MERGE_TURN + 0.01
+    sup.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), False, now=0.0)
+    assert sup.core.lane == 1 and sup.core.changing              # 합류 차로로
+    sup.core.s, sup.core.c, sup.core.th = S.START_TO_ISLAND + S.MERGE_END + 0.3, 0.0, 0.0
+    outs = [sup.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), False, now=0.0) for _ in range(S.EXIT_FRAMES)]
+    assert outs[-1] is None and sup.mode == 'done' and 'B' in sup.message
