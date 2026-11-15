@@ -1,8 +1,41 @@
 import math
 
 import numpy as np
+import pytest
 
 from jetracer_ros2 import three_lane as T
+
+# 아래 시험들은 planner.update 를 한 번 불러 그 자리에서 정하는지를 본다 -> 연속 프레임 조건(BLOCK_FRAMES)은 1 로 두고 본다
+_DECIDE_AT_ONCE = {
+    'test_planner_moves_to_free_lane_and_prefers_goal_side',
+    'test_planner_does_not_cut_in_when_side_lane_is_occupied_or_too_late',
+    'test_two_lane_move_through_empty_middle_lane',
+    'test_island_distance_and_middle_lane_blocked_by_island',
+    'test_goal_side_is_preferred_only_when_free_distance_is_similar',
+    'test_obstacle_avoidance_comes_before_sign_side',
+    'test_undecided_sign_at_island_takes_default_side',
+    'test_escape_starts_closer_than_before_and_steers_harder',
+    'test_chosen_lane_is_kept_for_a_moment',
+}
+
+
+@pytest.fixture(autouse=True)
+def _decide_at_once(request, monkeypatch):
+    if request.node.name in _DECIDE_AT_ONCE:
+        monkeypatch.setattr(T, 'BLOCK_FRAMES', 1)
+
+
+def test_one_frame_block_does_not_start_lane_change():
+    # 11/15 실차: 가운데 차로 빈거리가 한 번 0.1 로 튄 것만으로 오른쪽으로 옮기기 시작했다
+    far = T.LIDAR_MAX
+    planner = T.Planner()
+    clear = ([far, far, far], [far, far, far])
+    assert planner.update(1, 0.0, *clear).state == 'KEEP'
+    assert planner.update(1, 0.0, [far, 0.1, far], [far, 0.1, far]).state == 'KEEP'      # 한 번 튄 값
+    assert planner.update(1, 0.0, *clear).state == 'KEEP'
+    assert planner.target == 1
+    states = [planner.update(1, 0.0, [far, 1.0, far], [far, 1.0, far]).state for _ in range(T.BLOCK_FRAMES)]
+    assert states[:-1] == ['KEEP'] * (T.BLOCK_FRAMES - 1) and states[-1] == 'CHANGE'     # 계속 막혀 있으면 옮긴다
 
 
 def obs(c, th=0.0):

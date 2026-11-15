@@ -81,6 +81,7 @@ ROAD_HALF = 0.83                            # 이보다 바깥의 점은 도로 
 
 # 판단
 BLOCK_DIST = 1.35                           # 내 차로 앞 장애물이 이보다 가까우면 옮길 차로를 찾는다
+BLOCK_FRAMES = 3                            # 막힘이 연속 이만큼 보여야 옮길 차로를 찾는다 (한 프레임 튄 값에 속지 않게). 1 = 예전처럼 바로
 MIN_START = 0.60                            # 앞 장애물이 이보다 가까우면 옮기기 시작하지 않는다 (급하게 꺾어도 0.6 m 는 필요)
 TRANSIT_CLEAR = 1.40                        # 두 칸 옮길 때 가로지르는 가운데 차로에 필요한 빈 거리
 FAR_CLEAR = 2.20                            # 두 칸 옮길 때 도착 차로에 필요한 빈 거리
@@ -524,6 +525,8 @@ class Planner:
         self._hold = 0               # 방금 고른 차로를 유지할 남은 프레임 수
         self._left_island = False    # 섬 앞 가운데에서 한쪽으로 이미 빠졌다 (다시 가운데로 돌아가지 않는다)
         self._goal_clear = 0         # 갈림길 방향 옆 차로가 연속으로 비어 보인 프레임 수
+        self._blocked_cur = None     # 아래 횟수를 세고 있는 차로
+        self._blocked_n = 0          # 그 차로 앞이 연속으로 막혀 보인 프레임 수
 
     @staticmethod
     def _can(reach, j, urgent):
@@ -623,6 +626,9 @@ class Planner:
         if self.changing and abs(c - LANE_CENTER[self.target]) <= ARRIVE_TOL:
             self.changing = self.tight = False
         cur = self.target
+        if cur != self._blocked_cur:
+            self._blocked_cur, self._blocked_n = cur, 0
+        self._blocked_n = self._blocked_n + 1 if ahead[cur] < BLOCK_DIST else 0
         if self._hold > 0:
             self._hold -= 1
         # 섬 앞에서 표지판 읽기: 가운데 차로를 막는 것이 섬뿐이면 (mid_free), 가운데에서 섬을 보며 가다가
@@ -679,6 +685,12 @@ class Planner:
                 self._goal_clear = 0
             return Plan(cur, V_KEEP, 'KEEP', '')
         # cur 가 막힘 (가는 중이든 옮기는 중이든)
+        if self._blocked_n < BLOCK_FRAMES:
+            # 11/15 실차: 가운데 차로 빈거리가 2.0 -> 0.1 -> 1.8 로 튄 순간 오른쪽으로 옮기기 시작해 표지판(A)과 반대로 나감.
+            # 연속으로 막혀 보일 때까지는 하던 대로 간다 (정면 0.30 m 정지는 _decide 에 따로 있다)
+            if self.changing:
+                return Plan(cur, V_CHANGE, 'CHANGE', f'차로 {lane} -> {cur}')
+            return Plan(cur, V_KEEP, 'KEEP', f'차로 {cur} 앞 {ahead[cur]:.2f} m 확인 중 {self._blocked_n}/{BLOCK_FRAMES}')
         if self.changing and reach is not None and self._hold > 0:
             how = reach(cur)             # 방금 고른 차로: 경로가 나오는 한 그대로 간다 (프레임마다 왔다 갔다 하면 어느 쪽으로도 못 간다)
             if how is not None:
