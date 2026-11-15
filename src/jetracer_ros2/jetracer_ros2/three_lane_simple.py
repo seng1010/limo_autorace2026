@@ -79,8 +79,9 @@ PREF_FRAMES = 5                      # '가고 싶은 차로'로 옮기는 조�
 TH_GAIN = 0.15                       # 카메라 도로 방향으로 고치는 비율 (한 프레임)
 TH_ACCEPT = math.radians(6.0)        # odom 으로 예상한 방향과 이 이상 다르면 카메라 방향을 안 쓴다
 TH_MIN_POINTS = 300
-EDGE_GAIN = 0.20                     # 바깥 노란 선으로 옆 위치를 고치는 비율 (한 프레임)
-EDGE_GATE = 0.15                     # 바깥 노란 선으로 구한 위치가 지금 위치와 이 안일 때만 쓴다 (차로를 통째로 옮기지 않는다)
+LINE_GAIN = 0.25                     # 차로 선으로 옆 위치를 고치는 비율 (한 프레임)
+LINE_GATE = 0.20                     # 선으로 구한 위치가 지금 위치와 이 안일 때만 쓴다 (선 간격 0.27 의 절반 남짓: 차로를 통째로 옮기지 않는다)
+LINE_TH_MAX = math.radians(45.0)     # 도로와 이보다 크게 틀어져 있으면 선으로 고치지 않는다
 GUARD_DIST = 0.30                    # 정면 통로에 물체가 이 안이면 무조건 정지
 STUCK_SEC = 1.5                      # 이만큼 서 있으면 후진
 REVERSE_M = 0.40                     # 한 번에 후진하는 거리
@@ -202,21 +203,41 @@ class SimpleThreeLane:
         if abs(d) <= TH_ACCEPT:
             self.th += TH_GAIN * d
 
-    def _camera_edge(self, obs):
-        """바깥 노란 선(+-0.80)이 옆에 길게 보이면 옆 위치를 조금 고친다. 지금 위치와 EDGE_GATE 넘게 다르면 쓰지 않는다
-        (three_lane.py 처럼 선을 다른 선으로 착각해 한 차로씩 튀는 일이 없게)."""
-        if not obs or abs(self.th) > math.radians(20.0):
+    def _camera_lines(self, obs):
+        """보이는 차로 선(흰 점선 +-0.27, 바깥 노란 선 +-0.80, 섬 옆이면 섬 테두리 +-0.27)으로 옆 위치를 조금씩 고친다.
+        선마다 '지금 위치에서 가장 가까운' 자리에만 맞추고, 그 자리가 LINE_GATE 넘게 떨어지면 버린다
+        -> 어느 선이 어느 차로 선인지 헷갈려 한 차로씩 튀는 일(three_lane.py 의 실패)은 생기지 않는다.
+        odom 방향은 차로를 바꾸며 크게 틀 때 수십 cm 씩 밀린다 (11/15 실차: 오른쪽 -> 가운데로 옮기는 동안 0.5 m)."""
+        if not obs or abs(self.th) > LINE_TH_MAX:
             return
         short = obs.get('short', ())
         ystart = obs.get('ystart') or {}
+        beside_island = self.s > self.island_at - 0.30
+        cands = []
         for u, n, ratio in obs['lines']:
-            if ratio < 0.75 or n < 50 or u in short or not 0.10 <= abs(u) <= 0.60:
+            if n < 40 or abs(u) > 1.0 or u in short:
                 continue
-            if ystart.get(u, 0.0) > 0.60:          # 앞에서 시작하는 선 (섬 테두리)
+            if ratio <= 0.3:
+                spots = T.WHITE_POS
+            elif ratio >= 0.7:
+                if ystart.get(u, 0.0) > 0.60:      # 앞에서 시작하는 노란 선 (섬 테두리 앞끝)
+                    continue
+                spots = T.YELLOW_POS + (T.WHITE_POS if beside_island else ())
+            else:
                 continue
-            cand = math.copysign(T.YELLOW_POS[0], u) - T._shrink(u)
-            if abs(cand - self.c) <= EDGE_GATE:
-                self.c += EDGE_GAIN * (cand - self.c)
+            us = T._shrink(u)
+            best = min((p - us for p in spots), key=lambda cc: abs(cc - self.c))
+            if abs(best - self.c) <= LINE_GATE:
+                cands.append((best, min(n, 300) * (1.0 if abs(u) <= 0.45 else 0.4)))
+        if not cands:
+            return
+        cands.sort()
+        half, acc = sum(w for _, w in cands) / 2.0, 0.0
+        for cc, w in cands:                        # 가중 중앙값 (선 하나가 틀려도 끌려가지 않게)
+            acc += w
+            if acc >= half:
+                break
+        self.c += LINE_GAIN * (cc - self.c)
 
     def _camera_island(self, obs):
         if not obs or obs.get('yellow_xy') is None:
@@ -404,7 +425,7 @@ class SimpleThreeLane:
         now = time.monotonic() if now is None else now
         self._advance(pose)
         self._camera_heading(obs)
-        self._camera_edge(obs)
+        self._camera_lines(obs)
         self._camera_island(obs)
         front = T.LIDAR_MAX
         if scan is not None:

@@ -98,14 +98,14 @@ def test_center_lane_slows_to_read_sign_when_unknown():
     assert out['v'] == S.V_READ and not k.changing
 
 
-def test_outer_yellow_line_corrects_position_only_when_close():
+def test_lines_correct_position_only_when_close():
     k = core_at(0.50)                  # 실제는 왼쪽 차로 가운데 0.535, 바깥 노란 선은 차에서 왼쪽 0.265
     obs = dict(th=0.0, lines=[(0.265, 150, 1.0)], n=1000, ystart={0.265: 0.42}, short=set())
     for _ in range(20):
-        k._camera_edge(obs)
+        k._camera_lines(obs)
     assert abs(k.c - 0.535) < 0.01
     k = core_at(0.0)                   # 노란 선이 맞을 위치(0.535)가 지금 위치와 너무 다르면 안 쓴다
-    k._camera_edge(obs)
+    k._camera_lines(obs)
     assert k.c == 0.0
 
 
@@ -188,3 +188,12 @@ def test_entry_clamps_bad_camera_heading_and_offset(monkeypatch):
         sup._try_enter(None, (0.0, 0.0, 0.0), None)
     assert sup.mode == 'on'
     assert abs(sup.core.c) <= S.ENTRY_C_MAX + 1e-9 and abs(sup.core.th) <= S.ENTRY_TH_MAX + 1e-9
+
+
+def test_white_dashes_pull_position_back_after_odom_drift():
+    """실제로는 가운데 차로 가운데(c 0)인데 odom 이 -0.15 로 밀렸다: 양쪽 흰 점선(차에서 +-0.27)으로 되돌린다."""
+    k = core_at(-0.15)
+    obs = dict(th=0.0, lines=[(-0.27, 120, 0.0), (0.27, 120, 0.0), (0.80, 150, 1.0)], n=1000, ystart={}, short=set())
+    for _ in range(25):
+        k._camera_lines(obs)
+    assert abs(k.c) < 0.01
