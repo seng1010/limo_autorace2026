@@ -213,3 +213,13 @@ def test_sign_post_on_island_does_not_block_side_lane():
     for _ in range(3):
         out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(post), 2, now=0.0)
     assert k.ahead[2] >= S.NO_OBSTACLE - 1e-6 and out['v'] > 0.0
+
+
+def test_neighbour_lane_with_obstacle_almost_passed_counts_as_free_when_blocked():
+    """A 차로 앞 0.6 m 막힘, 가운데 LIMO 는 옆에 (앞끝이 카메라 투영점 바로 앞): 가운데로 옮긴다 (11/16 실차에서는 섰다)."""
+    k = core_at(0.535)
+    k.lane = 0
+    side = [(x, 0.535 - 0.10) for x in (-0.15, -0.05, 0.03)]       # 가운데 LIMO 의 왼쪽 옆면 (차에서 오른쪽 0.43 m)
+    for _ in range(3):
+        k.step_obs(None, (0.0, 0.0, 0.0), scan_with(box(0.6, 0.0) + side), None, now=0.0)
+    assert k.changing and k.lane == 1

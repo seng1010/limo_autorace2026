@@ -35,7 +35,7 @@ V_KEEP = 0.22            # 차로 따라갈 때 속도 [m/s]
 V_CHANGE = 0.18          # 차로 옮길 때 속도
 V_SLOW = 0.10            # 앞이 막혔는데 옮길 데가 없을 때 다가가는 속도
 BLOCK_DIST = 1.30        # 내 차로 앞 장애물이 이 안이면(라이다 기준) 옮길 차로를 찾는다
-MIN_START = 0.55         # 앞 장애물이 이보다 가까우면 옮기기 시작하지 않는다 (꺾다가 앞 장애물 모서리에 닿는다)
+MIN_START = 0.45         # 앞 장애물이 이보다 가까우면 옮기기 시작하지 않는다 (꺾다가 앞 장애물 모서리에 닿는다)
 GAIN = 0.45              # 옮길 차로는 지금 차로보다 이만큼 더 멀리 비어 있어야 한다
 STOP_DIST = 0.35         # 갈 데가 없으면 앞 장애물 이 거리에서 정지
 # 도면 (2026Track, 도로 방향 거리). s 는 M7 흰 시작선을 0 으로 잰다
@@ -80,6 +80,9 @@ TIE = 0.30                           # 두 차로 빈 거리가 이 안이면 �
 LOOKAHEAD_KEEP = 0.55
 LOOKAHEAD_CHANGE = 0.40
 HEADING_MAX = math.radians(40.0)     # 옮길 때 도로와 이 이상 틀지 않는다
+TIGHT_BELOW = 0.90                   # 앞 장애물이 이보다 가까운 채로 옮기기 시작하면 급하게 (가까운 목표점, 큰 각도)
+LOOKAHEAD_TIGHT = 0.36
+HEADING_TIGHT = math.radians(45.0)
 ARRIVE_TOL = 0.08                    # 목표 차로 가운데에서 이 안 + 도로와 나란하면 옮기기 끝
 ABORT_BACK = 0.15                    # 옮기기 시작 직후 그 차로가 막히면, 아직 이 안이면 원래 차로로 돌아간다
 PREF_FRAMES = 5                      # '가고 싶은 차로'로 옮기는 조건이 연속 이만큼 맞아야 옮긴다
@@ -161,6 +164,7 @@ class SimpleThreeLane:
         self.travel = 0.0
         self.lane = 1                # 지금 따라가는(또는 옮겨 가는) 목표 차로
         self.changing = False
+        self.tight = False
         self.change_from = 1
         self.state = 'KEEP'
         self.reason = ''
@@ -300,9 +304,13 @@ class SimpleThreeLane:
         self.map.transient = (s[far], lat[far])
 
     # ----- 판단 -----
-    def _free(self, lane):
-        """차로 lane 에서 카메라 투영점부터 앞 장애물까지 거리 (없으면 NO_OBSTACLE)."""
-        hit = self.map.first_in_lane(lane, self.s + 0.02)
+    def _free(self, lane, passing=False):
+        """차로 lane 에서 카메라 투영점부터 앞 장애물까지 거리 (없으면 NO_OBSTACLE).
+        passing=True: 옆에 거의 다 지나친 장애물(앞끝이 카메라 투영점 + SIDE_PASSED 안)은 '앞'으로 세지 않는다.
+        막혀서 빠져나갈 차로를 고를 때만 쓴다 (옆을 지나는 중인지는 _side_clear 가 본다). 이걸 앞 장애물로 세서
+        바로 옆 차로가 비었는데도 0.0 m 로 보고 막힌 차로에서 섰다 (11/16 실차: 가운데 LIMO 옆을 지나 A 차로에서 정지)"""
+        start = self.s + (SIDE_PASSED if passing else 0.02)
+        hit = self.map.first_in_lane(lane, start)
         return NO_OBSTACLE if hit is None else min(NO_OBSTACLE, hit - self.s)
 
     def _side_clear(self, lane, upto):
@@ -329,7 +337,7 @@ class SimpleThreeLane:
         for j in (cur - 1, cur + 1):
             if not 0 <= j <= 2 or j in exclude:
                 continue
-            if self.ahead[j] < a + GAIN or not self._side_clear(j, a + SIDE_FRONT):
+            if self._free(j, passing=True) < a + GAIN or not self._side_clear(j, a + SIDE_FRONT):
                 continue
             cands.append(j)
         if not cands and cur != 1 and 1 not in exclude and a >= TRANSIT_NEED:
@@ -339,12 +347,14 @@ class SimpleThreeLane:
                 cands = [far]
         if not cands:
             return None
-        best = max(self.ahead[j] for j in cands)
-        cands = [j for j in cands if self.ahead[j] >= best - TIE]
+        free = {j: self._free(j, passing=True) for j in cands}
+        best = max(free.values())
+        cands = [j for j in cands if free[j] >= best - TIE]
         cands.sort(key=self._goal_order(goal))
         return cands[0]
 
     def _begin(self, j, why):
+        self.tight = self.ahead[self.lane] < TIGHT_BELOW       # 앞이 가까운 채로 옮긴다 -> 더 급하게 꺾는다
         self.change_from, self.lane, self.changing = self.lane, j, True
         self._pref_count = 0
         self.lane_run = 0.0
@@ -386,8 +396,9 @@ class SimpleThreeLane:
                 self.state, self.reason = 'KEEP', f'차로 {cur} 이 막힘 -> 차로 {self.lane} 로 돌아감'
                 return V_SLOW
             else:
-                if a < STOP_DIST:
-                    self.state, self.reason = 'STOP', f'옮기는 중 앞 {a:.2f} m'
+                a_pass = self._free(cur, passing=True)    # 옮겨 가는 차로의, 옆에 거의 지나친 장애물은 빼고 (정면은 GUARD 가 막는다)
+                if a_pass < STOP_DIST:
+                    self.state, self.reason = 'STOP', f'옮기는 중 앞 {a_pass:.2f} m'
                     return 0.0
                 self.state, self.reason = 'CHANGE', f'차로 {self.change_from} -> {cur}'
                 return V_CHANGE
@@ -479,9 +490,10 @@ class SimpleThreeLane:
         else:
             speed = self._decide(goal, front)
         merging = self.s >= self.island_at + MERGE_TURN
-        look = MERGE_LOOK if merging else (LOOKAHEAD_CHANGE if self.changing else LOOKAHEAD_KEEP)
+        tight = self.changing and self.tight and not merging
+        look = MERGE_LOOK if merging else (LOOKAHEAD_TIGHT if tight else (LOOKAHEAD_CHANGE if self.changing else LOOKAHEAD_KEEP))
         steer = T.steer_to_lane(self.c, self.th, self.lane, look)
-        steer = T.limit_heading(steer, self.th, MERGE_HEADING if merging else HEADING_MAX)
+        steer = T.limit_heading(steer, self.th, MERGE_HEADING if merging else (HEADING_TIGHT if tight else HEADING_MAX))
         if front < GUARD_DIST and speed > 0.0:
             speed, self.state, self.reason = 0.0, 'STOP', f'정면 {front:.2f} m 에 물체'
         speed, rev = self._recover(speed, now)
