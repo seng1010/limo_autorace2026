@@ -227,3 +227,39 @@ def test_verify_lamp_position_rejects_uniform_bright_box():
     # 진짜 신호등(위 칸만 켜짐)은 그대로 통과
     real = _light_image('red')
     assert frame_color([_det('red')], real, real.shape, cfg) == 'red'
+
+
+def _drive_past_lines(mission, line_positions, sensor_range=1.0, dt=0.05, lag=0.15,
+                      green_after=20.0, until=90.0):
+    """정지선이 여러 개인 구간을 달린다. 멈춘 위치(odom)를 돌려준다."""
+    t, v, s = 0.0, 0.0, 0.0
+    while t < until:
+        ahead = [p - s for p in line_positions if 0.0 <= p - s <= sensor_range]
+        d = min(ahead) if ahead else None
+        light = 'red' if t < green_after else 'green'
+        decision = mission.update(t, d, v, s, light, last_light_s=0.0)
+        if decision.state == 'hold':
+            return s
+        target = 0.25 if decision.speed_limit is None else min(0.25, decision.speed_limit)
+        v += (target - v) * min(1.0, dt / lag)
+        if abs(v) < 1e-4:
+            v = 0.0
+        s += v * dt
+        t += dt
+    return None
+
+
+def test_skip_lines_ignores_earlier_white_line():
+    """경기장 M1: 횡단보도 정지선(2.0 m) 앞에 '천천히' 시작선(0.6 m)이 하나 더 있다."""
+    lines = [0.6, 2.0]
+    stopped = _drive_past_lines(_mission(), lines)
+    assert stopped is not None and abs(stopped - 0.6) <= 0.05      # 앞선 선에 서 버림
+
+    stopped = _drive_past_lines(_mission(skip_lines=1), lines)
+    assert stopped is not None, '횡단보도 정지선에서 멈추지 않음'
+    assert abs(stopped - 2.0) <= 0.05                              # 진짜 정지선에 ±5cm
+
+
+def test_skip_lines_zero_keeps_old_behaviour():
+    lines = [1.2]
+    assert abs(_drive_past_lines(_mission(), lines) - 1.2) <= 0.05
