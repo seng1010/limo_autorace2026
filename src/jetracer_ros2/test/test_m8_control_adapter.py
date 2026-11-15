@@ -1,0 +1,144 @@
+"""Execute the M8 authority adapter with fake ROS transport, not just text checks."""
+import importlib
+import sys
+import types
+from types import SimpleNamespace as NS
+
+import pytest
+
+
+class Twist:
+    def __init__(self,**kw):
+        self.linear=NS(x=0.,y=0.,z=0.)
+        self.angular=NS(x=0.,y=0.,z=0.)
+
+
+class Stamped:
+    def __init__(self,**kw):
+        self.header=NS(stamp=NS(sec=0,nanosec=0),frame_id='')
+        self.twist=Twist()
+        self.point=NS(x=0.,y=0.,z=0.)
+        self.__dict__.update(kw)
+
+
+class Pub:
+    def __init__(self): self.messages=[]
+    def publish(self,msg): self.messages.append(msg)
+    def get_subscription_count(self): return 1
+
+
+class Owner:
+    def __init__(self):
+        self.now=10_000_000_000
+        self._active='M8'
+        self._odom=NS(s=0.)
+        self._odom_ns=self.now
+        self._blocked=False
+        self._section_limit=None
+        self._section_limit_ns=0
+        self.params={'odom_timeout_sec':.5,'normal_speed':.25,'auto_start_mission_nodes':False}
+        self.output=[]
+        self.subscriptions={}
+    def declare_parameter(self,k,v): self.params.setdefault(k,v)
+    def get_parameter(self,k): return NS(value=self.params[k])
+    def create_publisher(self,*a,**kw): return Pub()
+    def create_subscription(self,t,topic,cb,*a,**kw): self.subscriptions[topic]=cb
+    def get_clock(self): return NS(now=lambda:NS(nanoseconds=self.now))
+    def get_logger(self): return NS(info=lambda *a:None,warn=lambda *a:None)
+    def _publish(self,msg): self.output.append((msg.linear.x,msg.angular.z))
+    def _debug(self,*a): pass
+    def _start_process(self,*a): pass
+    def _control_tick(self): self.m8.tick(self.now)
+    def _advance(self,*a):
+        self._active='M8' if self._active=='M2' else 'M1'
+        self.m8.enter(self._active)
+
+
+@pytest.fixture
+def owner(monkeypatch):
+    modules={
+        'geometry_msgs.msg':dict(PointStamped=Stamped,Twist=Twist,TwistStamped=Stamped),
+        'std_msgs.msg':dict(Bool=NS,Float32=NS,String=NS),
+        'rclpy.qos':dict(DurabilityPolicy=NS(TRANSIENT_LOCAL=1),QoSProfile=lambda **kw:kw)}
+    for name,attrs in modules.items():
+        mod=types.ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules,name,mod)
+    sys.modules.pop('jetracer_ros2.m8_control',None)
+    module=importlib.import_module('jetracer_ros2.m8_control')
+    n=Owner()
+    n.m8=module.M8Control(n)
+    n.m8.enter('M8')
+    yield n
+    sys.modules.pop('jetracer_ros2.m8_control',None)
+
+
+def proposal(n,v=.10,w=-.13,age=.1):
+    msg=Stamped()
+    t=n.now-int(age*1e9)
+    msg.header.stamp=NS(sec=t//10**9,nanosec=t%10**9)
+    msg.twist.linear.x,msg.twist.angular.z=v,w
+    n.m8._store_cone_cmd(msg)
+
+
+def test_safe_cone_is_immediately_forwarded_without_lane_overwrite(owner):
+    proposal(owner)
+    assert owner.output[-1]==(.10,-.13)
+    owner._control_tick()
+    assert owner.output[-1]==(.10,-.13)
+
+
+def test_stale_and_estop_stop_but_clear_and_fresh_proposal_resume(owner):
+    proposal(owner)
+    owner.m8.event('ESTOP')
+    proposal(owner)
+    assert owner.output[-1]==(0.,0.)
+    owner.m8.event('ESTOP_CLEAR')
+    proposal(owner)
+    assert owner.output[-1]==(.10,-.13)
+    proposal(owner,age=.26)
+    assert owner.output[-1]==(0.,0.)
+    proposal(owner,v=.09)
+    assert owner.output[-1]==(0.,0.)
+
+
+def test_approach_keeps_race_until_armed_then_cone_owns(owner):
+    owner._active='M2'
+    owner.m8.enter('M2')
+    assert owner.m8.tick(owner.now) is False
+    assert owner.output==[]
+    assert owner.m8.event('ARM_M8')
+    owner.m8.tick(owner.now)
+    assert owner.output[-1]==(0.,0.)
+    proposal(owner)
+    assert owner._active=='M8'
+    assert owner.output[-1]==(.10,-.13)
+
+
+def test_no_other_mission_control_is_consumed(owner):
+    for mission in ('M1','M3','M4','M5','M6','M7'):
+        owner._active=mission
+        owner.m8.enter(mission)
+        assert owner.m8.tick(owner.now) is False
+
+
+def test_exit_line_transfers_only_to_fresh_checked_lane_and_waits_otherwise(owner):
+    owner.m8._m8_exit.reset(0.)
+    owner._odom.s=.8
+    for t in (0,.06,.12):
+        owner.now=10_000_000_000+int(t*1e9)
+        owner._odom_ns=owner.now
+        msg=Stamped()
+        msg.header.frame_id='front_axle'
+        msg.header.stamp=NS(sec=owner.now//10**9,nanosec=owner.now%10**9)
+        msg.point.x=.3
+        owner.m8._m8_exit_line_callback(msg)
+    assert owner.m8._m8_exit.owns_lane
+    proposal(owner)
+    assert owner.output[-1]==(0.,0.)
+    lane=Stamped()
+    lane.header.stamp=NS(sec=owner.now//10**9,nanosec=owner.now%10**9)
+    lane.twist.linear.x=.1
+    lane.twist.angular.z=.04
+    owner.m8._store_exit_lane(lane)
+    assert owner.output[-1]==(.1,.04)

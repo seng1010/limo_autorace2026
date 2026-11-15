@@ -25,6 +25,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
 
+from jetracer_ros2.m8_control import M8Control
 from jetracer_ros2.m1_traffic_light import M1Config, TrafficLightMission
 from jetracer_ros2.m3_pedestrian import M3Config, PedestrianStopMission
 from jetracer_ros2.stop_approach import (
@@ -179,6 +180,7 @@ class MissionManagerNode(Node):
         self.create_subscription(String, 'mission/cone/state', self._cone_state_callback, 10)
         self.create_subscription(String, 'mission/parking/state', self._parking_state_callback, 10)
         self.create_subscription(Float32, 'mission/speed_limit', self._speed_limit_callback, 10)
+        self.m8 = M8Control(self)
         self.timer = self.create_timer(0.05, self._control_tick)
         self._enter_mission(self._active, initial=True)
 
@@ -188,6 +190,8 @@ class MissionManagerNode(Node):
 
     def _mission_event_callback(self, msg):
         event = msg.data.strip().upper()
+        if self.m8.event(event):
+            return
         if self._active == 'M4' and event in ('NEXT', 'M4_DONE'):
             self._blocked = True
             self.cmd_pub.publish(Twist())
@@ -258,8 +262,7 @@ class MissionManagerNode(Node):
                 self._advance('M7 obstacle cleared')
 
     def _cone_state_callback(self, msg):
-        if self._active == 'M8':
-            self._blocked = msg.data in ('lost', 'emergency_stop')
+        pass  # M8Control reads atomic stamped commands, not out-of-order state strings.
 
     def _parking_state_callback(self, msg):
         if self._active == 'M4' and msg.data == 'complete':
@@ -286,6 +289,7 @@ class MissionManagerNode(Node):
             self._m3.reset()
         if mission == 'M1':
             self._m1.reset()
+        self.m8.enter(mission)
         self.lane_mode_pub.publish(String(data='center'))
         self.active_pub.publish(String(data=mission))
         process = DYNAMIC_NODE.get(mission)
@@ -367,6 +371,8 @@ class MissionManagerNode(Node):
         now = self.get_clock().now().nanoseconds
         if self._stopping:
             self._reap_processes(now)
+        if self.m8.tick(now):
+            return
         if self._active not in ('M1', 'M3'):   # M1·M3는 _report 에서 상태까지 같이 발행
             line = self._fresh_stop_line(now)
             line_text = f'{line:.3f}' if line is not None else 'none'

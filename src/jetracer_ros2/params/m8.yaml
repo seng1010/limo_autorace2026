@@ -1,0 +1,24 @@
+mission_cone_avoid_node:
+  ros__parameters:
+    scan_topic: '/scan'
+    output_topic: 'mission/cone/cmd_vel'
+    validated_output_topic: 'mission/cone/safe_cmd_vel'
+    motion_enabled: true             # 통합 주행 기본 ON; m8_cone.launch motion:=false로 관측만 가능
+    scan_frame: 'laser_link'
+    scan_timeout_sec: 0.25
+    speed: 0.10                      # 검증한 경로에서만 내보낼 구동 속도 [m/s]
+    max_steer_angle: 0.42
+    minimum_turn_radius_m: 0.50
+    lidar_x_m: 0.203                  # 뒤 차축 기준 공개 모델 명목값; 실차 확인
+    lidar_y_m: 0.0
+    lidar_yaw_rad: 0.0
+    vehicle_half_width_m: 0.12        # 바퀴·범퍼 포함 실제 치수로 교체
+    vehicle_front_m: 0.29
+    vehicle_rear_m: 0.09
+    cone_padding_m: 0.045            # 스캔면에서 보이지 않는 받침 추가 여유; 실측 필요
+    minimum_clearance_m: 0.025
+    resume_scans: 2
+
+    target_hold_sec: 0.50
+    target_hold_distance_m: 0.10
+    rear_from_odom_x_m: -0.10
