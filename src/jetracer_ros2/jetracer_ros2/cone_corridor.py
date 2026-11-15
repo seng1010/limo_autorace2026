@@ -12,6 +12,10 @@ LOCAL_SWEEP_M = .20
 PREVIEW_SWEEP_M = .38
 PREVIEW_COMFORT_M = .07
 PREVIEW_WEIGHT = 3.0
+COARSE_CURVATURE_SAMPLES = 11
+REFINED_CURVATURE_SAMPLES = 81
+TARGET_CURVATURE_WEIGHT = .08
+GATE_ALIGNMENT_WEIGHT = .45
 
 @dataclass(frozen=True)
 class Params:
@@ -21,8 +25,8 @@ class Params:
     half_width: float = .12
     front: float = .29
     rear: float = .09
-    cone_padding: float = .045
-    clearance: float = .025
+    cone_padding: float = .030
+    clearance: float = .015
     minimum_radius: float = .50
     max_steer_rad: float = .42
     speed: float = .10
@@ -84,6 +88,25 @@ def _preview_penalty(points, k, p):
     gap = swept_clearance(points, arc[steps > LOCAL_SWEEP_M], p)
     return PREVIEW_WEIGHT * float(np.clip(PREVIEW_COMFORT_M-gap, 0.,
                                           PREVIEW_COMFORT_M+p.cone_padding))
+
+
+def _gate_alignment(gate):
+    """Gate normal is the observed passage direction, not a turn-side latch."""
+    normal = gate.get('normal')
+    if normal is None:
+        return 0., 0.
+    angle = math.atan2(normal[1], normal[0])
+    # Far pairs are less certain. Alignment gains influence as we approach,
+    # without an extra permission state or a maximum-steering hold timer.
+    weight = GATE_ALIGNMENT_WEIGHT * min(1., .75/max(np.linalg.norm(gate['gate']), .01))
+    return angle, weight
+
+
+def _alignment_cost(angle, weight, yaw):
+    error = math.atan2(math.sin(angle-yaw), math.cos(angle-yaw))
+    # Score improvement relative to NOW so selecting a different gate does
+    # not win just because its initial direction happened to be straight.
+    return weight * (error*error-angle*angle)
 
 
 def checked_exit_lane(command, points, p, *, scan=None, approach=False):
@@ -338,32 +361,51 @@ class Planner:
         radius = (PREVIEW_SWEEP_M + math.hypot(max(p.front, p.rear), p.half_width)
                   + p.cone_padding + PREVIEW_COMFORT_M)
         preview_points = points[np.sum(points*points, axis=1) <= radius*radius]
-        # Sample only realizable curvature; the swept rectangle includes corners.
-        for g in gates:
-            x,y = g['gate']
-            desired = float(np.clip(2*y/(x*x+y*y),-limit,limit))
-            ks = np.unique(np.clip(np.r_[np.linspace(-limit,limit,11),desired],-limit,limit))
-            for k in ks:
-                key=round(float(k),10)
-                if key not in checked:
-                    arc=rollout(k,LOCAL_SWEEP_M)
-                    clearance=swept_clearance(points,arc,p)
-                    safe=(clearance>=p.clearance and
-                          _prefix_observed(a,ranges,p,k,horizon=LOCAL_SWEEP_M))
-                    checked[key]=arc,clearance,safe
-                arc,clearance,safe=checked[key]
-                if not safe:
-                    continue
-                progress = np.linalg.norm(g['gate'])-np.linalg.norm(g['gate']-arc[-1,:2])
-                if progress < .07:
-                    continue
-                if key not in preview:
-                    preview[key] = _preview_penalty(preview_points, k, p)
-                cost = g['cost']+.16*abs(k-desired)+preview[key]
-                if self.previous_curvature is not None:
-                    cost += .025*abs(k-self.previous_curvature)
-                if best is None or cost < best[0]:
-                    best = cost,g,clearance,k,arc
+
+        def search(grid):
+            for g in gates:
+                x,y = g['gate']
+                desired = float(np.clip(2*y/(x*x+y*y),-limit,limit))
+                angle, weight = _gate_alignment(g)
+                # Optimum of the two local quadratic terms; includes an
+                # intermediate steering target, not just coarse/max angles.
+                aligned = ((TARGET_CURVATURE_WEIGHT*desired + weight*LOCAL_SWEEP_M*angle)
+                           / (TARGET_CURVATURE_WEIGHT + weight*LOCAL_SWEEP_M**2))
+                ks = np.unique(np.clip(np.r_[grid, desired, aligned],-limit,limit))
+                for k in ks:
+                    consider(g, k, desired, angle, weight)
+
+        def consider(g, k, desired, angle, weight):
+            nonlocal best
+            key=round(float(k),10)
+            if key not in checked:
+                arc=rollout(k,LOCAL_SWEEP_M)
+                clearance=swept_clearance(points,arc,p)
+                safe=(clearance>=p.clearance and
+                      _prefix_observed(a,ranges,p,k,horizon=LOCAL_SWEEP_M))
+                checked[key]=arc,clearance,safe
+            arc,clearance,safe=checked[key]
+            if not safe:
+                return
+            progress = np.linalg.norm(g['gate'])-np.linalg.norm(g['gate']-arc[-1,:2])
+            if progress < .07:
+                return
+            if key not in preview:
+                preview[key] = _preview_penalty(preview_points, k, p)
+            cost = (g['cost'] + TARGET_CURVATURE_WEIGHT*(k-desired)**2 + preview[key]
+                    + _alignment_cost(angle, weight, arc[-1,2]))
+            if self.previous_curvature is not None:
+                cost += .025*abs(k-self.previous_curvature)
+            if best is None or cost < best[0]:
+                best = cost,g,clearance,k,arc
+        # Only forward 20 cm arcs. Cached tests are shared across gates and
+        # both passes. Refine ONLY when the cheap pass has no executable arc.
+        search(np.linspace(-limit,limit,COARSE_CURVATURE_SAMPLES))
+        result['search_stage'] = 'coarse'
+        if best is None:
+            search(np.linspace(-limit,limit,REFINED_CURVATURE_SAMPLES))
+            result['search_stage'] = 'refined'
+        result['candidate_count'] = len(checked)
         if best is None:
             self.previous_curvature = None
             return {**result,'state':'path_blocked'}

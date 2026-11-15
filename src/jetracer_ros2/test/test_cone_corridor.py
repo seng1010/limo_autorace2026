@@ -194,7 +194,9 @@ class TestConeCorridor(unittest.TestCase):
             raw = np.where(np.isfinite(raw), raw, 4.)
             self.assertEqual(plan_m8(A, raw, P)['speed'], 0.)
         raw = synthetic_scan(cones+[(.38, 0.)])
-        self.assertEqual(plan_m8(A, raw, P)['state'], 'footprint_blocked')
+        # With the measured smaller padding this is outside the CURRENT
+        # footprint, but remains blocked on every forward 20 cm arc.
+        self.assertEqual(plan_m8(A, raw, P)['state'], 'path_blocked')
 
     def test_guarded_lane_approach_checks_short_sweep_without_changing_exit(self):
         scan = A, np.full(250, 4.)
@@ -309,6 +311,73 @@ def test_lost_scan_stops_even_with_goal_history():
     planner.update(A,observed([(.65,-.30),(.65,.30)]),1.,(.1,0.,0.))
     z=planner.update(A,np.full(250,np.nan),1.1,(.11,0.,0.))
     assert z['speed']==0.
+
+
+def test_measured_padding_and_clearance_are_separate():
+    assert P.cone_padding == .030
+    assert P.clearance == .015
+    body = np.zeros((1, 3))
+    for raw_gap, expected in ((.044, False), (.046, True)):
+        points = np.array([[P.front+raw_gap, 0.]])
+        assert (cone_corridor.swept_clearance(points, body, P) >= P.clearance) == expected
+
+
+def test_refined_forward_search_finds_narrow_band_and_reuses_checks():
+    gate = {'gate': np.array([.8, 0.]), 'normal': np.array([1., 0.]), 'cost': 0.}
+    points = np.array([[1.5, .8]])
+    with patch.object(cone_corridor, 'clusters', return_value=(points, [])), \
+            patch.object(cone_corridor, '_gates', return_value=[gate, gate]), \
+            patch.object(cone_corridor, '_prefix_observed',
+                         side_effect=lambda a, r, p, k, **kw: .97 < k < 1.04) as seen:
+        z = plan_m8(A, np.full(250, 4.), P)
+    assert z['state'] == 'tracking'
+    assert z['search_stage'] == 'refined'
+    assert .97 < z['curvature'] < 1.04
+    ks = [round(call.args[3], 10) for call in seen.call_args_list]
+    assert len(ks) == len(set(ks))
+    assert z['candidate_count'] <= 83
+    assert all(call.kwargs['horizon'] == .20 for call in seen.call_args_list)
+
+
+def test_normal_pass_never_pays_for_dense_search():
+    z = plan_m8(A, observed(parallel()), P)
+    assert z['state'] == 'tracking'
+    assert z['search_stage'] == 'coarse'
+    assert z['candidate_count'] <= 11 + 2*8
+
+
+def test_alignment_turns_early_but_releases_once_aligned_and_is_symmetric():
+    for sign in (-1, 1):
+        gate = {'gate': np.array([.75, sign*.18]),
+                'normal': np.array([np.cos(.8), sign*np.sin(.8)]), 'cost': 0.}
+        points = np.array([[2., 1.]])
+        with patch.object(cone_corridor, 'clusters', return_value=(points, [])), \
+                patch.object(cone_corridor, '_gates', return_value=[gate]):
+            with patch.object(cone_corridor, 'GATE_ALIGNMENT_WEIGHT', 0.):
+                no_alignment = plan_m8(A, np.full(250, 4.), P)
+            early = plan_m8(A, np.full(250, 4.), P)
+            gate['gate'] = np.array([.75, 0.])
+            gate['normal'] = np.array([1., 0.])
+            aligned = plan_m8(A, np.full(250, 4.), P)
+        assert sign*early['curvature'] > sign*no_alignment['curvature']
+        assert abs(aligned['curvature']) < 1e-8
+
+
+def test_alignment_never_forces_maximum_or_bypasses_missing_rays():
+    gate = {'gate': np.array([.65, -.3]), 'normal': np.array([.6, -.8]), 'cost': 0.}
+    points = np.array([[1.5, .8]])
+    with patch.object(cone_corridor, 'clusters', return_value=(points, [])), \
+            patch.object(cone_corridor, '_gates', return_value=[gate]), \
+            patch.object(cone_corridor, '_prefix_observed',
+                         side_effect=lambda a, r, p, k, **kw: -1.4 < k < -.8):
+        z = plan_m8(A, np.full(250, 4.), P)
+    assert z['state'] == 'tracking'
+    assert -1.4 < z['curvature'] < -.8
+    assert abs(z['curvature']) < curvature_limit(P)
+    with patch.object(cone_corridor, 'clusters', return_value=(points, [])), \
+            patch.object(cone_corridor, '_gates', return_value=[gate]), \
+            patch.object(cone_corridor, '_prefix_observed', return_value=False):
+        assert plan_m8(A, np.full(250, 4.), P)['speed'] == 0.
 
 if __name__ == '__main__':
     unittest.main()

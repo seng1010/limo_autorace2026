@@ -39,7 +39,7 @@ class MissionConeAvoidNode(Node):
             'lidar_x_m': 0.203, 'lidar_y_m': 0.0, 'lidar_yaw_rad': 0.0,
             'scan_frame': 'laser_link', 'scan_timeout_sec': 0.25,
             'vehicle_half_width_m': 0.12, 'vehicle_front_m': 0.29, 'vehicle_rear_m': 0.09,
-            'cone_padding_m': 0.045, 'minimum_clearance_m': 0.025,
+            'cone_padding_m': 0.030, 'minimum_clearance_m': 0.015,
             'resume_scans': 2,
             'minimum_turn_radius_m': 0.50,
             'motion_enabled': False,
@@ -309,7 +309,9 @@ class MissionConeAvoidNode(Node):
                 callback_ms=(time.monotonic_ns()-rx_mono)/1e6, reason=reason,
                 speed=speed, groups=len(result['groups']) if result else 0,
                 goal=result['road']['gate'].tolist() if result and result['road'] else None,
-                clearance=result.get('min_clearance') if result else None), separators=(',', ':'))))
+                clearance=result.get('min_clearance') if result else None,
+                search_stage=result.get('search_stage') if result else None,
+                candidate_count=result.get('candidate_count', 0) if result else 0), separators=(',', ':'))))
 
 
 def main(args=None):
