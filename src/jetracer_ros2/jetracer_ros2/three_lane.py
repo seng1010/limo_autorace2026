@@ -69,6 +69,8 @@ FAR_SHRINK = 1.25
 MAX_STEER = math.radians(25.0)
 LOOKAHEAD = 0.55                            # 목표점: 카메라 앞 이 거리(도로 방향) [m]
 LOOKAHEAD_CHANGE = 0.42                     # 차로를 옮기는 동안은 더 가까운 점을 보고 빨리 꺾는다
+HEADING_TIGHT = math.radians(60.0)          # 급하게 옮길 때 허용하는 각도. 45도를 넘으면 차로 선이 안 보여 그동안은 odom 으로 간다
+                                            # (규정: 정차 LIMO 접촉·차로 이탈은 1점 감점, 멈춰서 못 가면 미션 실패 -> 서는 쪽이 더 손해)
 LOOKAHEAD_TIGHT = 0.30                      # 앞 장애물이 가까울 때(TIGHT_BELOW 안)는 더 급하게
 TIGHT_BELOW = 1.00
 
@@ -88,6 +90,31 @@ SIDE_PASSED = 0.10                          # 옆 장애물의 끝이 라이다 
 SIDE_GAP = 0.18                             # 차 옆면과 이만큼 떨어져 있으면 지나친 것으로 본다 (꺾는 동안 차 뒤쪽이 닿지 않는다)
 CAR_HALF_WIDTH = 0.11
 GAIN_MIN = 0.45                             # 옮길 차로가 내 차로보다 이만큼은 더 비어 있어야 한다
+# 경로 미리 굴려 보기 (path_clearance): 지금 자세에서 그 차로로 실제 조향 규칙대로 갔을 때 라이다 점과의 최소 여유
+PATH_MARGIN = 0.06                          # 급할 때(앞이 URGENT_BELOW 안)는 이 여유만 나와도 간다
+PATH_GOOD = 0.12                            # 급하지 않으면 이만큼 여유가 나올 때까지 기다린다 (조금 더 가면 더 넓은 길이 나오는 경우가 많다)
+URGENT_BELOW = 0.80
+ISLAND_URGENT = 1.60                        # 표지판 쪽으로 건널 때: 섬이 이 안이면 급한 것으로 본다
+PATH_STEP = 0.03
+PATH_MAX_M = 2.2
+PATH_LAG_M = 0.08                           # 조향이 먹는 데 걸리는 거리 (실제보다 조금 느리게 잡는다)
+PATH_STEER = math.radians(23.0)             # 미리 굴릴 때 쓰는 최대 조향 (실제 25도보다 작게)
+CAR_BODY_CENTER = 0.10                      # 차체 가운데: 뒤 차축 앞 [m]
+CAR_BODY_HALF_LEN = 0.16
+PATH_ROAD_HALF = 0.80                       # 경로 중 차체가 이 밖(바깥 노란 선)으로 나가면 안 된다
+MEMORY_BEHIND_M = 1.00                      # 지나친 라이다 점을 이 거리까지 기억한다 (라이다는 뒤를 못 본다)
+CLOSE_GAIN = 0.15                           # 앞이 가까울 때(CLOSE_BELOW 안)는 옆 차로가 이만큼만 더 비어 있어도 옮긴다
+CLOSE_BELOW = 0.90
+BLIND_MAX = 1.6                             # 선 없이 odom 으로만 갈 수 있는 거리 (급하게 옮기는 동안 선이 안 보인다)
+MEMORY_STEP_M = 0.03                        # 이만큼 갈 때마다 한 번 기억한다
+REVERSE_MARGIN = 0.05                       # 후진할 때 기억한 점들과 차체 사이에 남길 여유
+REVERSE_SEEN_MAX = 0.60                     # 기억한 점으로 확인하고 후진하는 최대 거리
+REVERSE_RETRY = 0.40                        # 옮기다가 정면이 막혀 섰을 때 물러나는 거리 (같은 차로로 다시 꺾어 들어간다)
+REVERSE_FORGET_M = 0.60                     # 후진한 뒤 이만큼 나아갔으면 후진 횟수를 다시 센다
+ISLAND_NEAR_VIEW = 0.50                     # 섬 앞끝이 이보다 가까우면 카메라에 안 보인다 (옆 테두리만 보인다)
+ISLAND_KEEP_M = 0.50                        # 섬이 잠깐 안 보여도 이 거리 동안은 기억한 위치를 쓴다
+HOLD_FRAMES = 12                            # 막혀서 옮길 차로를 고른 뒤 이만큼(약 0.5초)은, 그 경로가 나오는 한 다른 차로로 다시 바꾸지 않는다
+EXIT_HOLD = 0.90                            # 표지판 쪽이 아니거나 아직 모르면, 섬이 이 거리 안으로 올 때까지 3차선 주행을 끝내지 않는다
 GUARD_HALF = 0.15                           # 정면 통로 반폭 (차 반폭 0.11 + 여유)
 GUARD_DIST = 0.30                           # 정면 통로 안 이 거리(라이다 기준)에 물체가 있으면 위치 추정과 상관없이 선다
 STOP_DIST = 0.38                            # 갈 곳이 없으면 장애물 앞 이 거리에서 정지
@@ -358,6 +385,87 @@ def front_gap(ranges, angle_min, angle_increment, range_min):
     return float(d[1]) if d.size >= 2 else LIDAR_MAX          # 점 2개 이상일 때만 (잡음 1개는 무시)
 
 
+def scan_points(ranges, angle_min, angle_increment, range_min, c, th):
+    """라이다 한 바퀴 -> 도로 기준 점들 (라이다에서 도로 방향 거리, 도로 가운데 기준 옆 위치[왼쪽 +])."""
+    r = np.asarray(ranges, dtype=np.float32)
+    a = angle_min + np.arange(r.size) * angle_increment
+    ok = np.isfinite(r) & (r >= max(range_min, 0.05)) & (r <= LIDAR_MAX * 1.2)
+    x, y = r[ok] * np.cos(a[ok]), r[ok] * np.sin(a[ok])
+    return x * math.cos(th) + y * math.sin(th), c + (-x * math.sin(th) + y * math.cos(th))
+
+
+def path_clearance(along, lateral, c, th, target, lookahead, hmax, steer0=0.0):
+    """지금 자세(c, th)에서 차로 target 으로, 실제와 같은 조향 규칙으로 미리 굴려 본 경로에서
+    차체와 점들(along, lateral) 사이의 최소 거리 [m]. 차체가 바깥 노란 선 밖으로 나가면 -1.
+    along 은 카메라(라이다) 위치 기준 도로 방향 거리."""
+    psi = -th                                              # 차 방향 (도로 기준, 왼쪽 +)
+    x = -CAMERA_FORWARD_OFFSET * math.cos(psi)             # 뒤 차축
+    y = c - CAMERA_FORWARD_OFFSET * math.sin(psi)
+    steer = float(np.clip(steer0, -PATH_STEER, PATH_STEER))
+    poses = []
+    settled = 0
+    for _ in range(int(PATH_MAX_M / PATH_STEP)):
+        cam_y = y + CAMERA_FORWARD_OFFSET * math.sin(psi)
+        cmd = limit_heading(steer_to_lane(cam_y, -psi, target, lookahead), -psi, hmax)
+        cmd = max(-PATH_STEER, min(PATH_STEER, cmd))
+        steer += (cmd - steer) * min(1.0, PATH_STEP / PATH_LAG_M)
+        if abs(steer) > 1e-4:
+            radius = WHEELBASE / math.tan(abs(steer)) + TRACK / 2.0
+            psi += math.copysign(PATH_STEP / radius, steer)
+        x += PATH_STEP * math.cos(psi)
+        y += PATH_STEP * math.sin(psi)
+        poses.append((x, y, psi))
+        if abs(cam_y - LANE_CENTER[target]) < 0.06 and abs(psi) < math.radians(10.0):
+            settled += 1
+            if settled >= 8:                               # 도착한 뒤 0.25 m 더 본다
+                break
+    P = np.asarray(poses)
+    cs, sn = np.cos(P[:, 2]), np.sin(P[:, 2])
+    # 차체 네 모서리가 도로 안에 있는지
+    for fx in (CAR_BODY_CENTER - CAR_BODY_HALF_LEN, CAR_BODY_CENTER + CAR_BODY_HALF_LEN):
+        for fy in (-CAR_HALF_WIDTH, CAR_HALF_WIDTH):
+            if float(np.abs(P[:, 1] + fx * sn + fy * cs).max()) > PATH_ROAD_HALF:
+                return -1.0
+    if along is None or len(along) == 0:
+        return LIDAR_MAX
+    dx = along[None, :] - P[:, 0:1]
+    dy = lateral[None, :] - P[:, 1:2]
+    fx = dx * cs[:, None] + dy * sn[:, None] - CAR_BODY_CENTER
+    fy = -dx * sn[:, None] + dy * cs[:, None]
+    d = np.hypot(np.maximum(np.abs(fx) - CAR_BODY_HALF_LEN, 0.0), np.maximum(np.abs(fy) - CAR_HALF_WIDTH, 0.0))
+    return float(d.min())
+
+
+def reverse_room(along, lateral, c, th, max_d):
+    """지금 방향 그대로 곧게 후진할 수 있는 거리 [m]: 차체가 점들(지나오며 기억한 것 포함)에 REVERSE_MARGIN 안으로
+    다가가거나 바깥 노란 선을 넘기 직전까지. 차체 가운데보다 앞에 있는 점은 멀어지기만 하므로 보지 않는다."""
+    psi = -th
+    cs, sn = math.cos(psi), math.sin(psi)
+    x = -CAMERA_FORWARD_OFFSET * cs
+    y = c - CAMERA_FORWARD_OFFSET * sn
+    if along is not None and len(along):
+        fx0 = (along - x) * cs + (lateral - y) * sn - CAR_BODY_CENTER
+        back = fx0 < 0.0
+        pa, pl = along[back], lateral[back]
+    else:
+        pa = pl = np.zeros(0)
+    d = 0.0
+    while d + PATH_STEP <= max_d:
+        nx, ny = x - (d + PATH_STEP) * cs, y - (d + PATH_STEP) * sn
+        for fx in (CAR_BODY_CENTER - CAR_BODY_HALF_LEN, CAR_BODY_CENTER + CAR_BODY_HALF_LEN):
+            for fy in (-CAR_HALF_WIDTH, CAR_HALF_WIDTH):
+                if abs(ny + fx * sn + fy * cs) > PATH_ROAD_HALF:
+                    return d
+        if pa.size:
+            fx = (pa - nx) * cs + (pl - ny) * sn - CAR_BODY_CENTER
+            fy = -(pa - nx) * sn + (pl - ny) * cs
+            gap = np.hypot(np.maximum(np.abs(fx) - CAR_BODY_HALF_LEN, 0.0), np.maximum(np.abs(fy) - CAR_HALF_WIDTH, 0.0))
+            if float(gap.min()) < REVERSE_MARGIN:
+                return d
+        d += PATH_STEP
+    return d
+
+
 def island_distance(yellow_xy, c, th):
     """갈림길 섬(가운데 차로 끝의 노란 테두리)까지 도로 방향 거리 [m]. 안 보이면 None.
     yellow_xy: 노란 선 점들 (오른쪽, 앞) [m], 카메라 바닥 투영점 기준."""
@@ -406,11 +514,37 @@ class Planner:
     def __init__(self):
         self.target: Optional[int] = None
         self.changing = False
-        self.tight = False           # 앞 장애물이 가까운 상태에서 옮기는 중 (급하게 꺾는다)
+        self.tight = False           # 급하게 옮기는 중 (가까운 목표점 + 큰 각도 허용)
+        self._goal_how = None
+        self._hold = 0               # 방금 고른 차로를 유지할 남은 프레임 수
         self._goal_clear = 0         # 갈림길 방향 옆 차로가 연속으로 비어 보인 프레임 수
 
-    def _escape(self, cur, c, ahead, side, goal):
-        """막힌 차로 cur 대신 갈 차로. 없으면 None."""
+    @staticmethod
+    def _can(reach, j, urgent):
+        r = reach(j)
+        return r is not None and (r[1] >= PATH_GOOD or urgent)
+
+    def _escape(self, cur, c, ahead, side, goal, reach=None):
+        """막힌 차로 cur 대신 갈 차로. 없으면 None.
+        reach(j) 가 있으면 (라이다로 경로를 미리 굴려 본 결과: None = 못 감, 'normal' / 'tight' = 그 방식으로 감)
+        거리 문턱값 대신 그것으로 갈 수 있는지 정한다."""
+        if reach is not None:
+            need = ahead[cur] + (CLOSE_GAIN if ahead[cur] < CLOSE_BELOW else GAIN_MIN)
+            urgent = ahead[cur] < URGENT_BELOW
+            near = [j for j in range(3) if j != cur and ahead[j] >= need and self._can(reach, j, urgent)]
+            if not near:
+                return None
+            clear = [j for j in near if ahead[j] >= NO_OBSTACLE]
+            if clear:
+                near = clear
+            else:
+                best = max(ahead[j] for j in near)
+                near = [j for j in near if ahead[j] >= best - GOAL_TIE]
+            if goal is not None:         # 표지판 쪽 -> 더 빈 쪽 -> 가까운 차로
+                near.sort(key=lambda j: (abs(j - goal), -ahead[j], abs(j - cur)))
+            else:
+                near.sort(key=lambda j: (-ahead[j], abs(j - cur), abs(j - DEFAULT_SIDE)))
+            return near[0]
         in_cur = abs(c - LANE_CENTER[cur]) < LANE_HALF
         if in_cur and ahead[cur] < MIN_START:
             return None                      # 너무 가까워서 지금 꺾으면 앞 장애물을 스친다
@@ -438,7 +572,7 @@ class Planner:
         return None
 
     def update(self, lane: int, c: float, ahead: List[float], side: List[float],
-               goal: Optional[int] = None, have_scan: bool = True, may_center: bool = False) -> Plan:
+               goal: Optional[int] = None, have_scan: bool = True, may_center: bool = False, reach=None) -> Plan:
         """have_scan=False (라이다가 아직 없음) 이면 차로를 바꾸는 결정을 하지 않는다.
         goal: 확정된 표지판 방향 (0 = A, 2 = B, None = 아직 모름). may_center: 모를 때 가운데 차로로 돌아가도 되는지.
         장애물 회피가 먼저다: 아래 '가고 싶은 차로' 판단은 지금 차로가 막히지 않았을 때만 한다."""
@@ -450,36 +584,65 @@ class Planner:
         if self.changing and abs(c - LANE_CENTER[self.target]) <= ARRIVE_TOL:
             self.changing = self.tight = False
         cur = self.target
+        if self._hold > 0:
+            self._hold -= 1
         if ahead[cur] >= BLOCK_DIST:
             if self.changing:
+                if reach is not None:    # 옮기는 중에도 경로를 다시 본다: 좁아졌으면 더 급하게, 그래도 안 되면 천천히
+                    how = reach(cur)
+                    if how is None:
+                        return Plan(cur, V_SLOW, 'CHANGE', f'차로 {lane} -> {cur} (경로가 좁아 서행)')
+                    if how[0] == 'tight':
+                        self.tight = True
                 return Plan(cur, V_CHANGE, 'CHANGE', f'차로 {lane} -> {cur}')
             # 가고 싶은 차로: 표지판이 확정됐으면 그쪽, 아직 모르면 가운데 (어느 쪽이 나와도 한 칸이면 되게)
             want = goal if goal is not None else (1 if may_center else cur)
             if want != cur:
                 if goal is None:         # 가운데로 돌아가 기다리기: 세 차로 모두 앞에 아무것도 안 보일 때만
                     ok = min(min(side), min(ahead)) >= NO_OBSTACLE       # (돌아간 뒤 어느 쪽으로든 나갈 수 있어야 한다)
+                elif reach is not None:  # 표지판 쪽 차로: 그 차로 앞이 비어 있고, 거기까지 가는 경로가 나오면 간다
+                    how = reach(want)    # (섬 앞을 가로지르는 것도 경로만 나오면 된다. 섬은 점으로 넣어 둔다)
+                    urgent = min(ahead[1], side[1]) < ISLAND_URGENT
+                    ok = ahead[want] >= NO_OBSTACLE and how is not None and (how[1] >= PATH_GOOD or urgent)
+                    if ok:
+                        self._goal_how = how[0]
                 elif abs(want - cur) == 1:
                     ok = side[want] >= NO_OBSTACLE and ahead[want] >= NO_OBSTACLE
                 else:                    # 반대편 바깥 차로 -> 가운데 차로를 가로질러 한 번에 건넌다 (섬이 충분히 멀 때만)
                     ok = (min(side[1], ahead[1]) >= NO_OBSTACLE
                           and side[want] >= NO_OBSTACLE and ahead[want] >= NO_OBSTACLE)
                 self._goal_clear = self._goal_clear + 1 if ok else 0
-                if self._goal_clear >= (GOAL_CLEAR_FRAMES if abs(want - cur) == 1 else CROSS_FRAMES):
+                frames = GOAL_CLEAR_FRAMES if (abs(want - cur) == 1 or reach is not None) else CROSS_FRAMES
+                if self._goal_clear >= frames:
                     self._goal_clear = 0
                     self.target, self.changing = want, True
+                    self.tight = reach is not None and goal is not None and self._goal_how == 'tight'
                     why = '갈림길 방향' if goal is not None else '표지판 대기'
                     return Plan(want, V_CHANGE, 'CHANGE', f'{why} -> 차로 {want}')
             else:
                 self._goal_clear = 0
             return Plan(cur, V_KEEP, 'KEEP', '')
         # cur 가 막힘 (가는 중이든 옮기는 중이든)
-        best = self._escape(cur, c, ahead, side, goal)
+        if self.changing and reach is not None and self._hold > 0:
+            how = reach(cur)             # 방금 고른 차로: 경로가 나오는 한 그대로 간다 (프레임마다 왔다 갔다 하면 어느 쪽으로도 못 간다)
+            if how is not None:
+                self.tight = self.tight or how[0] == 'tight'
+                return Plan(cur, V_CHANGE, 'CHANGE', f'차로 {lane} -> {cur}')
+        best = self._escape(cur, c, ahead, side, goal, reach)
         if best is not None:
-            self.tight = ahead[cur] < TIGHT_BELOW        # 앞이 가까운 채로 빠져나감 -> 급하게 꺾는다
+            if reach is not None:
+                self.tight = reach(best)[0] == 'tight'
+                self._hold = HOLD_FRAMES
+            else:
+                self.tight = ahead[cur] < TIGHT_BELOW    # 앞이 가까운 채로 빠져나감 -> 급하게 꺾는다
             self.target, self.changing = best, True
             return Plan(best, V_CHANGE, 'CHANGE', f'차로 {cur} 앞 {ahead[cur]:.2f} m 막힘 -> 차로 {best}')
         if ahead[cur] < STOP_DIST and abs(c - LANE_CENTER[cur]) < LANE_HALF:
             return Plan(cur, 0.0, 'STOP', f'앞 {ahead[cur]:.2f} m, 옮길 차로 없음')
+        if self.changing and reach is not None:
+            # 옮기는 중: 도착할 차로 앞이 가까워 보여도 하던 방식(급하게 꺾기 포함)을 그대로 끝낸다.
+            # 중간에 조향 방식을 바꾸면 반쯤 건넌 채로 곧게 펴져 버린다 (시뮬레이션: 섬 앞에 멈춤). 정면 정지는 따로 있다
+            return Plan(cur, V_SLOW, 'CHANGE', f'차로 {lane} -> {cur} (앞 {ahead[cur]:.2f} m, 서행)')
         return Plan(cur, V_SLOW, 'BLOCKED', f'차로 {cur} 앞 {ahead[cur]:.2f} m, 옮길 차로 없음')
 
 
@@ -498,25 +661,25 @@ def steer_to_lane(c, th, target, lookahead=LOOKAHEAD):
     return math.copysign(min(math.atan(WHEELBASE / inside_radius), MAX_STEER), left)
 
 
-def limit_heading(steer, th):
+def limit_heading(steer, th, hmax=None):
     """도로 방향에서 HEADING_MAX 넘게 틀어지지 않게 한다. 넘었으면 넘은 만큼 되돌리는 조향을 최소로 건다.
     (위치를 잘못 알고 계속 한쪽으로 꺾어 도로와 60도까지 틀어진 적이 있다 - 11/15 04:21)"""
     heading = -th                                       # 차가 도로보다 왼쪽을 보면 +
-    over = abs(heading) - HEADING_MAX
+    over = abs(heading) - (HEADING_MAX if hmax is None else hmax)
     if over <= 0.0:
         return steer
     back = min(MAX_STEER, math.radians(4.0) + 2.0 * over)
     return min(steer, -back) if heading > 0.0 else max(steer, back)
 
 
-def yellow_wall(lines, th_obs, ystart=None, only_side=0.0):
+def yellow_wall(lines, th_obs, ystart=None, only_side=0.0, skip=()):
     """노란 선은 벽: 3차선에서 넘어도 되는 것은 흰 점선뿐이다 (노란 선 = 바깥 선 또는 섬 테두리).
     노란 선에 닿기 전에 나란해질 수 없을 만큼 가까워지면, 위치 추정과 상관없이 그 선 반대쪽으로 꺾는다.
     ystart: 선마다 실제로 시작하는 곳 [m]. 내가 그 선 자리를 넘는 지점보다 한참 앞에서 시작하는 선(섬 테두리)은 벽이 아니다.
     반환: None 또는 (조향각[왼쪽 +], 설명)."""
     worst = None
     for u, n, ratio in lines:
-        if ratio < 0.75 or n < 50 or abs(u) > 0.60:
+        if ratio < 0.75 or n < 50 or abs(u) > 0.60 or u in skip:
             continue
         side = 1.0 if u > 0 else -1.0                 # 선이 차의 왼쪽(+) / 오른쪽(-)
         if only_side and side != only_side:
@@ -587,6 +750,15 @@ class ThreeLane:
                                      # 처음에는 지나온 길 1.0 m 가 비어 있다고 본다
         self._last_target = None
         self._wall_side = 0.0        # 노란 선 벽에 걸려 있는 쪽 (+1 왼쪽 선, -1 오른쪽 선, 0 없음)
+        self.s_road = 0.0            # 도로 방향으로 간 거리 (기억한 라이다 점의 위치 계산용)
+        self._memory = []            # 지나친 라이다 점 [(도로 방향 절대 위치, 옆 위치)]
+        self._steer_cmd = 0.0        # 직전 조향 명령
+        self._mem_s = None           # 마지막으로 기억한 위치
+        self._isl_s = None           # 기억한 섬 앞끝 위치 (도로 방향 절대 위치)
+        self._isl_at = 0.0           # 섬을 마지막으로 본 위치
+        self._points = None          # 이번 프레임의 점들 (along, lateral, c, th): 후진 여유 계산용
+        self._retry = False          # 이번 후진은 옮기다가 정면이 막혀서 하는 것 (같은 차로로 다시 들어간다)
+        self._rev_travel = 0.0       # 마지막 후진을 끝낸 위치
 
     def reset(self):
         self.road = RoadState()
@@ -633,6 +805,7 @@ class ThreeLane:
             ds = -ds
         self.travel += ds
         self.lane_run = max(0.0, self.lane_run + ds)
+        self.s_road += ds * math.cos(self.road.th)
         self.road.predict(ds, dyaw)
 
     def _recover(self, plan, out, ahead=None) -> bool:
@@ -653,16 +826,23 @@ class ThreeLane:
             # 뒤로 물러나 앞이 비어 보이는 것은 '갈 수 있다'가 아니다. 다른 차로로 옮길 수 있어야 한다
             can_go = plan.state == 'CHANGE' and plan.target != self.dead_lane
             gap = ahead[self.dead_lane] if (ahead is not None and self.dead_lane is not None) else LIDAR_MAX
+            if self._retry:              # 옮기다 선 경우: 정해 둔 만큼 물러난 뒤 같은 차로로 다시 꺾는다
+                if self.reverse_done >= min(self.reverse_room, REVERSE_RETRY):
+                    self.reversing, self.stuck, self._rev_travel = False, 0, self.travel
+                    return False
+                out.speed, out.steer, out.state = -V_REVERSE, 0.0, 'REVERSE'
+                out.reason = f'옮기다 막힘 -> 후진 {self.reverse_done:.2f}/{min(self.reverse_room, REVERSE_RETRY):.2f} m'
+                return True
             if can_go and self.reverse_done >= REVERSE_MIN and (
                     gap >= REVERSE_GO_AHEAD or self.reverse_done >= self.reverse_room):
-                self.reversing, self.stuck = False, 0
+                self.reversing, self.stuck, self._rev_travel = False, 0, self.travel
                 return False
             if can_go:
                 self.reverse_saw_way = True
             elif self.reverse_saw_way:
                 # 길이 보였다가 다시 닫혔다 (방금 피한 옆 장애물 옆으로 되돌아옴). 더 물러나면 손해 ->
                 # 여기서 후진을 끝내고, 다시 천천히 다가가다 길이 열리는 순간 나간다
-                self.reversing, self.stuck = False, 0
+                self.reversing, self.stuck, self._rev_travel = False, 0, self.travel
                 return False
             if self.reverse_done >= self.reverse_room:
                 self.reversing, self.stuck, self.gave_up = False, 0, True
@@ -674,17 +854,22 @@ class ThreeLane:
             return True
         if plan.state != 'STOP':
             self.stuck = 0
+            if self.reverse_count and self.travel - self._rev_travel > REVERSE_FORGET_M:
+                self.reverse_count = 0               # 후진한 뒤 충분히 나아갔다 -> 다음에 막히면 다시 후진할 수 있다
             return False
         self.stuck += 1
         if self.stuck < STUCK_FRAMES:
             return False
         room = min(REVERSE_MAX, self.lane_run - REVERSE_KEEP)
+        if self._points is not None:                 # 지나오며 기억한 점으로 확인한 만큼은 곧게 물러날 수 있다
+            room = max(room, reverse_room(*self._points, REVERSE_SEEN_MAX))
         if self.reverse_count >= 2 or room < REVERSE_MIN:
             self.gave_up, self.dead_lane = True, plan.target
             return False
         self.reversing, self.reverse_done, self.reverse_room = True, 0.0, room
         self.reverse_saw_way = False
-        self.dead_lane = plan.target
+        self._retry = self.planner.changing          # 옮기는 중에 선 것이면 물러났다가 같은 차로로 다시 간다
+        self.dead_lane = None if self._retry else plan.target
         self.reverse_count += 1
         out.speed, out.steer, out.state = -V_REVERSE, 0.0, 'REVERSE'
         out.reason = f'막힘 -> 후진 시작 (최대 {room:.2f} m)'
@@ -699,28 +884,88 @@ class ThreeLane:
         # 풀릴 때까지 시작 지점을 따지지 않는다 (코앞의 선은 카메라 사각 때문에 '앞에서 시작'으로 보인다)
         wall = None
         if obs:
-            wall = yellow_wall(obs['lines'], obs['th'], obs.get('ystart'))
+            # 섬 앞에서 옆 차로로 빠져나가는 중이면, 나가는 쪽의 섬 테두리(도로 안쪽 노란 선)는 넘어야 하는 선이다.
+            # 벽으로 보고 되돌리면 섬 한가운데로 들어간다 (시뮬레이션). 바깥 노란 선은 그대로 벽.
+            cross = ()
+            if self.planner.changing and self.road.c is not None and self.planner.target is not None:
+                way = LANE_CENTER[self.planner.target] - self.road.c
+                cross = tuple(u for u, n, ratio in obs['lines']
+                              if ratio >= 0.75 and u * way > 0.0 and abs(self.road.c + _shrink(u)) < ISLAND_INSIDE)
+            wall = yellow_wall(obs['lines'], obs['th'], obs.get('ystart'), skip=cross)
             if wall is None and self._wall_side:
-                wall = yellow_wall(obs['lines'], obs['th'], None, self._wall_side)
+                wall = yellow_wall(obs['lines'], obs['th'], None, self._wall_side, skip=cross)
             self._wall_side = (1.0 if wall[0] < 0 else -1.0) if wall is not None else 0.0
         if wall is not None:
             out.wall, out.wall_text = wall
         if scan is not None:
             out.front = front_gap(scan[0], scan[1], scan[2], scan[3])
-        if self.road.c is None or self.road.blind_m > 1.0:
+        if self.road.c is None or self.road.blind_m > BLIND_MAX:
             out.state, out.reason = 'LOST', '차로 선으로 위치를 못 잡음'
             return out
         lane = self.road.lane
+        c, th = self.road.c, self.road.th
         if scan is not None:
-            ahead, side = lane_free(scan[0], scan[1], scan[2], scan[3], self.road.c, self.road.th)
+            ahead, side = lane_free(scan[0], scan[1], scan[2], scan[3], c, th)
         else:
             ahead, side = [LIDAR_MAX] * 3, [LIDAR_MAX] * 3
-        island = island_distance(obs.get('yellow_xy') if obs else None, self.road.c, self.road.th)
+        island = island_distance(obs.get('yellow_xy') if obs else None, c, th)
+        # 섬 앞끝이 카메라 밑으로 들어가면 옆 테두리의 '보이는 가장 가까운 곳'이 섬까지 거리로 나온다 (늘 0.4~0.5 m).
+        # 앞끝 위치를 기억해 두고, 가까이 온 뒤에는 그 위치를 쓴다. 잠깐 안 보일 때도 마찬가지
+        if island is not None:
+            pos = self.s_road + island
+            if self._isl_s is None or pos < self._isl_s or self._isl_s - self.s_road > ISLAND_NEAR_VIEW:
+                self._isl_s = pos
+            self._isl_at = self.s_road
+            island = self._isl_s - self.s_road
+        elif self._isl_s is not None and self.s_road - self._isl_at < ISLAND_KEEP_M:
+            island = self._isl_s - self.s_road
+        else:
+            self._isl_s = None
         out.island = island
         if island is not None:                   # 가운데 차로는 섬에서 끝난다 -> 장애물로 취급
             ahead[1], side[1] = min(ahead[1], island), min(side[1], island)
-        plan = self.planner.update(lane, self.road.c, ahead, side, goal, have_scan=scan is not None,
-                                   may_center=goal is None)
+        reach = None
+        self._points = None
+        if scan is not None:
+            pa, pl = scan_points(scan[0], scan[1], scan[2], scan[3], c, th)
+            # 라이다는 뒤를 못 본다: 방금 지나친 점들을 기억해 두었다가 차 뒤쪽이 닿지 않는지 볼 때 쓴다
+            self._memory = [(a, b) for a, b in self._memory if self.s_road - float(a.max()) < MEMORY_BEHIND_M][-40:]
+            behind = [(a - self.s_road, b) for a, b in self._memory]
+            keep = (pa > -0.4) & (pa < 0.6) & (np.abs(pl) <= ROAD_HALF + 0.1)
+            if keep.any() and (self._mem_s is None or abs(self.s_road - self._mem_s) >= MEMORY_STEP_M):
+                self._mem_s = self.s_road            # 거리 기준으로 기억 (프레임 기준이면 느리게 갈 때 금방 잊는다)
+                self._memory.append((pa[keep] + self.s_road, pl[keep]))
+            parts_a, parts_l = [pa], [pl]
+            for a, b in behind:
+                old = a < 0.05                   # 지금 라이다가 볼 수 없는 뒤쪽 것만
+                if old.any():
+                    parts_a.append(a[old]); parts_l.append(b[old])
+            if island is not None:               # 섬: 앞끝과 양옆 테두리를 점으로
+                edge = np.linspace(-ISLAND_HALF + 0.09, ISLAND_HALF - 0.09, 9)
+                parts_a.append(np.full(9, island)); parts_l.append(edge)
+                for k in np.arange(0.15, 1.51, 0.15):
+                    parts_a.append(np.full(2, island + k)); parts_l.append(np.array([edge[0], edge[-1]]))
+            all_a, all_l = np.concatenate(parts_a), np.concatenate(parts_l)
+            near = (all_a > -1.0) & (all_a < PATH_MAX_M + 0.4) & (np.abs(all_l) < ROAD_HALF + 0.2)
+            all_a, all_l = all_a[near], all_l[near]         # 도로 밖(벽, 사람)과 먼 점은 경로 계산에서 뺀다 (계산 시간)
+            self._points = (all_a, all_l, c, th)
+            cache = {}
+
+            def reach(j, _a=all_a, _l=all_l, _c=c, _th=th, _cache=cache):
+                """차로 j 로 가는 경로: None(못 감) 또는 (방식, 최소 여유). 여유가 넉넉하면 보통 방식, 아니면 더 넓은 쪽."""
+                if j not in _cache:
+                    best = None
+                    for name, lookahead, hmax in (('normal', LOOKAHEAD_CHANGE, HEADING_MAX),
+                                                  ('tight', LOOKAHEAD_TIGHT, HEADING_TIGHT)):
+                        clr = path_clearance(_a, _l, _c, _th, j, lookahead, hmax, self._steer_cmd)
+                        if clr >= PATH_MARGIN and (best is None or clr > best[1]):
+                            best = (name, clr)
+                        if clr >= PATH_GOOD:
+                            break
+                    _cache[j] = best
+                return _cache[j]
+        plan = self.planner.update(lane, c, ahead, side, goal, have_scan=scan is not None,
+                                   may_center=goal is None, reach=reach)
         if self.planner.changing and not self.reversing:
             self.lane_run = 0.0                  # 옮기는 중에 지나온 길은 곧지 않다 -> 똑바로 후진하면 방금 피한 장애물에 닿는다
         if out.front < GUARD_DIST and plan.speed > 0.0:
@@ -728,12 +973,14 @@ class ThreeLane:
             plan = Plan(plan.target, 0.0, 'STOP', f'정면 {out.front:.2f} m 에 물체 -> 정지')
         out.ok = True
         out.speed, out.state, out.reason = plan.speed, plan.state, plan.reason
+        tight = plan.state == 'CHANGE' and self.planner.tight
         if plan.state != 'CHANGE':
             lookahead = LOOKAHEAD
         else:
-            lookahead = LOOKAHEAD_TIGHT if self.planner.tight else LOOKAHEAD_CHANGE
+            lookahead = LOOKAHEAD_TIGHT if tight else LOOKAHEAD_CHANGE
         out.steer = steer_to_lane(self.road.c, self.road.th, plan.target, lookahead)
-        out.steer = limit_heading(out.steer, self.road.th)
+        out.steer = limit_heading(out.steer, self.road.th, HEADING_TIGHT if tight else None)
+        self._steer_cmd = out.steer
         if self._recover(plan, out, ahead):
             out.wall = None                      # 후진 중에는 조향을 풀고 곧게 물러난다
         elif wall is not None:
@@ -906,7 +1153,11 @@ class Lane3Supervisor:
         inward = 1.0 if out.target == 2 else -1.0
         island = on_side and any(ratio >= 0.7 and n >= 40 and 0.12 < inward * u < 0.50
                                  for u, n, ratio in out.lines)
-        self._both = self._both + 1 if (on_side and (both_yellow or island)) else 0
+        # 표지판 쪽이 아닌 차로에 있거나 아직 표지판을 모르면, 섬 앞에서 건널 기회가 남아 있는 동안은 끝내지 않는다
+        # (11/15 실차: 섬 1.5 m 앞에서 끝내 버려 그 뒤에 읽은 표지판을 못 씀)
+        hold = ((self.sign_goal is None or out.target != self.sign_goal)
+                and out.island is not None and out.island > EXIT_HOLD)
+        self._both = self._both + 1 if (on_side and (both_yellow or island) and not hold) else 0
         if self._both >= EXIT_FRAMES:
             self.mode = 'done'
             self.message = f"[3차선] 끝: 갈림길 {'A(왼쪽)' if out.target == 0 else 'B(오른쪽)'} 차로 진입 -> 기본 주행"

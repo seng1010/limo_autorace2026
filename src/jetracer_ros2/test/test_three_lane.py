@@ -95,10 +95,10 @@ def test_planner_goes_to_goal_lane_only_when_it_is_empty():
 
 def test_two_lane_move_through_empty_middle_lane():
     far = T.LIDAR_MAX
-    plan = T.Planner().update(2, T.LANE_CENTER[2], [far, 1.6, 1.0], [far, 1.6, 1.0], goal=None)
+    plan = T.Planner().update(2, T.LANE_CENTER[2], [far, 1.5, 1.2], [far, 1.5, 1.2], goal=None)
     assert plan.target == 0
     # 가운데 차로가 1.3 m 밖에 안 비었으면 가로지르지 않는다 (가로지르는 데 약 1.4 m 필요)
-    plan = T.Planner().update(2, T.LANE_CENTER[2], [far, 1.3, 1.0], [far, 1.3, 1.0], goal=None)
+    plan = T.Planner().update(2, T.LANE_CENTER[2], [far, 1.3, 1.2], [far, 1.3, 1.2], goal=None)
     assert plan.target == 2
 
 
@@ -144,7 +144,7 @@ def test_island_distance_and_middle_lane_blocked_by_island():
     assert d is not None and abs(d - 1.25) < 0.08
     assert T.island_distance(xy, c=0.0, th=0.0) > T.island_distance(xy - [0.0, 0.3], c=0.0, th=0.0)
     # 바깥 차로의 노란 실선(도로 가운데에서 0.8 m)은 섬이 아니다
-    outer = np.stack([np.full(60, -0.27), np.linspace(0.5, 1.8, 60)], 1)
+    outer = np.stack([np.full(60, 0.27), np.linspace(0.5, 1.8, 60)], 1)      # 차 오른쪽 0.27 m (x 는 오른쪽 +)
     assert T.island_distance(outer, c=-0.535, th=0.0) is None
     far = T.LIDAR_MAX
     plan = T.Planner().update(1, 0.0, [far, d, far], [far, d, far], goal=0)
@@ -271,7 +271,9 @@ def test_dead_end_is_not_entered_again_after_reversing():
 
     def scan(d):
         r = np.full(n, np.inf, np.float32)
-        for px, py in ((d, -0.05), (d, 0.0), (d, 0.05), (0.3, 0.50), (0.3, 0.55), (0.35, 0.52)):
+        # 가운데 차로의 장애물은 옆으로 길게 이어진다 (점 몇 개짜리면 그 앞뒤로 돌아가는 경로가 나온다)
+        side = [(px, py) for px in np.arange(0.10, 1.25, 0.05) for py in (0.48, 0.55)]
+        for px, py in [(d, -0.05), (d, 0.0), (d, 0.05)] + side:
             r[int(round((math.atan2(py, px) - a0) / inc))] = math.hypot(px, py)
         return r, a0, inc, 0.15
 
@@ -543,3 +545,60 @@ def test_no_straight_reverse_right_after_a_lane_change():
     tl.planner.target, tl.planner.changing = 0, True      # 왼쪽 차로로 옮기는 중
     tl.step_obs(obs(0.2), (0.0, 0.0, 0.0), scan_with([(2.0, 0.3)]))
     assert tl.lane_run == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 경로를 미리 굴려 보는 판단 (11/15: 거리 문턱값 대신 '실제로 지나갈 수 있는가')
+# ---------------------------------------------------------------------------
+def test_path_clearance_open_road_and_blocked_path():
+    # 빈 도로: 가운데 -> 왼쪽 차로는 넉넉히 간다
+    assert T.path_clearance(None, None, 0.0, 0.0, 0, T.LOOKAHEAD_CHANGE, T.HEADING_MAX) >= T.PATH_GOOD
+    # 가는 길 한가운데(대각선 위)에 점이 있으면 여유가 안 나온다
+    along = np.array([0.45, 0.50, 0.55]); lateral = np.array([0.25, 0.27, 0.29])
+    assert T.path_clearance(along, lateral, 0.0, 0.0, 0, T.LOOKAHEAD_CHANGE, T.HEADING_MAX) < T.PATH_MARGIN
+    # 같은 점이라도 반대쪽 차로로 가는 데는 지장이 없다
+    assert T.path_clearance(along, lateral, 0.0, 0.0, 2, T.LOOKAHEAD_CHANGE, T.HEADING_MAX) >= T.PATH_GOOD
+
+
+def test_path_clearance_refuses_leaving_the_road():
+    # 왼쪽 차로에서 왼쪽으로 크게 틀어진 채 출발: 어떤 차로로 가든 차체가 바깥 선을 넘는다
+    assert T.path_clearance(None, None, 0.70, -math.radians(40.0), 0, T.LOOKAHEAD_CHANGE, T.HEADING_MAX) == -1.0
+
+
+def test_reverse_room_stops_before_remembered_points():
+    # 뒤가 비어 있으면 끝까지, 차 뒤 0.3 m 에 점이 있으면 그 앞까지만
+    assert T.reverse_room(np.zeros(0), np.zeros(0), 0.0, 0.0, 0.6) >= 0.55
+    tail = -T.CAMERA_FORWARD_OFFSET + T.CAR_BODY_CENTER - T.CAR_BODY_HALF_LEN      # 차 뒤끝 (카메라 기준)
+    along = np.array([tail - 0.30, tail - 0.30]); lateral = np.array([-0.05, 0.05])
+    room = T.reverse_room(along, lateral, 0.0, 0.0, 0.6)
+    assert 0.15 <= room <= 0.30 - T.REVERSE_MARGIN + 1e-6
+    # 앞에 있는 점은 후진을 막지 않는다
+    assert T.reverse_room(np.array([0.3, 0.3]), np.array([0.0, 0.05]), 0.0, 0.0, 0.6) >= 0.55
+
+
+def test_island_front_is_remembered_when_it_goes_under_the_camera():
+    # 섬이 1.0 m 앞에 보이다가, 0.6 m 나아간 뒤에는 옆 테두리만(늘 0.45 m 로) 보인다 -> 앞끝은 0.4 m 앞으로 남아야 한다
+    tl = T.ThreeLane()
+    left = T.LANE_CENTER[0]
+
+    def frame(x, isl):
+        o = obs(left)
+        f = np.linspace(isl, isl + 0.6, 40)
+        o['yellow_xy'] = np.stack([np.full(40, left - 0.27), f], 1)       # 섬 왼쪽 테두리 (카메라 오른쪽 +)
+        return tl.step_obs(o, (x, 0.0, 0.0), None)
+
+    out = frame(0.0, 1.0)
+    assert abs(out.island - 1.0) < 0.08
+    for x in np.arange(0.05, 0.61, 0.05):
+        out = frame(float(x), max(0.45, 1.0 - float(x)))
+    assert abs(out.island - 0.40) < 0.10
+
+
+def test_chosen_lane_is_kept_for_a_moment():
+    # 막혀서 차로 0 을 골랐으면, 바로 다음 프레임에 차로 2 가 조금 더 좋아 보여도 (경로가 나오는 한) 바꾸지 않는다
+    p = T.Planner()
+    reach = lambda j: ('normal', 0.30)
+    plan = p.update(1, 0.0, [2.5, 0.8, 2.0], [2.5, 0.8, 2.0], reach=reach)
+    assert (plan.state, plan.target) == ('CHANGE', 0)
+    plan = p.update(1, 0.05, [0.9, 0.7, 2.5], [0.9, 0.7, 2.5], reach=reach)
+    assert (plan.state, plan.target) == ('CHANGE', 0)
