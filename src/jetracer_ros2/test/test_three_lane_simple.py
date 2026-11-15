@@ -202,3 +202,14 @@ def test_merges_to_center_after_island_then_hands_back():
     sup.core.s, sup.core.c, sup.core.th = S.START_TO_ISLAND + S.MERGE_END + 0.3, 0.0, 0.0
     outs = [sup.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), False, now=0.0) for _ in range(S.EXIT_FRAMES)]
     assert outs[-1] is None and sup.mode == 'done' and 'B' in sup.message
+
+
+def test_sign_post_on_island_does_not_block_side_lane():
+    """섬 앞끝의 표지판 받침대(차로 칸 가장자리까지 걸침)는 옆 차로를 막지 않는다."""
+    k = core_at(-0.535)
+    k.lane = 2
+    k.s = S.START_TO_ISLAND - 0.6
+    post = [(0.6, 0.535 - 0.30 + d) for d in (-0.03, 0.0, 0.03)]     # 차에서 왼쪽 0.235 m = 도로 -0.30
+    for _ in range(3):
+        out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(post), 2, now=0.0)
+    assert k.ahead[2] >= S.NO_OBSTACLE - 1e-6 and out['v'] > 0.0

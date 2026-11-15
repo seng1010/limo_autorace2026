@@ -274,6 +274,10 @@ class SimpleThreeLane:
         s = self.s + x * math.cos(psi) - y * math.sin(psi)
         lat = self.c + x * math.sin(psi) + y * math.cos(psi)
         keep = np.abs(lat) <= ROAD_HALF
+        # 섬 위(갈림길 표지판 받침대)는 지도에 넣지 않는다. 섬은 따로 막아 둔다. 받침대 끝이 옆 차로 칸에 걸려
+        # 옆 차로가 막혔다고 보고 섬 앞에서 서고 후진을 되풀이했다 (11/16 실차: 표지판이 섬 앞끝에 있음)
+        isl0 = self.island_at
+        keep &= ~((s > isl0 - 0.30) & (s < isl0 + ISLAND_LEN + 0.10) & (np.abs(lat) < T.ISLAND_HALF))
         near = keep & (r[ok] <= MAP_MAX)
         self.map.add(s[near], lat[near])
         far = keep & ~near
