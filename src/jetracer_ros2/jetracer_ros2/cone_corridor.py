@@ -9,6 +9,9 @@ import numpy as np
 from jetracer_ros2.utils.ackermann_utils import TRACK, WHEELBASE
 
 LOCAL_SWEEP_M = .20
+PREVIEW_SWEEP_M = .38
+PREVIEW_COMFORT_M = .07
+PREVIEW_WEIGHT = 3.0
 
 @dataclass(frozen=True)
 class Params:
@@ -68,6 +71,19 @@ def swept_clearance(points, arc, p):
 
 def curvature_limit(p):
     return min(1/p.minimum_radius, 1/(WHEELBASE/np.tan(p.max_steer_rad) + TRACK/2))
+
+
+def _preview_penalty(points, k, p):
+    """Prefer room beyond the authorized arc; never use this to permit motion."""
+    if not len(points):
+        return 0.
+    # Only score observed obstacles on the extension, not free-space evidence.
+    # Bounded cost prevents distant geometry from dominating gate selection.
+    arc = rollout(k, PREVIEW_SWEEP_M)
+    steps = np.linspace(0., PREVIEW_SWEEP_M, len(arc))
+    gap = swept_clearance(points, arc[steps > LOCAL_SWEEP_M], p)
+    return PREVIEW_WEIGHT * float(np.clip(PREVIEW_COMFORT_M-gap, 0.,
+                                          PREVIEW_COMFORT_M+p.cone_padding))
 
 
 def checked_exit_lane(command, points, p, *, scan=None, approach=False):
@@ -306,6 +322,12 @@ class Planner:
         limit = curvature_limit(p)
         best = None
         checked = {}
+        preview = {}
+        # The rear axle travels at most PREVIEW_SWEEP_M; points beyond this
+        # enclosing radius cannot contribute to the bounded clearance cost.
+        radius = (PREVIEW_SWEEP_M + math.hypot(max(p.front, p.rear), p.half_width)
+                  + p.cone_padding + PREVIEW_COMFORT_M)
+        preview_points = points[np.sum(points*points, axis=1) <= radius*radius]
         # Sample only realizable curvature; the swept rectangle includes corners.
         for g in gates:
             x,y = g['gate']
@@ -325,7 +347,9 @@ class Planner:
                 progress = np.linalg.norm(g['gate'])-np.linalg.norm(g['gate']-arc[-1,:2])
                 if progress < .07:
                     continue
-                cost = g['cost']+.16*abs(k-desired)
+                if key not in preview:
+                    preview[key] = _preview_penalty(preview_points, k, p)
+                cost = g['cost']+.16*abs(k-desired)+preview[key]
                 if self.previous_curvature is not None:
                     cost += .025*abs(k-self.previous_curvature)
                 if best is None or cost < best[0]:

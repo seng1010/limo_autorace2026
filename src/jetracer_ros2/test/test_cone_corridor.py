@@ -1,7 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
+from jetracer_ros2 import cone_corridor
 from jetracer_ros2.m8_entry import M8EntryGate, M8ExitGate, m8_entry_policy, m8_phase, select_m8_command
 from jetracer_ros2.cone_corridor import (
     Params, Planner, ResumeGate, checked_exit_lane, curvature_limit, plan_m8,
@@ -231,6 +233,39 @@ def test_narrow_corridor_and_raw_obstacle_are_stops():
     for cones in (parallel(.18),parallel()+[(.40,0.)]):
         assert plan_m8(A,observed(cones),P)['speed']==0.
     assert plan_m8(A,np.full(250,np.inf),P)['speed']==0.
+
+
+def test_far_obstacle_biases_turn_before_the_local_arc_needs_it():
+    scan = np.full(250, 4.)
+    gate = {'gate': np.array([.95, 0.]), 'cost': 0.}
+    for side in (-1, 1):
+        points = np.array([[.60, side*.15]])
+        with patch.object(cone_corridor, 'clusters', return_value=(points, [])), \
+                patch.object(cone_corridor, '_gates', return_value=[gate]):
+            with patch.object(cone_corridor, 'PREVIEW_WEIGHT', 0.):
+                old = plan_m8(A, scan, P)
+            new = plan_m8(A, scan, P)
+        assert old['speed'] == new['speed'] == .10
+        assert old['curvature'] == 0.
+        assert side*new['curvature'] < 0.
+        assert new['min_clearance'] >= P.clearance
+        assert np.isclose(np.linalg.norm(np.diff(new['arc'][:, :2], axis=0), axis=1).sum(),
+                          .20, atol=1e-5)
+        assert cone_corridor.swept_clearance(
+            points, rollout(new['curvature'], .38), P) > P.clearance
+
+
+def test_preview_never_scores_or_releases_candidates_with_missing_local_rays():
+    points = np.array([[.60, -.15]])
+    gate = {'gate': np.array([.95, 0.]), 'cost': 0.}
+    with patch.object(cone_corridor, 'clusters', return_value=(points, [])), \
+            patch.object(cone_corridor, '_gates', return_value=[gate]), \
+            patch.object(cone_corridor, '_prefix_observed', return_value=False) as observed, \
+            patch.object(cone_corridor, '_preview_penalty') as preview:
+        assert plan_m8(A, np.full(250, 4.), P)['state'] == 'path_blocked'
+    assert observed.call_count > 0
+    assert all(call.kwargs['horizon'] == .20 for call in observed.call_args_list)
+    preview.assert_not_called()
 
 def test_inner_and_bridge_central_angles_are_not_the_same_value():
     for k in np.linspace(-curvature_limit(P),curvature_limit(P),11):
