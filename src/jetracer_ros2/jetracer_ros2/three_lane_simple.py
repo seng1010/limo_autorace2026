@@ -41,6 +41,8 @@ STOP_DIST = 0.35         # 갈 데가 없으면 앞 장애물 이 거리에서 �
 # 도면 (2026Track, 도로 방향 거리). s 는 M7 흰 시작선을 0 으로 잰다
 START_TO_DASH = 0.30     # M7 시작선 -> 흰 점선 시작
 START_TO_ISLAND = 4.36   # M7 시작선 -> 섬 앞끝 (카메라로 섬을 보면 그 값을 쓴다)
+CHANGE_FROM_S = 0.20     # 이 위치(카메라 투영점) 전에는 차로를 옮기지 않는다. 시작선까지는 1차선이고, 도로는 시작선 뒤
+                         # 0.05~0.57 m 에서 45도로 벌어진다 (도면). 일찍 옮기면 1차선 노란 선을 밟는다 (11/15 실차)
 LEAVE_DIST = 1.45        # 가운데 차로에서 섬이 이 안으로 오면 옆 차로로 빠진다
 READ_SLOW_BELOW = 2.0    # 표지판을 아직 모르고 가운데 차로에 있으면, 섬이 이 안일 때 천천히 (표지판은 약 1.7 m 안에서만 맞게 읽힌다)
 V_READ = 0.08
@@ -305,6 +307,14 @@ class SimpleThreeLane:
         cur = self.lane
         a = self.ahead[cur]
         to_island = self.island_at - self.s
+        if self.s < CHANGE_FROM_S and not self.changing:
+            # 아직 1차선 (도로가 벌어지기 전): 가운데 차로를 따라가기만 한다
+            self._pref_count = 0
+            if a < STOP_DIST:
+                self.state, self.reason = 'STOP', f'3차선 입구 전, 앞 {a:.2f} m'
+                return 0.0
+            self.state, self.reason = 'KEEP', f'3차선 입구 전 (시작선 {self.s:+.2f} m)'
+            return V_KEEP if a >= BLOCK_DIST else V_SLOW
         if self.changing:
             if abs(self.c - LANE_CENTER[cur]) <= ARRIVE_TOL and abs(self.th) < math.radians(10.0):
                 self.changing = False

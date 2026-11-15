@@ -31,7 +31,7 @@ def box(x, y):
 
 def core_at(c=0.0, th=0.0):
     k = S.SimpleThreeLane()
-    k.start(c, th, (0.0, 0.0, 0.0), 0.0)
+    k.start(c, th, (0.0, 0.0, 0.0), 1.0)     # 3차선 안 (도로가 다 벌어진 곳)
     return k
 
 
@@ -163,3 +163,17 @@ def test_entry_position_from_dash_start_seen_ahead():
     cv2.rectangle(bev, (px - 2, int((T.F1 - 1.5) / T.RES)), (px + 2, fitter.h - 1), 255, -1)
     fitter.white = bev
     assert S.dash_start_ahead(fitter, dict(th=0.0, lines=[(-0.27, 100, 0.0)])) is None   # 화면 아래부터 보임
+
+
+def test_no_lane_change_before_the_road_widens():
+    """시작선 앞(1차선)에서는 표지판 방향이 정해져 있어도, 앞이 막혀 있어도 옮기지 않는다."""
+    k = S.SimpleThreeLane()
+    k.start(0.0, 0.0, (0.0, 0.0, 0.0), -0.4)
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), 2, now=0.0)
+    assert not k.changing and k.lane == 1
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with(box(1.2, 0.0)), None, now=0.0)
+    assert not k.changing and k.lane == 1
+    k.s = S.CHANGE_FROM_S + 0.01
+    for _ in range(S.PREF_FRAMES):
+        k.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), 2, now=0.0)
+    assert k.changing and k.lane == 2
