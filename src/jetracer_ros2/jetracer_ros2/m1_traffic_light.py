@@ -27,6 +27,7 @@ trigger
 from dataclasses import dataclass
 from typing import Optional
 
+from jetracer_ros2.section_logic import LinePassDetector
 from jetracer_ros2.stop_approach import FullStopDetector, StopApproachController
 
 
@@ -40,6 +41,8 @@ class M1Config:
     max_wait_sec: float = 30.0              # 녹색 대기 최대 시간 (0 이하 = 끄기)
     done_distance_m: float = 0.50
     max_approach_distance_m: float = 2.0    # M1 시작 후 판단 못 하고 이만큼 가면 skipped (0 = 끄기)
+    skip_lines: int = 0                     # M1 구간의 앞쪽 정지선을 이 개수만큼 무시
+                                            # (경기장: 횡단보도 앞에 '천천히' 시작선이 하나 있어 1)
 
 
 @dataclass
@@ -62,6 +65,9 @@ class TrafficLightMission:
 
     def reset(self) -> None:
         self.state = 'approach'
+        # 지나온 정지선 세기 (앞쪽의 다른 흰 가로선에 서지 않도록)
+        self._line_detector = LinePassDetector()
+        self.lines_seen = 0
         self.start_s: Optional[float] = None
         self.stop_latched = False
         self.hold_start: Optional[float] = None
@@ -70,6 +76,8 @@ class TrafficLightMission:
         self.full_stop.reset()
 
     def _armed(self, stop_line_m, odom_s, last_light_s) -> bool:
+        if self.lines_seen <= self.config.skip_lines:
+            return False                      # 아직 앞쪽 정지선 구간
         line_near = stop_line_m is not None and stop_line_m <= self.config.line_arm_distance_m
         if self.config.trigger == 'light_or_line':
             return line_near
@@ -87,6 +95,9 @@ class TrafficLightMission:
         cfg = self.config
         if self.start_s is None:
             self.start_s = odom_s
+        if self.state in ('approach', 'passing') and \
+                self._line_detector.update(odom_s, stop_line_m) is not None:
+            self.lines_seen += 1
         green = light == 'green'
 
         if self.state == 'approach':
