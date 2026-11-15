@@ -186,8 +186,10 @@ class M8Control:
             return
         now = self.node.get_clock().now().nanoseconds
         stamp = msg.header.stamp.sec*10**9 + msg.header.stamp.nanosec
-        command, _ = select_m8_command((msg.twist.linear.x, msg.twist.angular.z), (now-stamp)/1e9)
+        command, reason = select_m8_command((msg.twist.linear.x, msg.twist.angular.z), (now-stamp)/1e9)
         self._recovery_offer = (phase, stamp, command) if command[0] and abs(command[1]) <= .20 else None
+        if self._recovery_offer is None and reason != 'stale_cone':
+            self._recovery_budget.cancel()
         if self.node._active == 'M8':
             self._publish_m8_control(now, trigger='recovery_rx')
 
@@ -195,6 +197,8 @@ class M8Control:
         n = self.node
         phase = self._m8_phase_sent
         offer = None
+        if not eligible or n._blocked or self._m8_operator_stop:
+            self._recovery_budget.cancel()
         if eligible and not (n._blocked or self._m8_operator_stop) and self._recovery_offer:
             p, stamp, cmd = self._recovery_offer
             if p == phase and stamp >= after_stamp and 0 <= (now-stamp)/1e9 <= M8_COMMAND_TIMEOUT:
@@ -224,6 +228,7 @@ class M8Control:
     def _set_m8_phase(self, phase):
         if self._m8_phase_sent != phase:
             self._recovery_offer = None
+            self._recovery_budget.cancel()
             self._m8_phase_sent = phase
             self.m8_phase_pub.publish(String(data=phase))
 

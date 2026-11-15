@@ -4,6 +4,7 @@ Rear axle: x forward, y left; steering is the inner wheel angle. No ROS I/O.
 No full-row fitting, global map, learned cone detector or blind command hold.
 """
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 import numpy as np
 from jetracer_ros2.utils.ackermann_utils import TRACK, WHEELBASE
@@ -68,6 +69,14 @@ def rollout(k, length):
     return np.column_stack([np.sin(t)/k, (1-np.cos(t))/k, t])
 
 
+@lru_cache(maxsize=256)
+def _search_arc(k, length):
+    """Cache geometry only, NEVER scan clearances or motion authorization."""
+    arc = rollout(k, length)
+    arc.setflags(write=False)
+    return arc
+
+
 def swept_clearance(points, arc, p):
     if not len(points):
         return 0.
@@ -89,7 +98,7 @@ def _preview_penalty(points, k, p):
         return 0.
     # Only score observed obstacles on the extension, not free-space evidence.
     # Bounded cost prevents distant geometry from dominating gate selection.
-    arc = rollout(k, PREVIEW_SWEEP_M)
+    arc = _search_arc(float(k), PREVIEW_SWEEP_M)
     steps = np.linspace(0., PREVIEW_SWEEP_M, len(arc))
     gap = swept_clearance(points, arc[steps > LOCAL_SWEEP_M], p)
     return PREVIEW_WEIGHT * float(np.clip(PREVIEW_COMFORT_M-gap, 0.,
@@ -357,10 +366,10 @@ class EntrySearchWindow:
 
 def _gates(groups, points, p, *, far_gates=None):
     """Observed cross-track pairs, not independent left/right line fits."""
-    ids = [i for i,g in enumerate(groups) if -.08 < np.median(g[:,0]) < 1.50]
+    centers = {i: np.median(g, axis=0) for i,g in enumerate(groups)}
+    ids = [i for i,q in centers.items() if -.08 < q[0] < 1.50]
     # Bound pairing work, never discard raw returns from collision checks.
-    ids = sorted(ids,key=lambda i:np.linalg.norm(np.median(groups[i],axis=0)))[:24]
-    centers = {i: np.median(groups[i],axis=0) for i in ids}
+    ids = sorted(ids,key=lambda i:np.linalg.norm(centers[i]))[:24]
     margin = p.half_width+p.cone_padding+p.clearance
     max_x = GATE_MAX_X_M if far_gates is None else ENTRY_GATE_MAX_X_M
     choices = []
@@ -509,9 +518,18 @@ class Planner:
 
         def consider(g, k, desired, angle, weight):
             nonlocal best
+            arc = _search_arc(float(k), LOCAL_SWEEP_M)
+            # Preview cost is nonnegative. A candidate whose LOWER bound is
+            # already worse cannot replace the verified winner, even in free
+            # space. Skip work, not safety checks for an executable command.
+            lower = (g['cost'] + TARGET_CURVATURE_WEIGHT*(k-desired)**2
+                     + _alignment_cost(angle, weight, arc[-1,2]))
+            if self.previous_curvature is not None:
+                lower += .025*abs(k-self.previous_curvature)
+            if best is not None and lower > best[0] + 1e-12:
+                return
             key=round(float(k),10)
             if key not in checked:
-                arc=rollout(k,LOCAL_SWEEP_M)
                 clearance=swept_clearance(points,arc,p)
                 safe=(clearance>=p.clearance and
                       _prefix_observed(a,ranges,p,k,horizon=LOCAL_SWEEP_M))

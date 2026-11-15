@@ -394,6 +394,37 @@ def test_normal_pass_never_pays_for_dense_search():
     assert z['candidate_count'] <= 11 + 2*8
 
 
+def test_search_cache_is_bounded_read_only_geometry_not_scan_results():
+    arc = cone_corridor._search_arc(.5, .20)
+    np.testing.assert_array_equal(arc, rollout(.5, .20))
+    assert not arc.flags.writeable
+    assert cone_corridor._search_arc.cache_info().maxsize == 256
+    assert cone_corridor._search_arc(.5, .20) is arc
+
+
+def test_score_lower_bound_skips_only_noncompetitive_candidates():
+    gate = {'gate': np.array([.65, 0.]), 'normal': np.array([1., 0.]), 'cost': 0.}
+    points = np.array([[2., 1.]])
+    with patch.object(cone_corridor, 'clusters', return_value=(points, [])), \
+            patch.object(cone_corridor, '_gates', return_value=[gate]), \
+            patch.object(cone_corridor, 'swept_clearance', wraps=cone_corridor.swept_clearance) as checks:
+        z = plan_m8(A, np.full(250, 4.), P)
+    assert z['curvature'] == 0.
+    assert 0 < z['candidate_count'] < 11
+    assert checks.call_count > 0
+
+
+def test_cached_geometry_does_not_reuse_previous_scan_permission():
+    gate = {'gate': np.array([.65, 0.]), 'normal': np.array([1., 0.]), 'cost': 0.}
+    planner = Planner(P)
+    with patch.object(cone_corridor, '_gates', return_value=[gate]):
+        with patch.object(cone_corridor, 'clusters', return_value=(np.array([[2.,1.]]), [])):
+            assert planner.update(A,np.full(250,4.),1.)['state']=='tracking'
+        wall = np.column_stack((np.full(41,.45), np.linspace(-1.,1.,41)))
+        with patch.object(cone_corridor, 'clusters', return_value=(wall, [])):
+            assert planner.update(A,np.full(250,4.),1.1)['state']=='path_blocked'
+
+
 def test_two_leg_recovery_keeps_forward_clearance_and_requires_blocked_target():
     rays = np.full(250, 4.)
     points = np.array([[.34,-.14], [1.6,1.], [1.6,-1.], [1.5,0.]])

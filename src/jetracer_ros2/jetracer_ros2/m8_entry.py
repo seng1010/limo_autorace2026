@@ -91,18 +91,29 @@ class M8RecoveryBudget:
         self.normal_start_s = None
         self.newer_than = 0
 
+    def cancel(self):
+        """An explicit invalid/zero proposal is not a harmless transport gap."""
+        self.pending = None
+        if self.started is not None:
+            self.started = None
+            self.spent = True
+
     def step(self, now, phase, s, speed, fresh_odom, normal, offer):
         stop = (0., 0.)
         if self.started is not None:
             start_ns, start_s, start_phase, w = self.started
-            if (not fresh_odom or not offer or normal or phase != start_phase
+            if (not fresh_odom or normal or phase != start_phase
                     or not -.005 <= s-start_s < M8_RECOVERY_CUTOFF_M
                     or not 0 <= now-start_ns < M8_RECOVERY_TIMEOUT_NS
-                    or not -.02 <= speed <= .13 or abs(offer[1][1]-w) > .03):
+                    or not -.02 <= speed <= .13
+                    or (offer and abs(offer[1][1]-w) > .03)):
                 self.started = None
                 self.spent = True
             else:
-                return offer[1]
+                # Missing/expired input stops motion NOW, but does not start
+                # a new budget. Resume only on fresh evidence in the original
+                # 0.65 s / 6.5 cm window; neither clock nor distance is reset.
+                return offer[1] if offer else stop
         if self.spent:
             if normal and fresh_odom and speed >= -.02:
                 if self.normal_start_s is None:
@@ -113,8 +124,17 @@ class M8RecoveryBudget:
             else:
                 self.normal_start_s = None
             return stop
-        if normal or not fresh_odom or not offer or not -.02 <= speed <= .03:
+        if normal or not fresh_odom or not -.02 <= speed <= .03:
             self.pending = None
+            return stop
+        if not offer:
+            # Retain EVIDENCE only across a brief expiration between scans.
+            # No command is returned without a currently fresh offer. The
+            # second distinct source stamp must still be within 250 ms of
+            # the first; the extra window accounts for its allowed latency.
+            if self.pending is not None and (self.pending[1] != phase
+                    or not 0 <= now-self.pending[0] <= 500_000_000):
+                self.pending = None
             return stop
         stamp, command = offer
         if stamp <= self.newer_than:

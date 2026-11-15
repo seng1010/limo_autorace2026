@@ -130,6 +130,67 @@ def test_recovery_confirms_distinct_scans_and_stops_at_odom_limit(owner):
     assert owner.output[-1]==(.10,.09)
 
 
+def test_late_recovery_evidence_survives_gap_but_no_stale_motion(owner):
+    # Bag 020242: source scans ~100 ms apart, offers arrive ~200 ms old.
+    recovery_proposal(owner, age=.20)
+    recovery_tick(owner, dt=.06)
+    owner.m8.tick(owner.now)
+    assert owner.output[-1] == (0., 0.)  # Previous command has expired.
+    recovery_tick(owner, dt=.04)
+    recovery_proposal(owner, age=.20)
+    assert owner.output[-1] == (.10, .09)
+    original = owner.m8._recovery_budget.started
+    recovery_tick(owner, dt=.06, move=.004)
+    owner.m8.tick(owner.now)
+    assert owner.output[-1] == (0., 0.)
+    assert owner.m8._recovery_budget.started == original
+    recovery_tick(owner, dt=.04)
+    recovery_proposal(owner, age=.20)
+    assert owner.output[-1] == (.10, .09)
+    assert owner.m8._recovery_budget.started == original
+    recovery_tick(owner, dt=.56)
+    recovery_proposal(owner, age=.20)
+    assert owner.output[-1] == (0., 0.)
+    assert owner.m8._recovery_budget.spent
+
+
+@pytest.mark.parametrize('interruption', ['zero', 'invalid', 'odom', 'phase', 'long_gap', 'estop'])
+def test_recovery_confirmation_does_not_survive_evidence_invalidation(owner, interruption):
+    recovery_proposal(owner, age=.20)
+    recovery_tick(owner, dt=.06)
+    if interruption == 'zero':
+        recovery_proposal(owner, v=0., age=0.)
+    elif interruption == 'invalid':
+        recovery_proposal(owner, w=.3, age=0.)
+    elif interruption == 'odom':
+        owner._odom_ns -= 200_000_000
+        owner.m8.tick(owner.now)
+    elif interruption == 'phase':
+        owner.m8._set_m8_phase('exit_lane')
+        owner.m8._set_m8_phase('cone')
+    elif interruption == 'long_gap':
+        recovery_tick(owner, dt=.5)
+        owner.m8.tick(owner.now)
+    else:
+        owner.m8.event('ESTOP')
+        owner.m8.event('ESTOP_CLEAR')
+    recovery_tick(owner, dt=.04)
+    recovery_proposal(owner, age=.20)
+    assert owner.output[-1] == (0., 0.)
+
+
+def test_active_recovery_cancellation_cannot_resume_as_transport_gap(owner):
+    recovery_proposal(owner)
+    recovery_tick(owner)
+    recovery_proposal(owner)
+    assert owner.output[-1] == (.10,.09)
+    recovery_proposal(owner, v=0., age=0.)
+    for _ in range(3):
+        recovery_tick(owner, dt=.04)
+        recovery_proposal(owner, age=0.)
+        assert owner.output[-1] == (0.,0.)
+
+
 @pytest.mark.parametrize('stop_by',['timeout','stale','estop','reverse','expired_odom','invalid_offer'])
 def test_active_recovery_fails_closed(owner,stop_by):
     recovery_proposal(owner)
