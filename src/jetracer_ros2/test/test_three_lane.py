@@ -602,3 +602,47 @@ def test_chosen_lane_is_kept_for_a_moment():
     assert (plan.state, plan.target) == ('CHANGE', 0)
     plan = p.update(1, 0.05, [0.9, 0.7, 2.5], [0.9, 0.7, 2.5], reach=reach)
     assert (plan.state, plan.target) == ('CHANGE', 0)
+
+
+# ---------------------------------------------------------------------------
+# 섬 앞에서 표지판 읽기 (11/15: 옆 차로에서 읽은 값은 틀린다 -> 가운데로 들어가 읽고 빠진다)
+# ---------------------------------------------------------------------------
+def test_side_lane_goes_to_center_when_island_is_seen_and_sign_unknown():
+    p = T.Planner()
+    far = T.LIDAR_MAX
+    reach = lambda j: ('normal', 0.30)
+    plans = [p.update(2, T.LANE_CENTER[2], [far, 1.8, far], [far, 1.8, far], goal=None, reach=reach,
+                      island=1.8, mid_free=True) for _ in range(T.GOAL_CLEAR_FRAMES)]
+    assert (plans[-1].state, plans[-1].target) == ('CHANGE', 1)
+
+
+def test_center_waits_at_island_then_leaves_to_sign_side():
+    p = T.Planner()
+    far = T.LIDAR_MAX
+    reach = lambda j: ('normal', 0.30)
+    plan = p.update(1, 0.0, [far, 1.2, far], [far, 1.2, far], goal=None, reach=reach, island=1.2, mid_free=True)
+    assert (plan.state, plan.target) == ('KEEP', 1)             # 표지판을 모르면 가운데에서 계속 간다 (옆으로 튕겨 나가지 않는다)
+    plan = p.update(1, 0.0, [far, 1.1, far], [far, 1.1, far], goal=0, reach=reach, island=1.1, mid_free=True)
+    assert (plan.state, plan.target) == ('CHANGE', 0)           # 읽히면 바로 그쪽
+
+
+def test_center_leaves_before_paths_run_out_when_sign_is_never_read():
+    p = T.Planner()
+    far = T.LIDAR_MAX
+    thin = lambda j: ('tight', 0.06)                            # 양쪽 다 여유가 WAIT_MARGIN 아래로 내려옴
+    plan = p.update(1, 0.0, [far, 0.9, far], [far, 0.9, far], goal=None, reach=thin, island=0.9, mid_free=True)
+    assert (plan.state, plan.target) == ('CHANGE', T.DEFAULT_SIDE)
+
+
+def test_signs_read_from_a_side_lane_are_ignored():
+    sup = T.Lane3Supervisor(forced=True)
+    sup.mode = 'on'
+    det = [{'label': 'b', 'confidence': 0.9, 'bbox': [100, 100, 130, 140]}]
+    sup.last = T.ThreeLaneOutput(ok=True, c=T.LANE_CENTER[2])
+    for _ in range(10):
+        sup.see_signs(det)
+    assert sup.sign_goal is None                                # 오른쪽 차로에서 읽은 B 는 버린다
+    sup.last = T.ThreeLaneOutput(ok=True, c=0.05)
+    for _ in range(T.SIGN_NEED):
+        sup.see_signs(det)
+    assert sup.sign_goal == 2                                   # 가운데에서 읽으면 쓴다

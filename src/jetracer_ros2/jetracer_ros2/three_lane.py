@@ -69,7 +69,7 @@ FAR_SHRINK = 1.25
 MAX_STEER = math.radians(25.0)
 LOOKAHEAD = 0.55                            # 목표점: 카메라 앞 이 거리(도로 방향) [m]
 LOOKAHEAD_CHANGE = 0.42                     # 차로를 옮기는 동안은 더 가까운 점을 보고 빨리 꺾는다
-HEADING_TIGHT = math.radians(60.0)          # 급하게 옮길 때 허용하는 각도. 45도를 넘으면 차로 선이 안 보여 그동안은 odom 으로 간다
+HEADING_TIGHT = math.radians(75.0)          # 급하게 옮길 때 허용하는 각도. 45도를 넘으면 차로 선이 안 보여 그동안은 odom 으로 간다
                                             # (규정: 정차 LIMO 접촉·차로 이탈은 1점 감점, 멈춰서 못 가면 미션 실패 -> 서는 쪽이 더 손해)
 LOOKAHEAD_TIGHT = 0.30                      # 앞 장애물이 가까울 때(TIGHT_BELOW 안)는 더 급하게
 TIGHT_BELOW = 1.00
@@ -91,10 +91,10 @@ SIDE_GAP = 0.18                             # 차 옆면과 이만큼 떨어져 
 CAR_HALF_WIDTH = 0.11
 GAIN_MIN = 0.45                             # 옮길 차로가 내 차로보다 이만큼은 더 비어 있어야 한다
 # 경로 미리 굴려 보기 (path_clearance): 지금 자세에서 그 차로로 실제 조향 규칙대로 갔을 때 라이다 점과의 최소 여유
-PATH_MARGIN = 0.06                          # 급할 때(앞이 URGENT_BELOW 안)는 이 여유만 나와도 간다
+PATH_MARGIN = 0.03                          # 급할 때(앞이 URGENT_BELOW 안)는 이 여유만 나와도 간다
 PATH_GOOD = 0.12                            # 급하지 않으면 이만큼 여유가 나올 때까지 기다린다 (조금 더 가면 더 넓은 길이 나오는 경우가 많다)
 URGENT_BELOW = 0.80
-ISLAND_URGENT = 1.60                        # 표지판 쪽으로 건널 때: 섬이 이 안이면 급한 것으로 본다
+ISLAND_URGENT = 2.50                        # 표지판 쪽으로 건널 때: 섬이 이 안이면 급한 것으로 본다
 PATH_STEP = 0.03
 PATH_MAX_M = 2.2
 PATH_LAG_M = 0.08                           # 조향이 먹는 데 걸리는 거리 (실제보다 조금 느리게 잡는다)
@@ -113,13 +113,18 @@ REVERSE_RETRY = 0.40                        # 옮기다가 정면이 막혀 섰�
 REVERSE_FORGET_M = 0.60                     # 후진한 뒤 이만큼 나아갔으면 후진 횟수를 다시 센다
 ISLAND_NEAR_VIEW = 0.50                     # 섬 앞끝이 이보다 가까우면 카메라에 안 보인다 (옆 테두리만 보인다)
 ISLAND_KEEP_M = 0.50                        # 섬이 잠깐 안 보여도 이 거리 동안은 기억한 위치를 쓴다
+# 섬 앞에서 표지판 읽기 (11/15 실차: 오른쪽 차로에서 비스듬히 본 A 표지판을 B 로 두 번 확정 -> 옆 차로에서 읽은 값은 못 믿는다)
+WAIT_START_MIN = 1.30                       # 섬이 이보다 가까우면 옆 차로에서 가운데로 들어가기 시작하지 않는다
+WAIT_MARGIN = 0.10                          # 가운데에서 기다리는 동안 양쪽 차로로 가는 경로에 이만큼 여유가 남아 있어야 한다. 모자라면 그때 정한다
+WAIT_SLOW_BELOW = 1.60                      # 섬이 이 안이면 기다리는 동안 천천히 간다 (표지판을 더 여러 번 읽는다)
+ISLAND_POST_TOL = 0.20                      # 가운데 차로에서 라이다에 보이는 것이 섬(표지판 기둥)인지 장애물인지 가르는 여유
 HOLD_FRAMES = 12                            # 막혀서 옮길 차로를 고른 뒤 이만큼(약 0.5초)은, 그 경로가 나오는 한 다른 차로로 다시 바꾸지 않는다
 EXIT_HOLD = 0.90                            # 표지판 쪽이 아니거나 아직 모르면, 섬이 이 거리 안으로 올 때까지 3차선 주행을 끝내지 않는다
 GUARD_HALF = 0.15                           # 정면 통로 반폭 (차 반폭 0.11 + 여유)
 GUARD_DIST = 0.30                           # 정면 통로 안 이 거리(라이다 기준)에 물체가 있으면 위치 추정과 상관없이 선다
 STOP_DIST = 0.38                            # 갈 곳이 없으면 장애물 앞 이 거리에서 정지
 NO_OBSTACLE = LIDAR_MAX - 0.05              # 빈 거리가 이 이상이면 그 차로에 장애물이 안 보이는 것
-GOAL_CLEAR_FRAMES = 6                       # 갈림길 방향 차로가 연속 이만큼 비어 보여야 미리 옮긴다
+GOAL_CLEAR_FRAMES = 2                       # 갈림길 방향 차로가 연속 이만큼 비어 보여야 미리 옮긴다
 CROSS_FRAMES = 12                           # 두 칸 건너기: 가운데·도착 차로에 아무것도 안 보이는 상태가 연속 이만큼 (라이다 4바퀴)
                                             # 시뮬레이션: 섬 앞끝까지 1.9 m 부터 성공, 1.5~1.8 m 는 섬 앞에 갇힘 -> 2.45 m 안에 섬·기둥이 안 보일 때만
 GOAL_TIE = 0.40                             # 두 차로의 빈 거리 차이가 이 안이면 갈림길 방향 쪽을 고른다
@@ -517,12 +522,45 @@ class Planner:
         self.tight = False           # 급하게 옮기는 중 (가까운 목표점 + 큰 각도 허용)
         self._goal_how = None
         self._hold = 0               # 방금 고른 차로를 유지할 남은 프레임 수
+        self._left_island = False    # 섬 앞 가운데에서 한쪽으로 이미 빠졌다 (다시 가운데로 돌아가지 않는다)
         self._goal_clear = 0         # 갈림길 방향 옆 차로가 연속으로 비어 보인 프레임 수
 
     @staticmethod
     def _can(reach, j, urgent):
         r = reach(j)
         return r is not None and (r[1] >= PATH_GOOD or urgent)
+
+    def _at_island(self, lane, goal, island, reach):
+        """가운데 차로(또는 가운데로 가는 중)에서 섬을 앞에 두고: 계속 갈지, 어느 쪽으로 빠질지. None 이면 기존 판단에 맡긴다."""
+        r = {j: reach(j) for j in (0, 2)}
+        clr = {j: (r[j][1] if r[j] is not None else -1.0) for j in (0, 2)}
+        state = 'CHANGE' if self.changing else 'KEEP'
+        speed = V_SLOW if island < WAIT_SLOW_BELOW else V_CHANGE
+        pick = None
+        if goal in (0, 2):
+            if r[goal] is not None:
+                pick, why = goal, '표지판 쪽'
+            elif island > STOP_DIST + 0.05:
+                # 표지판 쪽으로 가는 경로가 안 나온다 (너무 가까이 와서 읽음). 반대쪽으로 가지 않고 섬 앞에서 선다 ->
+                # 후진해서 거리를 벌린 뒤 표지판 쪽으로 간다 (_recover)
+                return Plan(1, V_SLOW, state, f'섬 {island:.1f} m: 표지판 쪽 경로가 안 나옴 -> 섬 앞에서 서서 물러남')
+            else:
+                return Plan(1, 0.0, 'STOP', '섬 앞: 표지판 쪽 경로가 안 나옴')
+        elif min(clr.values()) >= WAIT_MARGIN:
+            return Plan(1, speed, state, f'섬 {island:.1f} m: 가운데에서 표지판 읽는 중')
+        else:
+            # 한쪽이 곧 못 가게 된다 -> 표지판 없이 정한다: 경로 여유가 더 큰 쪽, 비슷하면 기본 쪽
+            can = [j for j in (0, 2) if r[j] is not None]
+            if can:
+                pick = max(can, key=lambda j: clr[j] + (0.05 if j == DEFAULT_SIDE else 0.0))
+                why = '표지판을 못 읽음'
+        if pick is None:
+            return None
+        self.target, self.changing = pick, True
+        self.tight = r[pick][0] == 'tight'
+        self._hold = HOLD_FRAMES
+        self._left_island = True
+        return Plan(pick, V_CHANGE, 'CHANGE', f'섬 {island:.1f} m 앞 -> 차로 {pick} ({why})')
 
     def _escape(self, cur, c, ahead, side, goal, reach=None):
         """막힌 차로 cur 대신 갈 차로. 없으면 None.
@@ -572,7 +610,8 @@ class Planner:
         return None
 
     def update(self, lane: int, c: float, ahead: List[float], side: List[float],
-               goal: Optional[int] = None, have_scan: bool = True, may_center: bool = False, reach=None) -> Plan:
+               goal: Optional[int] = None, have_scan: bool = True, may_center: bool = False, reach=None,
+               island: Optional[float] = None, mid_free: bool = False) -> Plan:
         """have_scan=False (라이다가 아직 없음) 이면 차로를 바꾸는 결정을 하지 않는다.
         goal: 확정된 표지판 방향 (0 = A, 2 = B, None = 아직 모름). may_center: 모를 때 가운데 차로로 돌아가도 되는지.
         장애물 회피가 먼저다: 아래 '가고 싶은 차로' 판단은 지금 차로가 막히지 않았을 때만 한다."""
@@ -586,6 +625,23 @@ class Planner:
         cur = self.target
         if self._hold > 0:
             self._hold -= 1
+        # 섬 앞에서 표지판 읽기: 가운데 차로를 막는 것이 섬뿐이면 (mid_free), 가운데에서 섬을 보며 가다가
+        # 읽히면 그쪽으로, 끝까지 안 읽히면 양쪽 다 갈 수 있는 마지막 순간에 빠진다
+        if reach is not None and island is not None and mid_free and not self._left_island:
+            if cur == 1:
+                plan = self._at_island(lane, goal, island, reach)
+                if plan is not None:
+                    return plan
+            elif (goal is None and not self.changing and ahead[cur] >= BLOCK_DIST
+                    and island >= WAIT_START_MIN):
+                ok = reach(1) is not None
+                self._goal_clear = self._goal_clear + 1 if ok else 0
+                if self._goal_clear >= GOAL_CLEAR_FRAMES:
+                    self._goal_clear = 0
+                    self.target, self.changing = 1, True
+                    self.tight = reach(1)[0] == 'tight'
+                    return Plan(1, V_CHANGE, 'CHANGE', f'섬 {island:.1f} m -> 가운데에서 표지판 읽기')
+                return Plan(cur, V_KEEP, 'KEEP', '')
         if ahead[cur] >= BLOCK_DIST:
             if self.changing:
                 if reach is not None:    # 옮기는 중에도 경로를 다시 본다: 좁아졌으면 더 급하게, 그래도 안 되면 천천히
@@ -603,7 +659,7 @@ class Planner:
                 elif reach is not None:  # 표지판 쪽 차로: 그 차로 앞이 비어 있고, 거기까지 가는 경로가 나오면 간다
                     how = reach(want)    # (섬 앞을 가로지르는 것도 경로만 나오면 된다. 섬은 점으로 넣어 둔다)
                     urgent = min(ahead[1], side[1]) < ISLAND_URGENT
-                    ok = ahead[want] >= NO_OBSTACLE and how is not None and (how[1] >= PATH_GOOD or urgent)
+                    ok = ahead[want] >= 1.0 and how is not None and (how[1] >= PATH_GOOD or urgent)
                     if ok:
                         self._goal_how = how[0]
                 elif abs(want - cur) == 1:
@@ -922,6 +978,7 @@ class ThreeLane:
         else:
             self._isl_s = None
         out.island = island
+        mid_free = island is not None and min(ahead[1], side[1]) >= island - ISLAND_POST_TOL    # 가운데 차로에 섬 말고는 없다
         if island is not None:                   # 가운데 차로는 섬에서 끝난다 -> 장애물로 취급
             ahead[1], side[1] = min(ahead[1], island), min(side[1], island)
         reach = None
@@ -965,7 +1022,7 @@ class ThreeLane:
                     _cache[j] = best
                 return _cache[j]
         plan = self.planner.update(lane, c, ahead, side, goal, have_scan=scan is not None,
-                                   may_center=goal is None, reach=reach)
+                                   may_center=goal is None, reach=reach, island=island, mid_free=mid_free)
         if self.planner.changing and not self.reversing:
             self.lane_run = 0.0                  # 옮기는 중에 지나온 길은 곧지 않다 -> 똑바로 후진하면 방금 피한 장애물에 닿는다
         if out.front < GUARD_DIST and plan.speed > 0.0:
@@ -997,6 +1054,7 @@ class ThreeLane:
 # ---------------------------------------------------------------------------
 SIGN_MIN_H = 33.0          # 표지판 상자 높이 [px]. 이보다 작게(= 약 1.7 m 보다 멀리) 보일 때 읽은 값은 쓰지 않는다
                            # (27 로 두었더니 실차에서 B 표지판을 29 px 에서 A 로 먼저 확정했다가 바꿈 - 11/15)
+SIGN_CENTER_HALF = 0.30    # 3차선 주행 중에는 도로 가운데에서 이 안에 있을 때 읽은 값만 쓴다 (옆 차로에서 비스듬히 보면 틀린다). 끄려면 9.9
 SIGN_WINDOW = 5            # 최근 이만큼 중
 SIGN_NEED = 4              # 이만큼이 같은 쪽이면 확정
 ARM_AFTER_M = 1.4          # M7 시작(횡단보도 출발) 후 이만큼 간 뒤부터 3차선 선을 찾는다 (그 전은 코너)
@@ -1080,6 +1138,8 @@ class Lane3Supervisor:
         signs = [d for d in detections if d.get('label') in ('a', 'b') and len(d.get('bbox', ())) == 4]
         if not signs:
             return
+        if self.mode == 'on' and not (self.last is not None and self.last.ok and abs(self.last.c) <= SIGN_CENTER_HALF):
+            return                                # 옆 차로에 있는 동안 읽은 값은 버린다
         best = max(signs, key=lambda d: d.get('confidence', 0.0))
         height = float(best['bbox'][3]) - float(best['bbox'][1])
         decided = self.vote.add(best['label'], height)
