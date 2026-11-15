@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import fields
 
 import cv2
 import numpy as np
@@ -36,15 +37,11 @@ class MissionTrafficLightNode(Node):
             'output_topic': 'mission/traffic_light_state',
             'publish_rate_hz': 10.0,
             'image_max_age_sec': 0.3,        # HSV 확인에 쓸 이미지가 이보다 오래되면 확인 생략
-            'min_confidence': 0.45,
-            'min_area_ratio': 0.0005,
-            'verify_hsv': True,
-            'min_lit_ratio': 0.04,
-            'lit_value_min': 150,
-            'lit_saturation_min': 90,
-            'confirm_frames': 3,
-            'lost_timeout_sec': 1.0,
         }
+        # 판단 설정은 TrafficLightConfig 에서 그대로 가져온다.
+        # (직접 적어두면 나중에 항목을 추가했을 때 선언을 빠뜨려 노드가 죽는다)
+        for field in fields(TrafficLightConfig):
+            defaults[field.name] = field.default
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         p = lambda name: self.get_parameter(name).value  # noqa: E731
