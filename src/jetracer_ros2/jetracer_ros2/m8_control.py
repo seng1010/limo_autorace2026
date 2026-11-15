@@ -14,6 +14,9 @@ from jetracer_ros2.m8_entry import (
     M8_EXIT_LINE_TOPIC, M8_PHASE_TOPIC, MIN_M8_SPEED, M8EntryGate, M8ExitGate,
     m8_entry_policy, m8_phase, select_m8_command)
 
+M8_REVERSE_SPEED = -.02
+
+
 class M8Control:
     def __init__(self,node):
         self.node=node
@@ -51,6 +54,8 @@ class M8Control:
         self._m8_near_line = p('m8_entry_arm_near_line_m')
         self._m8_precheck = p('m8_entry_precheck_m')
         self._m8_risk_ns = 0
+        self._m8_reversing = False
+        self._m8_post_reverse_ns = 0
         self._m8_approach_speed = p('m8_entry_approach_speed')
         if not (math.isfinite(self._m8_arm_after) and 0 <= self._m8_entry.pass_margin <= .30
                 and (self._m8_near_line == -1.0 or .15 <= self._m8_near_line <= .60)
@@ -81,6 +86,10 @@ class M8Control:
         now = self.node.get_clock().now().nanoseconds
         if self._odom_fresh(now):
             if self.node._active == 'M2':
+                if self.node._odom_speed < M8_REVERSE_SPEED:
+                    self._m8_reversing = True
+                    self._m8_entry.observations.clear()
+                    return
                 s = self.node._odom.s
                 if self._m8_phase_sent == 'watch_entry':
                     precheck = self._m8_precheck > 0
@@ -146,6 +155,8 @@ class M8Control:
 
     def _store_approach_risk(self, msg):
         if self.node._active != 'M2' or self._m8_phase_sent != 'preflight':
+            return
+        if self._m8_reversing or self.node._odom_speed < M8_REVERSE_SPEED:
             return
         stamp = msg.stamp.sec * 10**9 + msg.stamp.nanosec
         now = self.node.get_clock().now().nanoseconds
@@ -272,6 +283,8 @@ class M8Control:
             self._m8_entry_state='off'
             self._m8_arm_requested=False
             self._m8_risk_ns=0
+            self._m8_reversing=False
+            self._m8_post_reverse_ns=0
             self._m2_start_s=None
         if mission == 'M8':
             self._set_exit_check(False)
@@ -298,6 +311,21 @@ class M8Control:
             return False
         if n._blocked:
             return False  # The original manager applies the operator stop.
+        if self._odom_fresh(now) and math.isfinite(n._odom_speed):
+            reversing = n._odom_speed < M8_REVERSE_SPEED
+            if self._m8_reversing and not reversing:
+                self._m8_post_reverse_ns = now
+            self._m8_reversing = reversing
+        if self._m8_reversing:
+            self._m8_entry.observations.clear()
+            if self._m8_phase_sent == 'preflight':
+                self._m8_risk_ns = 0
+            if (self._m8_phase_sent in ('preflight', 'approach')
+                    or self._m8_arm_requested or self._m8_arm_after == 0):
+                n._publish(Twist())
+                n._debug('source=stop entry=reverse_hold v=0.000')
+                return True
+            return False  # Do not take over ordinary race control while backing.
         gate=self._m8_handoff_state(now)
         if gate=='off':
             return False  # All ordinary lane/mission behavior stays in race.
@@ -305,10 +333,11 @@ class M8Control:
             (now-self._cone_stamp_ns)/1e9 if self._cone_stamp_ns else float('inf'))
         lane,lane_reason=select_m8_command(self._exit_lane_cmd,
             (now-self._exit_lane_stamp_ns)/1e9 if self._exit_lane_stamp_ns else float('inf'))
-        if self._cone_stamp_ns < self._m8_risk_ns:
+        fresh_after = max(self._m8_risk_ns, self._m8_post_reverse_ns)
+        if not math.isfinite(n._odom_speed) or self._cone_stamp_ns < fresh_after:
             cone = (0., 0.)
-        if self._exit_lane_stamp_ns < self._m8_risk_ns:
-            lane, lane_reason = (0., 0.), 'pre_risk_lane_command'
+        if not math.isfinite(n._odom_speed) or self._exit_lane_stamp_ns < fresh_after:
+            lane, lane_reason = (0., 0.), 'entry_wait_fresh_command'
         limit=min(self._m8_approach_speed,n.get_parameter('normal_speed').value)
         if n._section_limit is not None and 0 <= (now-n._section_limit_ns)/1e9 <= 1.:
             limit=min(limit,n._section_limit)

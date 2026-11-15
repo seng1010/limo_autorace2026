@@ -4,7 +4,10 @@ from typing import Optional
 import cv2
 import numpy as np
 from jetracer_ros2.stop_line_detector import StopLineDetection
-def detect_m8_stop_line(image_bgr: np.ndarray, roi_top_ratio: float) -> Optional[StopLineDetection]:
+
+
+def detect_m8_stop_line(image_bgr: np.ndarray, roi_top_ratio: float, *,
+                        allow_oblique: bool = True) -> Optional[StopLineDetection]:
     """Find the slightly wavy, shaded white tape across the M8 lane mouth."""
     height, width = image_bgr.shape[:2]
     top = int(height * roi_top_ratio)
@@ -28,9 +31,36 @@ def detect_m8_stop_line(image_bgr: np.ndarray, roi_top_ratio: float) -> Optional
         if best is None or y+h > best[1]+best[3]:
             best = (x, y, w, h)
     if best is None:
-        return None
+        return _detect_oblique_entry(contours, top, height, width) if allow_oblique else None
     x, y, w, h = best
     return StopLineDetection((top+y+h)/height, (x, top+y, w, h))
+
+
+def _detect_oblique_entry(contours, top, height, width):
+    """Fit the tape along its axis; calibrate the edge at the camera center."""
+    best = None
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        # A tape just grazing the center during the curve is too oblique
+        # in position to use as a front-axle anchor. Require support on
+        # both sides of the center, though either far end may be offscreen.
+        if not (w >= .38*width and x <= .365*width and x+w >= .635*width
+                and y+h < height-top-5):
+            continue
+        (cx, cy), (length, thick), angle = cv2.minAreaRect(contour)
+        if length < thick:
+            length, thick, angle = thick, length, angle+90
+        angle = (angle+90)%180-90
+        if not (4. <= abs(angle) <= 25. and 4. <= thick <= .09*height
+                and length >= 5*thick and cv2.contourArea(contour) >= .35*length*thick):
+            continue
+        angle = math.radians(angle)
+        bottom = cy + (width/2-cx)*math.tan(angle) + thick/(2*math.cos(angle))
+        if not .065*height <= bottom < height-top-5:
+            continue
+        if best is None or bottom > best[0]:
+            best = bottom, (x, top+y, w, h)
+    return StopLineDetection((top+best[0])/height, best[1]) if best else None
 
 
 def detect_m8_exit_stop_line(image: np.ndarray) -> Optional[StopLineDetection]:
@@ -131,7 +161,10 @@ class M8StopLineObserver:
         age=(self.node.get_clock().now().nanoseconds-stamp)/1e9
         if self.phase not in ('watch_entry','preflight','approach','cone') or stamp<=0 or not 0<=age<=.25:
             return
-        entry=detect_m8_stop_line(image,self.config.roi_top_ratio)
+        # During cone ownership keep the original entry-anchor fallback;
+        # the relaxed geometry is for M2 approach only.
+        entry=detect_m8_stop_line(image,self.config.roi_top_ratio,
+                                  allow_oblique=self.phase != 'cone')
         self.entry.publish(Float32(data=self.model.front_distance(entry.row_ratio) if entry else -1.))
         if self.phase=='cone':
             detected=detect_m8_exit_stop_line(image)

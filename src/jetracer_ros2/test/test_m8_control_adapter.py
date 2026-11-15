@@ -33,6 +33,7 @@ class Owner:
         self._active='M8'
         self._odom=NS(s=0.)
         self._odom_ns=self.now
+        self._odom_speed=0.
         self._blocked=False
         self._section_limit=None
         self._section_limit_ns=0
@@ -215,6 +216,41 @@ def test_lost_odometry_after_preflight_stops_instead_of_bypassing_control(owner)
     owner.now += 600_000_000
     assert owner.m8.tick(owner.now)
     assert owner.output[-1] == (0., 0.)
+
+
+def test_reverse_does_not_accumulate_entry_observations(owner):
+    owner.params.update(m8_entry_precheck_m=.55, m8_entry_arm_near_line_m=.45)
+    owner.m8 = type(owner.m8)(owner)
+    owner._active = 'M2'
+    owner.m8.enter('M2')
+    owner._odom_speed = -.50
+    for _ in range(3):
+        owner.now += 30_000_000
+        owner._odom_ns = owner.now
+        owner.m8._m8_visual_line_callback(NS(data=.42))
+        proposal(owner, age=0.)
+        assert not owner.m8.tick(owner.now)
+    assert owner.m8._m8_phase_sent == 'watch_entry'
+    assert owner.m8._m8_entry.line_s is None
+
+
+def test_reverse_blocks_handoff_and_waits_for_post_reverse_proposal(owner):
+    _confirm_preflight(owner)
+    owner._odom_speed = -.50
+    owner._odom.s = .10  # The near-distance trigger is already satisfied.
+    proposal(owner, age=0.)
+    assert owner.m8.tick(owner.now)
+    assert owner._active == 'M2'
+    assert owner.output[-1] == (0., 0.)
+    owner.now += 50_000_000
+    owner._odom_ns = owner.now
+    owner._odom_speed = 0.
+    assert owner.m8.tick(owner.now)
+    assert owner._active == 'M2'
+    assert owner.output[-1] == (0., 0.)
+    proposal(owner, age=0.)
+    assert owner._active == 'M8'
+    assert owner.output[-1] == (.10, -.13)
 
 
 def test_no_other_mission_control_is_consumed(owner):

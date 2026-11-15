@@ -50,3 +50,29 @@ def test_m8_detects_shaded_wavy_tape_without_changing_generic_detector():
 def test_m8_rejects_side_marking_large_patch_and_clipped_line(box):
     top, bottom, left, right = box
     assert detect_m8_stop_line(_image_with_band(top, bottom, left=left, right=right), .58) is None
+
+
+@pytest.mark.parametrize('angle', [-17., 17.])
+def test_oblique_m8_entry_uses_lower_edge_at_camera_center(angle):
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    box = cv2.boxPoints(((370., 374.), (360., 13.), angle)).astype(np.int32)
+    cv2.fillConvexPoly(image, box, (180, 180, 180))
+    result = detect_m8_stop_line(image, .58)
+    assert result is not None
+    expected = 374.-50.*np.tan(np.radians(angle))+6.5/np.cos(np.radians(angle))
+    assert result.row_ratio*480 == pytest.approx(expected, abs=3.)
+    assert detect_m8_stop_line(image, .58, allow_oblique=False) is None
+
+
+@pytest.mark.parametrize('center,shape,angle,color', [
+    ((165., 375.), (260., 16.), -15., WHITE),
+    ((445., 375.), (360., 16.), 15., WHITE),
+    ((320., 375.), (300., 16.), -33., WHITE),
+    ((320., 375.), (330., 49.), -10., WHITE),
+    ((320., 375.), (330., 16.), -15., (0, 210, 230)),
+])
+def test_oblique_entry_rejects_side_steep_thick_and_colored_markings(center,shape,angle,color):
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    box = cv2.boxPoints((center, shape, angle)).astype(np.int32)
+    cv2.fillConvexPoly(image, box, color)
+    assert detect_m8_stop_line(image, .58) is None
