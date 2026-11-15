@@ -263,3 +263,22 @@ def test_skip_lines_ignores_earlier_white_line():
 def test_skip_lines_zero_keeps_old_behaviour():
     lines = [1.2]
     assert abs(_drive_past_lines(_mission(), lines) - 1.2) <= 0.05
+
+
+def test_slow_after_first_line():
+    """M1 구간 '천천히' 표시: 첫 정지선을 지나면 서행한다 (서행 표지판 없음)."""
+    m = _mission(slow_speed=0.15, slow_after_lines=1, skip_lines=1)
+    assert m.update(0.0, None, 0.25, 0.0, 'red').speed_limit is None      # 아직 선 전
+    for i in range(3):                                                     # 첫 선 통과
+        m.update(0.1 * i, 0.5, 0.25, 0.1 * i, 'red')
+    assert m.lines_seen == 1
+    assert m.update(1.0, None, 0.25, 0.5, 'red').speed_limit == pytest.approx(0.15)
+
+
+def test_stop_offset_stops_before_line():
+    """m1_stop_offset: 정지선 앞에 여유를 두고 선다 (신호등이 화각에서 안 벗어나게)."""
+    approach = StopApproachController(StopApproachConfig(stop_offset_m=0.03))
+    mission = TrafficLightMission(M1Config(), approach, FullStopDetector(0.01, 0.3))
+    log = _simulate(mission, lambda t: 'red' if t < 20.0 else 'green')
+    held = [d for _, state, d, _ in log if state == 'hold']
+    assert held and 0.0 < held[0] <= 0.05        # 선 앞 5cm 안에서, 넘지 않음

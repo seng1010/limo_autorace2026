@@ -44,6 +44,10 @@ class M1Config:
     lost_line_revert_m: float = 0.30        # 정지 전에 선을 이 거리보다 멀리서 놓치면
                                             # 잘못 본 선으로 보고 계속 주행 (노면 글씨·무늬 등)
     skip_lines: int = 0                     # M1 구간의 앞쪽 정지선을 이 개수만큼 무시
+    slow_speed: float = -1.0                # 서행 속도 [m/s] (음수 = 서행 안 함).
+                                            # 경기장 M1 에는 '천천히' 노면 표시가 있지만
+                                            # 서행 표지판이 없어 YOLO 로는 못 잡는다
+    slow_after_lines: int = 1               # 정지선을 이 개수 지난 뒤부터 서행
                                             # (경기장: 횡단보도 앞에 '천천히' 시작선이 하나 있어 1)
 
 
@@ -92,6 +96,19 @@ class TrafficLightMission:
         self.state = 'go'
         self.go_start_s = odom_s
 
+    def _slow_limit(self) -> Optional[float]:
+        """서행 구간이면 그 속도, 아니면 None."""
+        cfg = self.config
+        if cfg.slow_speed > 0.0 and self.lines_seen >= cfg.slow_after_lines:
+            return cfg.slow_speed
+        return None
+
+    def _decide(self, state: str, speed_limit: Optional[float] = None, **kwargs) -> M1Decision:
+        slow = self._slow_limit()
+        if slow is not None and state in ('approach', 'passing', 'stopping', 'go'):
+            speed_limit = slow if speed_limit is None else min(speed_limit, slow)
+        return M1Decision(speed_limit=speed_limit, state=state, **kwargs)
+
     def update(self, now: float, stop_line_m: Optional[float], speed: Optional[float],
                odom_s: float, light: str, last_light_s: Optional[float] = None) -> M1Decision:
         """light: 확정된 신호 색. last_light_s: 신호등(아무 색)을 마지막으로 본 odom 위치."""
@@ -120,7 +137,7 @@ class TrafficLightMission:
             elif odom_s >= self.pass_end_s:
                 self.state = 'done'
             else:
-                return M1Decision(state='passing')
+                return self._decide('passing')
 
         if self.state == 'stopping':
             if green and not self.stop_latched and not cfg.stop_on_green_arrival:
@@ -137,7 +154,7 @@ class TrafficLightMission:
                     # 아직 먼데 선이 사라짐 = 잘못 본 선. 그 자리에 서지 말고 계속 간다
                     self.state = 'approach'
                     self._last_line_m = None
-                    return M1Decision(state='approach')
+                    return self._decide('approach')
                 else:
                     limit = 0.0                       # 사각지대로 들어간 선
                 if limit == 0.0:
@@ -149,7 +166,7 @@ class TrafficLightMission:
                 else:
                     self.full_stop.reset()
                 if self.state == 'stopping':
-                    return M1Decision(speed_limit=limit, state='stopping')
+                    return self._decide('stopping', limit)
 
         if self.state == 'hold':
             waited = now - self.hold_start
@@ -162,10 +179,10 @@ class TrafficLightMission:
             if odom_s - self.go_start_s >= cfg.done_distance_m:
                 self.state = 'done'
             else:
-                return M1Decision(state='go')
+                return self._decide('go')
 
         if self.state == 'done':
             return M1Decision(done=True, state='done')
         if self.state == 'skipped':
             return M1Decision(done=True, skipped=True, state='skipped')
-        return M1Decision(state=self.state)
+        return self._decide(self.state)

@@ -85,6 +85,10 @@ class MissionManagerNode(Node):
             'm1_skip_lines': 0,
             'm1_lost_line_revert_m': 0.30,
             'm3_lost_line_revert_m': 0.30,
+            'm1_stop_offset_m': -1.0,
+            'm3_stop_offset_m': -1.0,
+            'm1_slow_speed': -1.0,
+            'm1_slow_after_lines': 1,
             'm3_hold_sec': 3.5,
             'm3_done_distance_m': 0.50,
         }
@@ -117,10 +121,14 @@ class MissionManagerNode(Node):
         self._odom_warned = False
         self._last_out_speed = 0.0
         self._last_pedestrian_s = None    # 보행자 표지판을 마지막으로 본 odom 위치 (미션 무관)
-        approach = StopApproachController(StopApproachConfig(
-            approach_start_m=p('approach_start_m'), gain=p('approach_gain'),
-            creep_speed=p('approach_creep_speed'), max_speed=p('normal_speed'),
-            stop_offset_m=p('approach_stop_offset_m')))
+        def make_approach(offset_param):
+            offset = p(offset_param)
+            if offset < 0.0:
+                offset = p('approach_stop_offset_m')     # 음수 = 공용값 사용
+            return StopApproachController(StopApproachConfig(
+                approach_start_m=p('approach_start_m'), gain=p('approach_gain'),
+                creep_speed=p('approach_creep_speed'), max_speed=p('normal_speed'),
+                stop_offset_m=offset))
         self._m3 = PedestrianStopMission(
             M3Config(trigger=p('m3_trigger'),
                      line_arm_distance_m=p('m3_line_arm_distance_m'),
@@ -128,7 +136,8 @@ class MissionManagerNode(Node):
                      max_approach_distance_m=p('m3_max_approach_distance_m'),
                      hold_sec=p('m3_hold_sec'), done_distance_m=p('m3_done_distance_m'),
                      lost_line_revert_m=p('m3_lost_line_revert_m')),
-            approach, FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
+            make_approach('m3_stop_offset_m'),
+            FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
         self._m1 = TrafficLightMission(
             M1Config(trigger=p('m1_trigger'),
                      line_arm_distance_m=p('m1_line_arm_distance_m'),
@@ -139,8 +148,11 @@ class MissionManagerNode(Node):
                      done_distance_m=p('m1_done_distance_m'),
                      max_approach_distance_m=p('m1_max_approach_distance_m'),
                      skip_lines=p('m1_skip_lines'),
-                     lost_line_revert_m=p('m1_lost_line_revert_m')),
-            approach, FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
+                     lost_line_revert_m=p('m1_lost_line_revert_m'),
+                     slow_speed=p('m1_slow_speed'),
+                     slow_after_lines=p('m1_slow_after_lines')),
+            make_approach('m1_stop_offset_m'),
+            FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
         self._mission_last_state = ''
 
         self.cmd_pub = self.create_publisher(
