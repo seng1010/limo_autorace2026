@@ -18,7 +18,7 @@ def generate_launch_description():
         '/mission/active', '/mission/event', '/mission/stop_line_visual_distance',
         '/mission/lane/observed_cmd_vel', '/mission/lane/observed_center',
         '/mission/lane/geometry_hint', '/mission/cone/phase', '/mission/cone/exit_line',
-        '/mission/cone/approach_risk',
+        '/mission/cone/approach_risk', '/mission/cone/partial_entry_line',
         '/mission/cone/safe_cmd_vel', '/mission/cone/safe_exit_cmd_vel',
         '/mission/cone/state', '/mission/cone/timing', '/mission/cone/control_timing',
         '/mission_manager/debug/state']

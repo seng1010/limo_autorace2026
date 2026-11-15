@@ -11,7 +11,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from jetracer_ros2.m8_entry import (
     M8_APPROACH_RISK_TOPIC, M8_COMMAND_TIMEOUT, M8_CONTROL_TIMING_TOPIC,
     M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
-    M8_EXIT_LINE_TOPIC, M8_PHASE_TOPIC, MIN_M8_SPEED, M8EntryGate, M8ExitGate,
+    M8_EXIT_LINE_TOPIC, M8_PHASE_TOPIC, M8_PARTIAL_ENTRY_TOPIC,
+    MIN_M8_SPEED, M8EntryGate, M8ExitGate, M8PartialEntryGate,
     m8_entry_policy, m8_phase, select_m8_command)
 
 M8_REVERSE_SPEED = -.02
@@ -44,6 +45,7 @@ class M8Control:
         self._m8_phase_sent = None
         self._m8_exit_handoff_ns = 0
         self._m8_entry = M8EntryGate(p('m8_entry_pass_margin_m'), p('m8_entry_search_limit_m'))
+        self._m8_partial = M8PartialEntryGate()
         self._m8_exit = M8ExitGate(p('m8_exit_min_gap_m'), p('m8_exit_pass_margin_m'),
                                    p('m8_exit_settle_m'), handoff_on_detection=True)
         if not (.30 <= self._m8_exit.min_gap <= 20.0 and
@@ -80,6 +82,27 @@ class M8Control:
         self.node.create_subscription(Header, M8_APPROACH_RISK_TOPIC, self._store_approach_risk, 1)
         self.node.create_subscription(Float32, 'mission/stop_line_visual_distance', self._m8_visual_line_callback, 1)
         self.node.create_subscription(PointStamped, M8_EXIT_LINE_TOPIC, self._m8_exit_line_callback, 1)
+        self.node.create_subscription(PointStamped, M8_PARTIAL_ENTRY_TOPIC, self._m8_partial_callback, 1)
+
+    def _m8_partial_callback(self, msg):
+        n = self.node
+        if (n._active != 'M2' or self._m8_phase_sent != 'watch_entry'
+                or self._m8_near_line <= 0 or n._blocked):
+            return
+        now = n.get_clock().now().nanoseconds
+        stamp = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+        if (not self._odom_fresh(now) or not math.isfinite(n._odom_speed)
+                or n._odom_speed < M8_REVERSE_SPEED or self._m8_reversing):
+            self._m8_partial.reset()
+            return
+        if (msg.header.frame_id != 'front_axle' or stamp <= 0 or stamp < self._m8_post_reverse_ns
+                or not 0 <= (now-stamp)/1e9 <= M8_COMMAND_TIMEOUT):
+            return
+        confirmed = self._m8_partial.observe(n._odom.s, msg.point.x, stamp/1e9)
+        if confirmed and n.get_parameter('auto_start_mission_nodes').value:
+            # Start observation only: race still owns control until a checked
+            # cone command arrives. _start_process already avoids duplicates.
+            n._start_process('mission_cone_avoid_node')
 
     def _m8_visual_line_callback(self, msg):
         # Odom extrapolation from stop_line_node is not an independent observation.
@@ -89,6 +112,7 @@ class M8Control:
                 if self.node._odom_speed < M8_REVERSE_SPEED:
                     self._m8_reversing = True
                     self._m8_entry.observations.clear()
+                    self._m8_partial.reset()
                     return
                 s = self.node._odom.s
                 if self._m8_phase_sent == 'watch_entry':
@@ -196,6 +220,17 @@ class M8Control:
 
     def _m8_handoff_state(self, now):
         odom_ok = self._odom_fresh(now)
+        if (odom_ok and self._m8_phase_sent == 'watch_entry'
+                and self._m8_entry.line_s is None and self._m8_near_line > 0):
+            anchor = self._m8_partial.anchor(self.node._odom.s, now/1e9)
+            cone, _ = select_m8_command(self._cone_cmd,
+                (now-self._cone_stamp_ns)/1e9 if self._cone_stamp_ns else float('inf'))
+            if (anchor is not None and cone[0] > 0 and math.isfinite(self.node._odom_speed)
+                    and self._cone_stamp_ns >= self._m8_post_reverse_ns):
+                # The partial projection is an approximate first-line anchor
+                # for the unchanged distinct-exit check, not a 45 cm trigger.
+                self._m8_entry.line_s = anchor
+                self._arm_m8('partial entry tape + verified cone passage')
         if self._m8_phase_sent == 'preflight':
             if not odom_ok:
                 return 'wait_odom'
@@ -280,6 +315,7 @@ class M8Control:
     def enter(self,mission):
         if mission == 'M2':
             self._m8_entry.reset()
+            self._m8_partial.reset()
             self._m8_entry_state='off'
             self._m8_arm_requested=False
             self._m8_risk_ns=0
@@ -318,6 +354,7 @@ class M8Control:
             self._m8_reversing = reversing
         if self._m8_reversing:
             self._m8_entry.observations.clear()
+            self._m8_partial.reset()
             if self._m8_phase_sent == 'preflight':
                 self._m8_risk_ns = 0
             if (self._m8_phase_sent in ('preflight', 'approach')

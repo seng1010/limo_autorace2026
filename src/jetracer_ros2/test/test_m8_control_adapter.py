@@ -260,6 +260,165 @@ def test_no_other_mission_control_is_consumed(owner):
         assert owner.m8.tick(owner.now) is False
 
 
+def partial_watch(owner):
+    owner.params.update(m8_entry_precheck_m=.55,m8_entry_arm_near_line_m=.45)
+    owner.m8=type(owner.m8)(owner)
+    owner._active='M2'
+    owner.m8.enter('M2')
+
+
+def partial_cue(owner,distance=.4,age=0.,frame='front_axle'):
+    msg=Stamped()
+    t=owner.now-int(age*1e9)
+    msg.header.stamp=NS(sec=t//10**9,nanosec=t%10**9)
+    msg.header.frame_id=frame
+    msg.point.x=distance
+    owner.m8._m8_partial_callback(msg)
+
+
+def confirm_partial(owner):
+    for _ in range(3):
+        owner.now+=40_000_000
+        owner._odom_ns=owner.now
+        partial_cue(owner)
+
+
+def test_partial_alone_keeps_race_then_fresh_safe_cone_transfers(owner):
+    partial_watch(owner)
+    confirm_partial(owner)
+    assert owner.m8.tick(owner.now) is False
+    assert owner.output==[] and owner.m8._m8_entry.line_s is None
+    proposal(owner,age=0.)
+    assert owner.m8.tick(owner.now)
+    assert owner._active=='M8' and owner.output[-1]==(.1,-.13)
+    assert owner.m8._m8_exit.entry_line==pytest.approx(.4)
+
+
+@pytest.mark.parametrize('age,speed',[(.26,.1),(.1,0.),(.1,.09)])
+def test_partial_does_not_authorize_stale_stopped_or_unexecutable_cone(owner,age,speed):
+    partial_watch(owner)
+    confirm_partial(owner)
+    proposal(owner,age=age,v=speed)
+    assert not owner.m8.tick(owner.now)
+    assert owner._active=='M2' and owner.output==[]
+
+
+@pytest.mark.parametrize('age,frame',[(.3,'front_axle'),(-.1,'front_axle'),(0.,'camera')])
+def test_partial_rejects_stale_future_or_wrong_frame(owner,age,frame):
+    partial_watch(owner)
+    for _ in range(3):
+        owner.now+=40_000_000
+        owner._odom_ns=owner.now
+        partial_cue(owner,age=age,frame=frame)
+    proposal(owner,age=0.)
+    assert not owner.m8.tick(owner.now)
+
+
+def test_reverse_erases_partial_cue_and_requires_new_images(owner):
+    partial_watch(owner)
+    confirm_partial(owner)
+    owner._odom_speed=-.1
+    proposal(owner,age=0.)
+    assert not owner.m8.tick(owner.now)
+    owner.now+=50_000_000
+    owner._odom_ns=owner.now
+    owner._odom_speed=0.
+    assert not owner.m8.tick(owner.now)
+    proposal(owner,age=0.)
+    assert not owner.m8.tick(owner.now)
+    confirm_partial(owner)
+    proposal(owner,age=0.)
+    assert owner.m8.tick(owner.now) and owner._active=='M8'
+
+
+def test_partial_ignores_blocked_other_missions_and_preserves_full_preflight(owner):
+    partial_watch(owner)
+    owner._blocked=True
+    confirm_partial(owner)
+    assert owner.m8._m8_partial.confirmed is None
+    owner._blocked=False
+    for mission in ('M1','M3','M4','M5','M6','M7','M8'):
+        owner._active=mission
+        confirm_partial(owner)
+        assert owner.m8._m8_partial.confirmed is None
+    _confirm_preflight(owner)
+    anchor=owner.m8._m8_entry.line_s
+    confirm_partial(owner)
+    proposal(owner,age=0.)
+    assert not owner.m8.tick(owner.now)
+    assert owner.m8._m8_phase_sent=='preflight'
+    assert owner.m8._m8_entry.line_s==anchor
+
+
+def test_queued_reverse_images_cannot_confirm_after_reverse_ends(owner):
+    partial_watch(owner)
+    owner._odom_speed=-.1
+    owner.m8.tick(owner.now)
+    owner.now+=50_000_000
+    owner._odom_ns=owner.now
+    owner._odom_speed=0.
+    owner.m8.tick(owner.now)
+    for age in (.15,.11,.07):
+        partial_cue(owner,age=age)
+    proposal(owner,age=0.)
+    assert not owner.m8.tick(owner.now)
+    assert owner.m8._m8_partial.confirmed is None
+
+
+def test_expired_partial_cue_does_not_authorize_later_cone_proposal(owner):
+    partial_watch(owner)
+    confirm_partial(owner)
+    owner.now+=900_000_000
+    owner._odom_ns=owner.now
+    proposal(owner,age=0.)
+    assert not owner.m8.tick(owner.now)
+    assert owner.m8._m8_entry.line_s is None
+
+
+def test_partial_observer_is_entry_only_stamped_and_requires_distance_calibration(owner):
+    from jetracer_ros2.m8_observers import M8StopLineObserver
+    from test_m8_partial_entry import tape
+    model=NS(calibrated=True,front_distance=lambda row:.4)
+    obs=M8StopLineObserver(owner,model,NS(roi_top_ratio=.58))
+    header=NS(stamp=NS(sec=10,nanosec=0))
+    im=tape()
+    obs.update(im,header)
+    assert not obs.partial.messages
+    obs._phase(NS(data='watch_entry'))
+    obs.update(im,header)
+    cue=obs.partial.messages[-1]
+    assert cue.header.stamp==header.stamp and cue.header.frame_id=='front_axle'
+    assert cue.point.x==.4 and obs.entry.messages[-1].data==-1.
+    model.calibrated=False
+    obs.update(im,header)
+    assert obs.partial.messages[-1].point.x==-1.
+    count=len(obs.partial.messages)
+    for phase in ('cone','exit_lane','off'):
+        obs._phase(NS(data=phase))
+        obs.update(im,header)
+    assert len(obs.partial.messages)==count
+    obs._phase(NS(data='watch_entry'))
+    owner.now+=300_000_000
+    obs.update(im,header)
+    assert len(obs.partial.messages)==count
+
+
+def test_partial_needs_fresh_odometry_and_no_motion_still_holds(owner):
+    partial_watch(owner)
+    confirm_partial(owner)
+    owner.now+=600_000_000
+    proposal(owner,age=0.)
+    assert not owner.m8.tick(owner.now)
+    assert owner._active=='M2'
+    owner.params['m8_entry_arm_after_m']=0.
+    owner.m8=type(owner.m8)(owner)
+    owner.m8.enter('M2')
+    confirm_partial(owner)
+    proposal(owner,v=0.,age=0.)
+    assert owner.m8.tick(owner.now)
+    assert owner.output[-1]==(0.,0.) and owner._active=='M2'
+
+
 def test_exit_line_transfers_only_to_fresh_checked_lane_and_waits_otherwise(owner):
     owner.m8._m8_exit.reset(0.)
     owner._odom.s=.8

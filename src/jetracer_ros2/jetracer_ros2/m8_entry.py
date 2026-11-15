@@ -11,6 +11,7 @@ M8_LANE_HINT_TOPIC = 'mission/lane/geometry_hint'
 M8_LANE_PATH_FRAME = 'rear_axle'
 M8_PHASE_TOPIC = 'mission/cone/phase'
 M8_EXIT_LINE_TOPIC = 'mission/cone/exit_line'
+M8_PARTIAL_ENTRY_TOPIC = 'mission/cone/partial_entry_line'
 M8_EXIT_COMMAND_TOPIC = 'mission/cone/safe_exit_cmd_vel'
 M8_EXIT_CHECK_TOPIC = 'mission/cone/exit_check_enabled'
 M8_APPROACH_RISK_TOPIC = 'mission/cone/approach_risk'
@@ -120,6 +121,38 @@ class M8EntryGate:
             return 'approach'
         self.passed = True
         return 'passed'
+
+
+class M8PartialEntryGate:
+    """Short-lived entrance evidence, separate from the metric entry gate."""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.observations = []
+        self.last_stamp = None
+        self.confirmed = None
+
+    def observe(self, s, distance, stamp):
+        if not math.isfinite(stamp) or (self.last_stamp is not None and stamp <= self.last_stamp):
+            return False
+        self.last_stamp = stamp
+        line = _observe_line(self.observations, s, distance, stamp)
+        if line is not None:
+            self.confirmed = (line, s, stamp)
+            return True
+        return False
+
+    def anchor(self, s, now):
+        if self.confirmed is None or not all(map(math.isfinite, (s, now))):
+            return None
+        line, at_s, stamp = self.confirmed
+        # An unseen cue cannot authorize later unrelated cones. Permit the
+        # small overlap needed for the next 10 Hz validated LiDAR proposal.
+        if not (0 <= now-stamp <= .8 and 0 <= s-at_s <= .20):
+            self.confirmed = None
+            return None
+        return line
 
 
 class M8ExitGate:
