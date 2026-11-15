@@ -39,6 +39,8 @@ class M3Config:
     max_approach_distance_m: float = 1.5  # M3 시작 후 정지 못 하고 이만큼 가면 skipped (0 이하 = 끄기)
     hold_sec: float = 3.5               # 규정 3초 + 여유
     done_distance_m: float = 0.50       # 출발 후 이만큼 가면 M3 완료
+    lost_line_revert_m: float = 0.30    # 정지 전에 선을 이 거리보다 멀리서 놓치면
+                                        # 잘못 본 선으로 보고 계속 주행 (노면 글씨·무늬 등)
 
 
 @dataclass
@@ -63,6 +65,7 @@ class PedestrianStopMission:
         self.state = 'approach'
         self.sign_seen = False
         self.sign_s: Optional[float] = None
+        self._last_line_m: Optional[float] = None
         self.start_s: Optional[float] = None
         self.stop_latched = False
         self.hold_start: Optional[float] = None
@@ -101,10 +104,18 @@ class PedestrianStopMission:
         if self.state == 'stopping':
             # 한 번 정지 명령이 나가면 거리 값이 흔들려도 다시 움직이지 않는다 (래치).
             # 정지선을 놓치면(지나쳤거나 추적 실패) 그 자리에 선다 — 계속 달리는 것보다 낫다.
-            if self.stop_latched or stop_line_m is None:
-                limit = 0.0
+            if stop_line_m is not None:
+                self._last_line_m = stop_line_m
+                limit = 0.0 if self.stop_latched else self.approach.speed_limit(stop_line_m)
+            elif self.stop_latched:
+                limit = 0.0                           # 이미 정지 명령 (사각지대)
+            elif (self._last_line_m is not None
+                  and self._last_line_m > self.config.lost_line_revert_m):
+                self.state = 'approach'               # 잘못 본 선 -> 계속 주행
+                self._last_line_m = None
+                return M3Decision(state='approach')
             else:
-                limit = self.approach.speed_limit(stop_line_m)
+                limit = 0.0                           # 사각지대로 들어간 선
             if limit == 0.0:
                 self.stop_latched = True
                 confirmed = self.full_stop.update(now, speed)

@@ -41,6 +41,8 @@ class M1Config:
     max_wait_sec: float = 30.0              # 녹색 대기 최대 시간 (0 이하 = 끄기)
     done_distance_m: float = 0.50
     max_approach_distance_m: float = 2.0    # M1 시작 후 판단 못 하고 이만큼 가면 skipped (0 = 끄기)
+    lost_line_revert_m: float = 0.30        # 정지 전에 선을 이 거리보다 멀리서 놓치면
+                                            # 잘못 본 선으로 보고 계속 주행 (노면 글씨·무늬 등)
     skip_lines: int = 0                     # M1 구간의 앞쪽 정지선을 이 개수만큼 무시
                                             # (경기장: 횡단보도 앞에 '천천히' 시작선이 하나 있어 1)
 
@@ -68,6 +70,7 @@ class TrafficLightMission:
         # 지나온 정지선 세기 (앞쪽의 다른 흰 가로선에 서지 않도록)
         self._line_detector = LinePassDetector()
         self.lines_seen = 0
+        self._last_line_m: Optional[float] = None
         self.start_s: Optional[float] = None
         self.stop_latched = False
         self.hold_start: Optional[float] = None
@@ -124,10 +127,19 @@ class TrafficLightMission:
                 # 정지선에 닿기 전에 녹색 확정 → 서지 않고 출발 (stop_on_green_arrival 이면 일단 정지)
                 self._start_go(odom_s)
             else:
-                if self.stop_latched or stop_line_m is None:
-                    limit = 0.0
+                if stop_line_m is not None:
+                    self._last_line_m = stop_line_m
+                    limit = 0.0 if self.stop_latched else self.approach.speed_limit(stop_line_m)
+                elif self.stop_latched:
+                    limit = 0.0                       # 이미 정지 명령 (사각지대)
+                elif (self._last_line_m is not None
+                      and self._last_line_m > cfg.lost_line_revert_m):
+                    # 아직 먼데 선이 사라짐 = 잘못 본 선. 그 자리에 서지 말고 계속 간다
+                    self.state = 'approach'
+                    self._last_line_m = None
+                    return M1Decision(state='approach')
                 else:
-                    limit = self.approach.speed_limit(stop_line_m)
+                    limit = 0.0                       # 사각지대로 들어간 선
                 if limit == 0.0:
                     self.stop_latched = True
                     confirmed = self.full_stop.update(now, speed)

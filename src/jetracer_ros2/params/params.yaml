@@ -155,8 +155,10 @@ mission_manager_node:
     m1_skip_lines: 1                  # M1 구간 앞쪽 정지선 무시 개수.
                                       # 경기장은 횡단보도 앞에 '천천히' 시작선이 하나 있어 1.
                                       # 천천히 선이 없는 배치면 0
+    m1_lost_line_revert_m: 0.30       # 정지 전에 이보다 멀리서 선을 놓치면 잘못 본 선 -> 계속 주행
     m3_hold_sec: 3.5                  # 완전정지 확인 후 대기 (규정 3초 이상)
     m3_done_distance_m: 0.50          # 출발 후 이만큼 가면 M3 완료 -> M7
+    m3_lost_line_revert_m: 0.30       # 정지 전에 이보다 멀리서 선을 놓치면 잘못 본 선 -> 계속 주행
 
 mission_traffic_light_node:
   ros__parameters:
