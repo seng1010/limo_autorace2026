@@ -177,3 +177,14 @@ def test_no_lane_change_before_the_road_widens():
     for _ in range(S.PREF_FRAMES):
         k.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), 2, now=0.0)
     assert k.changing and k.lane == 2
+
+
+def test_entry_clamps_bad_camera_heading_and_offset(monkeypatch):
+    """입구에서 카메라가 c -0.52, 방향 +40도로 잘못 봐도 가운데 차로·곧은 방향 근처로 시작한다."""
+    sup = S.Lane3SimpleSupervisor(forced=True)
+    monkeypatch.setattr(sup._look, 'look', lambda image, tune=None: ((-0.52, math.radians(40)), True))
+    monkeypatch.setattr(sup._look.fitter, 'fit', lambda image, prior=None, tune=None: None)
+    for i in range(S.ENTRY_FRAMES):
+        sup._try_enter(None, (0.0, 0.0, 0.0), None)
+    assert sup.mode == 'on'
+    assert abs(sup.core.c) <= S.ENTRY_C_MAX + 1e-9 and abs(sup.core.th) <= S.ENTRY_TH_MAX + 1e-9

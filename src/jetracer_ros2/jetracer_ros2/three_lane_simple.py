@@ -90,6 +90,7 @@ ISLAND_CONFIRM = 3                   # 카메라로 섬을 이만큼 연속 비�
 ISLAND_MIN_VIEW = 0.55               # 섬 앞끝이 이보다 가까우면 카메라 값을 새로 받지 않는다 (카메라 사각)
 ARM_AFTER_M = 1.4                    # M7 시작 후 이만큼 간 뒤부터 진입을 찾는다 (그 전은 코너)
 ENTRY_FRAMES = 3
+ENTRY_TH_MAX = math.radians(8.0)     # 진입 방향도 이 안으로 자른다 (기본 주행이 1차선을 곧게 따라오는 중)
 ENTRY_C_MAX = 0.10                   # 진입 차로는 가운데 차로 (도면) -> 카메라가 다른 값을 줘도 이 안으로 자른다
 EXIT_FRAMES = 4
 MAX_ON_M = 7.0                       # 이만큼 넘게 가면 끝낸다
@@ -541,15 +542,18 @@ class Lane3SimpleSupervisor:
         self._seen = (seen[0], seen[1], pose)
         if self._white < ENTRY_FRAMES:
             return False
-        c = seen[0] if self.forced else float(np.clip(seen[0], -ENTRY_C_MAX, ENTRY_C_MAX))
+        # 진입은 늘 1차선(= 가운데 차로)을 곧게 따라오다 한다. 카메라 한 장 값은 입구의 45도 벌어지는 선 때문에 크게 틀릴 수 있어
+        # (11/15 실차: 가운데 직진 중인데 c -0.52, 방향 +40도로 잡고 왼쪽으로 74도 꺾음) 둘 다 좁게 자른다
+        c = float(np.clip(seen[0], -ENTRY_C_MAX, ENTRY_C_MAX))
+        th0 = float(np.clip(seen[1], -ENTRY_TH_MAX, ENTRY_TH_MAX))
         # 시작선 기준 위치: 흰 점선 시작이 앞 d m 에 보이면 지금 s = 0.30 - d. 이미 점선 안이면 점선 시작으로 본다
-        d = dash_start_ahead(self._look.fitter, self._look.fitter.fit(image, seen[1], tune))
+        d = dash_start_ahead(self._look.fitter, self._look.fitter.fit(image, th0, tune))
         s0 = START_TO_DASH - d if d is not None else START_TO_DASH
         self.core = SimpleThreeLane()
-        self.core.start(c, seen[1], pose, s0)
+        self.core.start(c, th0, pose, s0)
         self.mode = 'on'
         self.message = (f'[3차선S] 시작: 차로 {self.core.lane} (가운데에서 {c * 100:+.0f} cm, '
-                        f'도로 방향 {math.degrees(seen[1]):+.0f}도, 시작선에서 {s0:+.2f} m'
+                        f'도로 방향 {math.degrees(th0):+.0f}도(카메라 {math.degrees(seen[1]):+.0f}), 시작선에서 {s0:+.2f} m'
                         + (')' if d is not None else ', 점선 시작을 못 봐서 점선 시작으로 가정)'))
         return True
 
