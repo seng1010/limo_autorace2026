@@ -84,10 +84,12 @@ ARRIVE_TOL = 0.08                    # 목표 차로 가운데에서 이 안 + �
 ABORT_BACK = 0.15                    # 옮기기 시작 직후 그 차로가 막히면, 아직 이 안이면 원래 차로로 돌아간다
 PREF_FRAMES = 5                      # '가고 싶은 차로'로 옮기는 조건이 연속 이만큼 맞아야 옮긴다
 TH_GAIN = 0.15                       # 카메라 도로 방향으로 고치는 비율 (한 프레임)
-TH_ACCEPT = math.radians(6.0)        # odom 으로 예상한 방향과 이 이상 다르면 카메라 방향을 안 쓴다
+TH_ACCEPT = math.radians(15.0)       # odom 으로 예상한 방향과 이 이상 다르면 카메라 방향을 안 쓴다
+# (6도로 두었더니, odom 이 조향 명령으로 방향을 계산해 실제보다 크게 돈 걸로 나올 때 카메라 값을 버려 15도 넘게 틀어졌다 - 11/16 실차)
 TH_MIN_POINTS = 300
 LINE_GAIN = 0.25                     # 차로 선으로 옆 위치를 고치는 비율 (한 프레임)
 LINE_GATE = 0.20                     # 선으로 구한 위치가 지금 위치와 이 안일 때만 쓴다 (선 간격 0.27 의 절반 남짓: 차로를 통째로 옮기지 않는다)
+WHITE_OFF_ISLAND = 1.70              # 섬이 이 안이면 흰 선으로 위치를 고치지 않는다 (섬 테두리·바깥 노란 선만)
 LINE_TH_MAX = math.radians(45.0)     # 도로와 이보다 크게 틀어져 있으면 선으로 고치지 않는다
 GUARD_DIST = 0.30                    # 정면 통로에 물체가 이 안이면 무조건 정지
 STUCK_SEC = 1.5                      # 이만큼 서 있으면 후진
@@ -220,16 +222,27 @@ class SimpleThreeLane:
         short = obs.get('short', ())
         ystart = obs.get('ystart') or {}
         beside_island = self.s > self.island_at - 0.30
+        to_island = self.island_at - self.s
         cands = []
         for u, n, ratio in obs['lines']:
-            if n < 40 or abs(u) > 1.0 or u in short:
+            if n < 40 or abs(u) > 1.0:
                 continue
+            start = ystart.get(u, 0.0)
             if ratio <= 0.3:
+                if to_island < WHITE_OFF_ISLAND:
+                    continue                       # 섬 앞에는 노면 글자(A·B)와 표지판 받침대·기둥이 흰 선처럼 보인다 (11/16 실차)
+                if u in short:
+                    continue
                 spots = T.WHITE_POS
             elif ratio >= 0.7:
-                if ystart.get(u, 0.0) > 0.60:      # 앞에서 시작하는 노란 선 (섬 테두리 앞끝)
+                if start > 0.60:                   # 앞에서 시작하는 노란 선: 섬 테두리(+-0.27)면 쓴다
+                    if abs(start - to_island) > 0.60:
+                        continue
+                    spots = T.WHITE_POS
+                elif u in short:
                     continue
-                spots = T.YELLOW_POS + (T.WHITE_POS if beside_island else ())
+                else:
+                    spots = T.YELLOW_POS + (T.WHITE_POS if beside_island else ())
             else:
                 continue
             us = T._shrink(u)
