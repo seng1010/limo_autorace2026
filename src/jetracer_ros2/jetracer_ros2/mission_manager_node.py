@@ -100,6 +100,7 @@ class MissionManagerNode(Node):
             raise ValueError(f'start_mission 은 {MISSION_ORDER} 중 하나')
         self._index = MISSION_ORDER.index(start)
         self._active = start
+        self._active_sent_ns = 0
         self._lane_cmd = Twist()
         self._cone_cmd = Twist()
         self._parking_cmd = Twist()
@@ -365,6 +366,11 @@ class MissionManagerNode(Node):
 
     def _control_tick(self):
         now = self.get_clock().now().nanoseconds
+        # 지금 미션을 1초마다 다시 알린다. 미션에 들어갈 때 한 번만 내면, 매니저보다 늦게 켜진 노드
+        # (simple_lane 의 3차선)가 놓친다 -> start_mission:=M7 로 시작하면 3차선이 안 켜진다.
+        if now - self._active_sent_ns >= 1_000_000_000:
+            self._active_sent_ns = now
+            self.active_pub.publish(String(data=self._active))
         if self._stopping:
             self._reap_processes(now)
         if self._active not in ('M1', 'M3'):   # M1·M3는 _report 에서 상태까지 같이 발행

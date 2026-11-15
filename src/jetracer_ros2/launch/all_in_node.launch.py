@@ -9,6 +9,8 @@ from launch_ros.actions import Node
 #
 # 사용법:
 #   ros2 launch jetracer_ros2 all_in_node.launch.py
+#   ros2 launch jetracer_ros2 all_in_node.launch.py start:=M7     그 미션부터 시작 (재출발·한 미션만 시험)
+#     start 는 M5 M6 M3 M7 M2 M8 M1 M4 중 하나. 차는 그 미션의 시작 지점에 놓는다.
 #
 # 차선 주행 (race 브랜치):
 #   기본은 simple_lane 이 차선 주행을 맡는다 (inference/cmd_vel 로 매니저에게 제안, 매니저가 /cmd_vel 발행).
@@ -29,9 +31,14 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'section', default_value='true',
             description='false: 구간 전환 노드(section_node)를 켜지 않음'),
+        DeclareLaunchArgument(
+            'start', default_value='M5',
+            description='시작 미션 (M5 M6 M3 M7 M2 M8 M1 M4). 재출발·한 미션만 시험할 때'),
         Node(
             package='jetracer_ros2',
             executable='mission_manager_node',
+            # 매니저 main() 이 params.yaml 뒤에 이 인자를 붙이므로 params.yaml 의 start_mission 보다 이 값이 이긴다
+            arguments=['--ros-args', '-p', ['start_mission:=', LaunchConfiguration('start')]],
             output='screen',
         ),
         Node(
