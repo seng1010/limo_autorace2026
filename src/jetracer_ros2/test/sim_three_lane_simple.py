@@ -204,7 +204,7 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
         ds = v * DT
         if abs(steer_act) > 1e-4:
             radius = T.WHEELBASE / math.tan(abs(steer_act)) + T.TRACK / 2.0
-            dpsi = math.copysign(ds / radius, steer_act)
+            dpsi = math.copysign(abs(ds) / radius, steer_act) * (1.0 if ds >= 0 else -1.0)   # 후진이면 반대로 돈다
         else:
             dpsi = 0.0
         x += ds * math.cos(psi + dpsi / 2)

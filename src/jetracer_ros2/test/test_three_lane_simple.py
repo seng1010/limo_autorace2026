@@ -70,7 +70,8 @@ def test_obstacle_beside_with_gap_does_not_block_change_but_one_ahead_does():
     assert k.lane == 2
 
 
-def test_no_free_lane_slows_then_stops_then_reverses():
+def test_no_free_lane_slows_then_stops_then_reverses(monkeypatch):
+    monkeypatch.setattr(S, 'TURN_ON', False)      # 예전 방식 (곧은 후진)
     k = core_at()
     pts = box(1.0, 0.0) + box(1.0, 0.535) + box(1.0, -0.535)
     out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
@@ -90,8 +91,9 @@ def test_no_free_lane_slows_then_stops_then_reverses():
     assert out['v'] == 0.0 and out['state'] == 'STOP'
 
 
-def test_reverse_stops_before_remembered_obstacle_behind():
+def test_reverse_stops_before_remembered_obstacle_behind(monkeypatch):
     """뒤에 지나온 장애물이 있으면 그 앞까지만 후진한다."""
+    monkeypatch.setattr(S, 'TURN_ON', False)
     k = core_at()
     k.map.add(np.full(6, k.s - S.CAR_REAR - 0.25), np.linspace(-0.08, 0.08, 6))
     k.map.add(np.full(6, k.s - S.CAR_REAR - 0.25), np.linspace(-0.08, 0.08, 6))
@@ -292,3 +294,74 @@ def test_change_stuck_short_of_target_replans_when_target_is_blocked():
     for _ in range(3):
         k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
     assert k.lane == 1
+
+
+# ---------------------------------------------------------------------------
+# 막혔을 때 방향 틀기 (TURN_ON)
+# ---------------------------------------------------------------------------
+def _drive(k, cars, x, y, psi, seconds, dt=0.05):
+    """뒤 차축 (x, y, psi) 에서 k 를 닫힌 고리로 돌린다 (odom = 참값, 조향 1차 지연).
+    반환: (기록 [(상태, v, steer, psi)], 접촉 여부, 마지막 (x, y, psi))."""
+    polys = [SIM.rect(cx, cy, 0.0, SIM.CAR_L, SIM.CAR_W) for cx, cy in cars]
+    steer_act, t, log, contact = 0.0, 0.0, [], False
+    while t < seconds:
+        cx, cy = x + SIM.CAM * math.cos(psi), y + SIM.CAM * math.sin(psi)
+        out = k.step_obs(None, (x, y, psi), SIM.raycast(cx, cy, psi, polys), None, now=t)
+        v, cmd = out['v'], max(-SIM.T.MAX_STEER, min(SIM.T.MAX_STEER, out['steer']))
+        steer_act += (cmd - steer_act) * min(1.0, dt / 0.15)
+        ds = v * dt
+        dpsi = 0.0
+        if abs(steer_act) > 1e-4:
+            dpsi = (math.copysign(abs(ds) / (SIM.T.WHEELBASE / math.tan(abs(steer_act)) + SIM.T.TRACK / 2.0), steer_act)
+                    * (1.0 if ds >= 0 else -1.0))
+        x += ds * math.cos(psi + dpsi / 2)
+        y += ds * math.sin(psi + dpsi / 2)
+        psi += dpsi
+        body = SIM.rect(x + SIM.BODY_C * math.cos(psi), y + SIM.BODY_C * math.sin(psi), psi, SIM.CAR_L, SIM.CAR_W)
+        contact = contact or any(SIM.overlap(body, p) for p in polys)
+        log.append((out['state'], v, out['steer'], psi))
+        t += dt
+    return log, contact, (x, y, psi)
+
+
+def _stuck_core(cars, cam_s=1.5, c=0.0):
+    k = S.SimpleThreeLane()
+    x = cam_s - SIM.CAM
+    k.start(c, 0.0, (x, c, 0.0), cam_s)
+    return k, x
+
+
+def test_turn_when_stuck_points_nose_to_free_lane_and_goes_there():
+    """가운데 차로 코앞(0.3 m)이 막히고 왼쪽 차로도 앞이 막힘, 오른쪽은 빔:
+    짧게 꺾으며 후진(차 앞이 오른쪽으로) -> 오른쪽 차로로 옮긴다. 접촉 없음."""
+    cars = [(1.5 + 0.30 + SIM.CAR_L / 2, 0.0), (2.1, 0.535)]
+    k, x = _stuck_core(cars)
+    log, contact, (x1, y1, psi1) = _drive(k, cars, x, 0.0, 0.0, 12.0)
+    states = [s for s, *_ in log]
+    assert 'TURN' in states
+    first_back = next(i for i, (s, v, *_) in enumerate(log) if s == 'TURN' and v < 0)
+    assert log[first_back][2] > 0.0                  # 오른쪽 차로로 가려면 후진은 왼쪽으로 꺾는다 (차 앞이 오른쪽으로 돈다)
+    assert min(p for *_, p in log) < -math.radians(5)
+    assert not contact
+    assert k.lane == 2 and y1 < -0.30                # 오른쪽 차로로 들어감
+
+
+def test_turn_not_used_when_every_lane_is_blocked():
+    """막다른 길(세 차로 모두 막힘): 돌릴 차로가 없으니 방향 틀기 안 함."""
+    k = core_at()
+    pts = box(0.30, 0.0) + box(0.6, 0.535) + box(0.6, -0.535)
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
+    out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=S.STUCK_SEC + 0.1)
+    assert out['state'] != 'TURN' and k.turn is None
+
+
+def test_turn_rev_sign_flips_only_the_reverse_command(monkeypatch):
+    """TURN_REV_SIGN = -1 이면 후진할 때만 조향 명령 부호가 뒤집힌다 (실차 확인용 스위치)."""
+    cars = [(1.5 + 0.30 + SIM.CAR_L / 2, 0.0), (2.1, 0.535)]
+    k, x = _stuck_core(cars)
+    k.step_obs(None, (x, 0.0, 0.0), SIM.raycast(1.5, 0.0, 0.0, [SIM.rect(cx, cy, 0, SIM.CAR_L, SIM.CAR_W) for cx, cy in cars]),
+               None, now=0.0)
+    monkeypatch.setattr(S, 'TURN_REV_SIGN', -1.0)
+    out = k.step_obs(None, (x, 0.0, 0.0), SIM.raycast(1.5, 0.0, 0.0, [SIM.rect(cx, cy, 0, SIM.CAR_L, SIM.CAR_W) for cx, cy in cars]),
+                     None, now=S.STUCK_SEC + 0.1)
+    assert out['state'] == 'TURN' and out['v'] < 0.0 and out['steer'] < 0.0

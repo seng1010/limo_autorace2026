@@ -66,6 +66,20 @@ CENTER_NEED = 2.00       # 바깥 차로에서 가운데로 들어가려면 가�
 DEFAULT_SIDE = 2         # 표지판을 끝까지 못 읽었을 때 갈 쪽 (2 = 오른쪽 = B)
 CAM_FROM_ODOM = 0.184    # 카메라 바닥 투영점이 odom 기준점보다 앞에 있는 거리 [m] (odom 기준점 = 뒤 차축으로 가정)
 LIDAR_AHEAD = 0.0        # 라이다가 카메라 바닥 투영점보다 앞에 있는 거리 [m]. three_lane.py 는 0 으로 가정 -> 실측해서 넣기
+# 막혔을 때 방향 틀기: 빈 차로 쪽으로 차 앞을 돌린다. 짧게 꺾으며 후진 <-> 전진을 되풀이 (좁은 데서 차 돌리듯)
+#   후진: 빈 차로 반대쪽으로 꺾고 / 전진: 빈 차로 쪽으로 꺾는다 -> 둘 다 차 앞이 빈 차로 쪽으로 돈다
+#   빈 차로까지 가는 경로(차체 + 여유)가 나오면 끝내고 그 차로로 옮긴다
+TURN_ON = True           # False 면 예전처럼 곧게 후진만 한다
+TURN_REV_SIGN = 1.0      # 후진하며 꺾을 때 차 앞이 빈 차로 반대쪽으로 돌면 -1.0 으로 바꾼다 (실차에서 확인할 것)
+TURN_STEER = math.radians(25.0)   # 방향 틀 때 조향
+TURN_BACK_M = 0.20       # 한 번 후진하는 거리
+TURN_FWD_M = 0.15        # 한 번 전진하는 거리
+TURN_CYCLES = 4          # 한 번 막혔을 때 후진+전진을 최대 몇 번
+TURN_TRIES = 3           # 방향 틀기를 몇 번까지 시도 (그 뒤는 예전 곧은 후진)
+TURN_MARGIN = 0.05       # 방향 틀며 움직일 때 차체와 장애물(지도) 사이 최소 여유 [m]
+TURN_GO_MARGIN = 0.05    # 빈 차로까지 가는 경로의 여유가 이만큼 나오면 방향 틀기를 끝내고 간다
+TURN_MAX_HEADING = math.radians(55.0)   # 도로 방향에서 이보다 더 돌리지 않는다
+V_TURN = 0.10            # 방향 틀 때 전진 속도 (후진은 V_REVERSE)
 
 # ---------------------------------------------------------------------------
 # 거의 안 바꾸는 값
@@ -200,6 +214,9 @@ class SimpleThreeLane:
         self.reverse_count = 0
         self.lane_run = 0.6          # 지금 차로에서 곧게 온 거리 (후진해도 되는 거리). 진입 전 직선을 조금 인정
         self.ahead = [NO_OBSTACLE] * 3
+        self.turn = None             # 방향 틀기 중이면 dict(target, side, phase, t0, cycles, stuck)
+        self.turn_tries = 0
+        self._rec_steer = 0.0        # 방향 틀기 중 조향 명령
 
     # ----- 위치 -----
     def start(self, c, th, pose, s=START_TO_DASH):
@@ -579,8 +596,125 @@ class SimpleThreeLane:
             return V_READ
         return V_KEEP
 
+    # ----- 막혔을 때 방향 틀기 -----
+    def _turn_points(self):
+        """방향 틀기·경로 확인에 쓰는 장애물 점 (도로 좌표 s, lat): 지도(지나친 것 포함) + 섬 테두리."""
+        s, lat = self.map._s, self.map._lat
+        near = (s > self.s - 1.5) & (s < self.s + T.PATH_MAX_M + 0.6)
+        s, lat = s[near], lat[near]
+        isl, e = self.island_at, T.ISLAND_HALF - 0.05
+        ks = np.arange(isl, isl + ISLAND_LEN + 1e-6, 0.10)
+        ls = np.linspace(-e, e, 7)
+        return (np.concatenate([s, np.full(ls.size, isl), ks, ks]),
+                np.concatenate([lat, ls, np.full(ks.size, -e), np.full(ks.size, e)]))
+
+    @staticmethod
+    def _body_clear(x, y, psi, ps, pl):
+        """뒤 차축 (x=s, y=lat), 방향 psi 일 때: (차체와 점 사이 최소 거리, 차체 모서리가 바깥 노란 선을 넘은 양)."""
+        cs, sn = math.cos(psi), math.sin(psi)
+        excess = -1.0
+        for fx in (T.CAR_BODY_CENTER - T.CAR_BODY_HALF_LEN, T.CAR_BODY_CENTER + T.CAR_BODY_HALF_LEN):
+            for fy in (-T.CAR_HALF_WIDTH, T.CAR_HALF_WIDTH):
+                excess = max(excess, abs(y + fx * sn + fy * cs) - T.PATH_ROAD_HALF)
+        if ps.size == 0:
+            return T.LIDAR_MAX, excess
+        dx, dy = ps - x, pl - y
+        fx = dx * cs + dy * sn - T.CAR_BODY_CENTER
+        fy = -dx * sn + dy * cs
+        d = np.hypot(np.maximum(np.abs(fx) - T.CAR_BODY_HALF_LEN, 0.0), np.maximum(np.abs(fy) - T.CAR_HALF_WIDTH, 0.0))
+        return float(d.min()), excess
+
+    def _sweep(self, delta, dist, ps, pl):
+        """지금 자세에서 바퀴 조향 delta(왼쪽 +)로 dist(전진 +, 후진 -)만큼 갈 때, 차체가 장애물·바깥 선에
+        TURN_MARGIN 안으로 들어가지 않고(이미 더 가까우면 더 가까워지지 않고) 갈 수 있는 거리 [m]."""
+        psi = -self.th
+        x = self.s - CAM_FROM_ODOM * math.cos(psi)
+        y = self.c - CAM_FROM_ODOM * math.sin(psi)
+        d0, e0 = self._body_clear(x, y, psi, ps, pl)
+        need, max_e = min(TURN_MARGIN, d0), max(0.0, e0)
+        radius = T.WHEELBASE / math.tan(abs(delta)) + T.TRACK / 2.0 if abs(delta) > 1e-4 else None
+        sgn, step, gone = (1.0 if dist > 0 else -1.0), 0.02, 0.0
+        while gone + step <= abs(dist) + 1e-9:
+            dpsi = 0.0 if radius is None else math.copysign(step / radius, delta) * sgn
+            if abs(psi + dpsi) > TURN_MAX_HEADING and abs(psi + dpsi) > abs(psi):
+                break                                   # 더 돌리지 않는다
+            x += sgn * step * math.cos(psi + dpsi / 2)
+            y += sgn * step * math.sin(psi + dpsi / 2)
+            psi += dpsi
+            d, e = self._body_clear(x, y, psi, ps, pl)
+            if d < need - 1e-6 or e > max_e + 1e-6:
+                break
+            gone += step
+        return gone
+
+    def _turn_go_ok(self, target, ps, pl):
+        """지금 자세에서 차로 target 으로 실제 조향 규칙대로 갔을 때 차체 여유가 TURN_GO_MARGIN 이상이고,
+        정면 정지(GUARD) 통로도 비어 있으면 True."""
+        psi = -self.th
+        dx, dy = ps - self.s, pl - self.c
+        fx = dx * math.cos(psi) + dy * math.sin(psi)
+        fy = -dx * math.sin(psi) + dy * math.cos(psi)
+        if bool(((fx > 0.0) & (fx < GUARD_DIST + 0.02) & (np.abs(fy) <= T.GUARD_HALF)).any()):
+            return False
+        clr = T.path_clearance(ps - self.s, pl, self.c, self.th, target, LOOKAHEAD_TIGHT, HEADING_TIGHT, self._rec_steer)
+        return clr >= TURN_GO_MARGIN
+
+    def _turn_target(self):
+        """막혔을 때 차 앞을 돌릴 차로: 지금 차로보다 GAIN 넘게 더 비어 있는 차로 중 가장 빈 곳
+        (비슷하면 가까운 차로, 그다음 표지판 쪽). 없으면 None."""
+        cur = self.lane
+        a_now = self._free(cur)
+        free = {j: self._free(j, passing=True) for j in range(3)
+                if j != cur and abs(LANE_CENTER[j] - self.c) > 0.15}
+        cands = [j for j in free if free[j] >= a_now + GAIN]
+        if not cands:
+            return None
+        best = max(free[j] for j in cands)
+        cands = [j for j in cands if free[j] >= best - TIE]
+        order = self._goal_order(self._goal)
+        cands.sort(key=lambda j: (abs(j - cur), order(j)))
+        return cands[0]
+
+    def _turn_step(self, now):
+        """방향 틀기 한 프레임. 반환: (속도, 명령을 냈는지)."""
+        t = self.turn
+        ps, pl = self._turn_points()
+        if self._turn_go_ok(t['target'], ps, pl):
+            self.turn = None
+            self._begin(t['target'], f"방향 틀기 끝 (차 방향 {math.degrees(-self.th):+.0f}도) -> 차로 {t['target']}")
+            self.tight = True
+            self.stop_since = None
+            return 0.0, False                           # 다음 프레임부터 보통 판단으로 그 차로로 간다
+        side = t['side']
+        for _ in range(3):
+            back = t['phase'] == 'back'
+            moved = abs(self.travel - t['t0'])
+            left = (TURN_BACK_M if back else TURN_FWD_M) - moved
+            delta = (-side if back else side) * TURN_STEER
+            can = self._sweep(delta, -left if back else left, ps, pl) if left > 0.01 else 0.0
+            if can >= 0.02:
+                t['idle'] = 0
+                self._rec_steer = delta * (TURN_REV_SIGN if back else 1.0)
+                self.state = 'TURN'
+                self.reason = (f"방향 틀기 {t['cycles'] + 1}/{TURN_CYCLES} {'후진' if back else '전진'} "
+                               f"-> 차로 {t['target']} 쪽 (차 방향 {math.degrees(-self.th):+.0f}도)")
+                return (-V_REVERSE if back else V_TURN), True
+            # 이 방향으로는 더 못 감(또는 다 감) -> 반대 방향으로
+            t['idle'] = t['idle'] + 1 if moved < 0.02 else 0
+            if not back:
+                t['cycles'] += 1
+            if t['idle'] >= 2 or t['cycles'] >= TURN_CYCLES:
+                break
+            t['phase'], t['t0'] = ('fwd' if back else 'back'), self.travel
+        self.turn = None
+        self.stop_since = now
+        self.state, self.reason = 'STOP', f"방향 틀기로도 차로 {t['target']} 길이 안 나옴 -> 정지"
+        return 0.0, False
+
     def _recover(self, speed, now):
-        """서 있으면 후진. 반환: (속도, 후진 중인지)."""
+        """서 있으면 후진 (TURN_ON 이면 먼저 방향 틀기). 반환: (속도, 후진/방향 틀기 명령을 냈는지)."""
+        if self.turn is not None:
+            return self._turn_step(now)
         if self.reversing:
             if self.reverse_left <= 0.0:
                 self.reversing = False
@@ -592,7 +726,16 @@ class SimpleThreeLane:
             return speed, False
         if self.stop_since is None:
             self.stop_since = now
-        if now - self.stop_since < STUCK_SEC or self.reverse_count >= REVERSE_MAX_COUNT:
+        if now - self.stop_since < STUCK_SEC:
+            return 0.0, False
+        if TURN_ON and self.turn_tries < TURN_TRIES:
+            j = self._turn_target()
+            if j is not None:
+                side = 1.0 if LANE_CENTER[j] > self.c else -1.0
+                self.turn = dict(target=j, side=side, phase='back', t0=self.travel, cycles=0, idle=0)
+                self.turn_tries += 1
+                return self._turn_step(now)
+        if self.reverse_count >= REVERSE_MAX_COUNT:
             return 0.0, False
         # 뒤로 얼마나 갈 수 있나: 지나오며 기억한 장애물(지도)의 바로 뒤 것까지. 지나온 길 밖은 모르니 지나온 거리까지만
         room = min(REVERSE_M, self.lane_run)
@@ -650,7 +793,9 @@ class SimpleThreeLane:
             speed, self.state, self.reason = 0.0, 'STOP', f'정면 {front:.2f} m 에 물체'
         speed, rev = self._recover(speed, now)
         wall_text = ''
-        if rev:
+        if rev and self.turn is not None:
+            steer = self._rec_steer                 # 방향 틀기: 상태·사유는 _turn_step 이 적었다
+        elif rev:
             steer = 0.0
             self.state, self.reason = 'REVERSE', f'막혀서 후진 (남은 {self.reverse_left:.2f} m)'
         else:
@@ -848,8 +993,8 @@ class Lane3SimpleSupervisor:
         if core.travel >= MAX_ON_M:
             self.mode, self.message = 'done', '[3차선S] 끝: 최대 거리 -> 기본 주행'
             return None
-        if out['wall_text']:
-            self.steer = out['steer']
+        if out['wall_text'] or core.turn is not None:
+            self.steer = out['steer']                # 벽 반사·방향 틀기는 늦추지 않는다
         else:
             self.steer += 0.7 * (out['steer'] - self.steer)
         g = self.sign_goal
