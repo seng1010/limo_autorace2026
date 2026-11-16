@@ -39,7 +39,7 @@
   ros2 run jetracer_ros2 simple_lane drive lane3 rec          3차선 입구(또는 안)에 놓고 시험. 갈림길 차로에 들어가면 기본 주행으로 돌아감
   ros2 run jetracer_ros2 simple_lane drive lane3 goal_a rec   갈림길 A(왼쪽)로. goal_b = B(오른쪽)
   위 명령 뒤에 l3simple 을 붙이면 단순 버전(three_lane_simple.py)으로 (예: drive lane3 l3simple rec)
-  매니저와 함께 돌 때는 mission/active 가 M7 이 되면 스스로 켜진다 (표지판은 mission/yolo_event 의 sign_a / sign_b)
+  매니저와 함께 돌 때는 mission/active 가 M7 이 되면 스스로 켜진다 (표지판은 perception/detections 의 YOLO 박스 a / b 로 직접 판정)
 
 디버거 창 키 (NoMachine 터미널에서 실행했을 때)
   스페이스: 화면 멈춤 / s: 캡처 저장 / q: 종료

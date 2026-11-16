@@ -53,6 +53,10 @@ CHANGE_FROM_S = 0.20     # 이 위치(카메라 투영점) 전에는 차로를 �
 LEAVE_DIST = 1.45        # 가운데 차로에서 섬이 이 안으로 오면 옆 차로로 빠진다
 READ_SLOW_BELOW = 2.0    # 표지판을 아직 모르고 가운데 차로에 있으면, 섬이 이 안일 때 천천히 (표지판은 약 1.7 m 안에서만 맞게 읽힌다)
 V_READ = 0.08
+READ_STOP = 1.50        # 가운데 차로에서 표지판을 아직 모르면 섬 이 거리에서 서서 읽는다 (움직이며 0.25 m 창에서 4 프레임을 못 모아 B 로 갔다)
+READ_WAIT_SEC = 3.0     # 서서 읽는 최대 시간. 지나면 지금까지 읽은 것 중 많은 쪽(guess), 그것도 없으면 DEFAULT_SIDE
+FORK_WAIT_SEC = 4.0     # 표지판 쪽 갈림길이 막혀 있으면 이만큼 기다린다. 지나면 반대쪽이라도 간다 (M7 은 끝내야 하니까)
+WRONG_SIDE_FROM = 0.20  # 표지판을 알면 반대쪽 바깥 차로는 섬 앞끝 + 이만큼부터 섬 끝까지 막힌 것으로 계획한다
 PLAN_DIST = 2.2         # 내 차로 앞 장애물이 이 안이면 차로 계획(PLAN)을 세운다
 PLAN_HORIZON = 3.0      # 계획을 보는 거리 [m]
 PLAN_STEP = 0.10
@@ -109,6 +113,9 @@ LOOKAHEAD_TIGHT = 0.36
 HEADING_TIGHT = math.radians(45.0)
 ARRIVE_TOL = 0.10                    # 목표 차로 가운데에서 이 안 + 도로와 나란하면 옮기기 끝
 ABORT_BACK = 0.15                    # 옮기기 시작 직후 그 차로가 막히면, 아직 이 안이면 원래 차로로 돌아간다
+# 확정 못 했을 때 쓸 '많이 읽힌 쪽' (guess): 가까이서 읽은 것만 센다. 모델은 멀리서 B 를 A 라고 하는 쪽으로 틀린다
+GUESS_MIN = 2                        # 이만큼 이상 읽혀야 guess 로 쓴다
+SIDE_SIGN_MIN_H = {'a': 36.0, 'b': 30.0}   # 옆 차로에서 읽은 표지판은 이 높이 이상만 guess 에 센다 (가운데 기준 33 px ≈ 1.7 m)
 PREF_FRAMES = 5                      # '가고 싶은 차로'로 옮기는 조건이 연속 이만큼 맞아야 옮긴다
 TH_GAIN = 0.15                       # 카메라 도로 방향으로 고치는 비율 (한 프레임)
 TH_ACCEPT = math.radians(15.0)       # odom 으로 예상한 방향과 이 이상 다르면 카메라 방향을 안 쓴다
@@ -203,6 +210,12 @@ class SimpleThreeLane:
         self.tight = False
         self.plan_text = ''
         self._goal = None
+        self.guess = None            # 표지판을 확정하진 못했지만 지금까지 읽은 것 중 많은 쪽 (supervisor 가 넣어 줌)
+        self._read_since = None      # 섬 앞에서 서서 표지판을 읽기 시작한 시각
+        self._fork_wait_since = None # 표지판 쪽 갈림길이 비기를 기다리기 시작한 시각
+        self.read_timeout = False
+        self._now = 0.0
+        self.message = ''
         self._guard_hit = False
         self.change_from = 1
         self.state = 'KEEP'
@@ -388,8 +401,11 @@ class SimpleThreeLane:
                 return False
         return True
 
+    def _fallback_side(self):
+        return self.guess if self.guess in (0, 2) else DEFAULT_SIDE
+
     def _goal_order(self, goal):
-        side = goal if goal in (0, 2) else DEFAULT_SIDE
+        side = goal if goal in (0, 2) else self._fallback_side()
         return lambda j: (0 if j == side else 1)
 
     def _pick(self, cur, a, goal, exclude=()):
@@ -433,6 +449,11 @@ class SimpleThreeLane:
         lo = self.s - 0.5
         m = int((PLAN_HORIZON + 1.0) / res)
         occ = np.zeros((3, m), bool)
+        extra = []
+        if goal in (0, 2):
+            # 표지판 반대쪽 갈림길은 막힌 것으로 본다 -> 섬 앞에서 반대쪽 바깥 차로에 갇히는 계획을 고르지 않는다
+            w = LANE_CENTER[2 - goal]
+            extra.append((self.island_at + WRONG_SIDE_FROM, self.island_at + ISLAND_LEN, w - 0.1, w + 0.1))
         ss, ll = self.map._s, self.map._lat
         for j in range(3):
             if ss.size:
@@ -440,7 +461,7 @@ class SimpleThreeLane:
                 idx = np.floor((ss[sel] - lo) / res).astype(int)
                 idx = idx[(idx >= 0) & (idx < m)]
                 occ[j, idx] = True
-            for v_from, v_end, vlo, vhi in self.map.virtual:
+            for v_from, v_end, vlo, vhi in self.map.virtual + extra:
                 if vlo <= LANE_CENTER[j] <= vhi:
                     a0, a1 = int(max(0, (v_from - lo) / res)), int(min(m, (v_end - lo) / res + 1))
                     if a1 > a0:
@@ -452,13 +473,17 @@ class SimpleThreeLane:
             a1 = int(np.clip(np.ceil((s_to - lo) / res), 0, m))
             return a1 <= a0 or cum[j, a1] - cum[j, a0] == 0
 
-        side = goal if goal in (0, 2) else DEFAULT_SIDE
+        # 끝 차로 점수: 표지판 쪽. 모르면 가운데(표지판을 읽을 수 있는 곳), 그다음 많이 읽힌 쪽
+        if goal in (0, 2):
+            end_score = {goal: 2}
+        else:
+            end_score = {1: 2, self._fallback_side(): 1}
         k1, k2 = int(round(PLAN_CHANGE_1 / step)), int(round(PLAN_CHANGE_2 / step))
         # val[j][k] = (갈 수 있는 칸 수, -옮긴 횟수, 끝 차로 점수), act[j][k] = (다음 차로, 다음 칸)
         val = [[None] * (n + 1) for _ in range(3)]
         act = [[None] * (n + 1) for _ in range(3)]
         for j in range(3):
-            val[j][n] = (n, 0, 1 if j == side else 0)
+            val[j][n] = (n, 0, end_score.get(j, 0))
         for k in range(n - 1, -1, -1):
             sk = self.s + k * step
             for j in range(3):
@@ -552,15 +577,44 @@ class SimpleThreeLane:
                     return 0.0
                 self.state, self.reason = 'CHANGE', f'차로 {self.change_from} -> {cur}'
                 return V_CHANGE
+        wrong = None
+        # 0) 가운데 차로에서 표지판을 아직 모르면 섬 앞에서 서서 읽는다 (최대 READ_WAIT_SEC)
+        if cur == 1 and goal not in (0, 2) and to_island < READ_STOP and not self.read_timeout:
+            if self._read_since is None:
+                self._read_since = self._now
+            waited = self._now - self._read_since
+            if waited < READ_WAIT_SEC:
+                self.state, self.reason = 'READ', f'섬 {to_island:.1f} m: 서서 표지판 읽는 중 {waited:.1f} s'
+                return 0.0
+            self.read_timeout = True
+            self.message = (f'[3차선S] 표지판 {READ_WAIT_SEC:.0f} 초 동안 확정 못 함 -> '
+                            + ('많이 읽힌 쪽 ' if self.guess in (0, 2) else '기본 쪽 ')
+                            + ('A' if self._fallback_side() == 0 else 'B'))
         # 1) 가운데 차로에서 섬이 가까우면 옆으로 빠진다 (가운데 차로는 섬에서 끝난다)
         if cur == 1 and to_island < LEAVE_DIST:
-            j = self._pick(1, min(a, max(to_island, 0.0)), goal)
+            side = goal if goal in (0, 2) else self._fallback_side()
+            reach = min(a, max(to_island, 0.0))
+            j = self._pick(1, reach, side, exclude=(2 - side,))
             if j is not None:
-                self._begin(j, f'섬 {to_island:.1f} m -> 차로 {j}')
+                self._fork_wait_since = None
+                self._begin(j, f'섬 {to_island:.1f} m -> 차로 {j}' + ('' if goal in (0, 2) else ' (표지판 미확정)'))
                 return V_CHANGE
+            # 표지판 쪽이 지금은 막혔다 (옆 장애물을 지나는 중 등): 반대쪽 갈림길로 바로 가지 않는다.
+            # 아래 계획(2)으로 넘어가되 반대쪽은 고르지 않는다. FORK_WAIT_SEC 넘게 못 가면 반대쪽이라도 간다
+            if self._fork_wait_since is None:
+                self._fork_wait_since = self._now
+            if self._now - self._fork_wait_since >= FORK_WAIT_SEC:
+                j = self._pick(1, reach, side)
+                if j is not None:
+                    self._begin(j, f'섬 {to_island:.1f} m -> 차로 {j} (표지판 쪽이 {FORK_WAIT_SEC:.0f} 초 막혀 있음)')
+                    return V_CHANGE
+            else:
+                wrong = 2 - side
         # 2) 앞에 장애물: 계획을 세워 지금 옮길지 정한다 (지금 옮겨야만 더 멀리 갈 수 있을 때만 옮긴다)
         if a < PLAN_DIST:
             j, stay_reach, best_reach = self._plan(goal)
+            if j is not None and j == wrong:
+                j = None                                   # 섬 앞: 표지판 반대쪽 갈림길로는 (아직) 안 간다
             self.plan_text = f'계획 {stay_reach:.1f}/{best_reach:.1f}'
             # 지금 옮겨야 더 멀리 가거나, 앞이 가까운데(BLOCK_DIST) 지금 옮겨도 똑같이 멀리 갈 수 있으면 지금 옮긴다
             # (마지막 순간까지 기다리면 반응이 늦은 차에서는 못 옮긴다)
@@ -753,7 +807,7 @@ class SimpleThreeLane:
                 self.stop_since = None
             else:
                 return -V_REVERSE, True
-        if speed > 0.0:
+        if speed > 0.0 or self.state == 'READ':
             self.stop_since = None
             return speed, False
         if self.stop_since is None:
@@ -797,6 +851,7 @@ class SimpleThreeLane:
     def step_obs(self, obs, pose, scan, goal=None, now=None):
         """반환: dict(v, steer, state, reason, wall_text)."""
         now = time.monotonic() if now is None else now
+        self._now = now
         self._advance(pose)
         self._camera_heading(obs)
         self._camera_lines(obs)
@@ -880,6 +935,7 @@ class Lane3SimpleSupervisor:
         self.sign_goal = goal
         self.fixed_goal = goal is not None
         self.vote = T.SignVote()
+        self.counts = {'center': {'a': 0, 'b': 0}, 'side': {'a': 0, 'b': 0}}
         self.arm_travel = 0.0
         self._pose = None
         self._white = self._both = self._lost = 0
@@ -902,6 +958,7 @@ class Lane3SimpleSupervisor:
                 self._white = self._both = self._lost = 0
                 self._seen = None
                 self.vote.reset()
+                self.counts = {'center': {'a': 0, 'b': 0}, 'side': {'a': 0, 'b': 0}}
                 if not self.fixed_goal:
                     self.sign_goal = None
         elif name != 'M2':
@@ -926,15 +983,31 @@ class Lane3SimpleSupervisor:
             return
         best = max(signs, key=lambda d: d.get('confidence', 0.0))
         height = float(best['bbox'][3]) - float(best['bbox'][1])
+        lab = best['label']
         # 기록용: 마지막으로 본 표지판과, 안 쓴 이유 (side = 옆 차로라서, small = 멀어서)
         if self.mode == 'on' and abs(self.core.c) > T.SIGN_CENTER_HALF:
-            self.sign_note = f"{best['label'].upper()}{height:.0f}side"
-            return                          # 옆 차로에서 비스듬히 읽은 값은 틀린다
-        self.sign_note = f"{best['label'].upper()}{height:.0f}" + ('small' if height < T.SIGN_MIN_H else '')
+            # 옆 차로에서 비스듬히 읽은 값은 틀릴 수 있어 확정에는 안 쓰고, 확정 못 했을 때의 guess 에만 센다
+            ok = height >= SIDE_SIGN_MIN_H[lab]
+            self.sign_note = f"{lab.upper()}{height:.0f}side" + ('' if ok else 'small')
+            if ok:
+                self.counts['side'][lab] += 1
+            return
+        self.sign_note = f"{lab.upper()}{height:.0f}" + ('small' if height < T.SIGN_MIN_H else '')
+        if height >= T.SIGN_MIN_H:
+            self.counts['center'][lab] += 1
         decided = self.vote.add(best['label'], height)
         if decided is not None:
             self.sign_goal = decided
             self.message = f"[3차선S] 표지판 {'A(왼쪽)' if decided == 0 else 'B(오른쪽)'} 확정 (상자 높이 {height:.0f} px)"
+
+    @property
+    def guess(self):
+        """확정 못 했을 때 갈 쪽: 가운데에서 가까이 읽은 것 중 많은 쪽, 없으면 옆 차로에서 읽은 것 중 많은 쪽. 모르면 None."""
+        for where in ('center', 'side'):
+            a, b = self.counts[where]['a'], self.counts[where]['b']
+            if max(a, b) >= GUESS_MIN and a != b:
+                return 0 if a > b else 2
+        return None
 
     @property
     def latch_off(self):
@@ -1011,7 +1084,10 @@ class Lane3SimpleSupervisor:
                 return None
             return dict(v=0.0, steer=self.steer, state='LANE3', reason='3차선S: odom 없음 -> 정지', note='L3S noodom')
         self._lost = 0
+        core.guess = self.guess
         out = core.step_obs(obs, pose, scan, self.sign_goal, now)
+        if core.message:
+            self.message, core.message = core.message, ''
         self.last = type('L', (), dict(ok=True, c=core.c))()
         if core.s < core.island_at + MERGE_TURN and core.lane in (0, 2):
             self.side_taken = core.lane                 # 갈림길에서 고른 쪽 (기록용)
@@ -1031,7 +1107,9 @@ class Lane3SimpleSupervisor:
         else:
             self.steer += 0.7 * (out['steer'] - self.steer)
         g = self.sign_goal
-        goal_text = '-' if g is None else ('A' if g == 0 else 'B')
+        goal_text = ('-' if g is None else ('A' if g == 0 else 'B'))
+        if g is None and core.guess in (0, 2):
+            goal_text += '?' + ('A' if core.guess == 0 else 'B')
         free = '/'.join(f'{x:.1f}' for x in core.ahead)
         reason = (f"3차선S {out['state']} 차로 {core.lane} 빈거리 {free} 목표 {goal_text}"
                   + (f" | {out['reason']}" if out['reason'] else '') + (f" | {out['wall_text']}" if out['wall_text'] else ''))

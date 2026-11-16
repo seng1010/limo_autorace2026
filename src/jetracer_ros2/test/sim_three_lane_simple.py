@@ -23,6 +23,7 @@ BODY_C = 0.10                     # 차체 가운데: 뒤 차축 앞
 ISL_LEN, ISL_HALF = 1.74, 0.27
 JOG0, JOG1 = 1.79, 2.29          # 섬 앞끝 기준: 바깥 선이 45도로 꺾여 합류하는 구간 (도면)
 DT = 0.05
+YOLO_EVERY = int(os.environ.get('SIM_YOLO_EVERY', '2'))   # 2 = 10 Hz, 5 = 4 Hz (차에서 실제 속도를 재서 맞출 것)
 
 
 def rect(cx, cy, yaw, L, W):
@@ -68,8 +69,9 @@ def raycast(ox, oy, yaw, polys, n=250, a0=-1.92, inc=3.84 / 249, rng=None):
 GAP_LO, GAP_HI = 1.0, 1.5
 
 
-def feasible(rows, isl):
-    """줄마다 빈 차로 집합. 줄 간격 1.0 m 이상이면 한 칸, 1.9 m 이상이면 두 칸 옮길 수 있다고 본다."""
+def feasible(rows, isl, goal=None):
+    """줄마다 빈 차로 집합. 줄 간격 1.0 m 이상이면 한 칸, 1.9 m 이상이면 두 칸 옮길 수 있다고 본다.
+    goal: 주면 마지막 줄 뒤 섬까지 남은 거리로 표지판 쪽 차로까지 갈 수 있는 배치만 (fair)."""
     reach, prev_s = {1}, 0.0
     for s, blocked in rows:
         g = s - prev_s
@@ -78,10 +80,14 @@ def feasible(rows, isl):
         if not reach:
             return False
         prev_s = s
+    if goal is not None:
+        g = isl - prev_s
+        step = 2 if g >= 1.9 else (1 if g >= 1.0 else 0)
+        return any(abs(goal - r) <= step for r in reach)
     return bool(reach & {0, 2}) or (isl - prev_s >= 1.2)
 
 
-def layout(rng, isl):
+def layout(rng, isl, goal=None):
     """정차 LIMO 를 줄 단위로 놓는다. 한 줄은 1~2개 (최소 한 차로는 빈다). 최대 7대. 지나갈 수 있는 배치만."""
     for _ in range(200):
         rows, s, n = [], rng.uniform(0.9, 1.3), 0
@@ -90,7 +96,7 @@ def layout(rng, isl):
             rows.append((s, set(int(j) for j in rng.choice(3, size=k, replace=False))))
             n += k
             s += rng.uniform(GAP_LO, GAP_HI)
-        if feasible(rows, isl):
+        if feasible(rows, isl, goal):
             break
     cars = []
     for s, blocked in rows:
@@ -153,10 +159,42 @@ def camera_obs(cx, cy, psi, isl, rng, spurious=0.0):
     return dict(th=th, lines=merged, n=1000, ystart=ystart, yellow_xy=yellow_xy, short=set(), edges=[])
 
 
-def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
+def p_correct(d, label, side):
+    """표지판을 맞게 읽을 확률. 11/15 측정(실제 B): 3.2 m 밖 5 %, 2.1~1.7 m 86 %, 1.4 m 안 100 %.
+    모델은 멀리서 A 라고 하는 쪽으로 틀린다 -> 실제 A 는 거의 맞는다. 옆 차로(비스듬히)는 B 를 더 틀린다."""
+    if label == 'a':
+        return 0.97
+    if d > 3.2:
+        p = 0.05
+    elif d > 2.1:
+        p = 0.05 + (3.2 - d) / 1.1 * 0.81
+    elif d > 1.7:
+        p = 0.86
+    elif d > 1.4:
+        p = 0.95
+    else:
+        p = 1.0
+    return p - (0.25 if side else 0.0)
+
+
+def yolo_sign(cx, cy, psi, isl, goal, rng):
+    """섬 앞끝 표지판 YOLO 결과 흉내 (못 보면 None). 상자 높이 33 px ≈ 1.7 m."""
+    dx, dy = isl - cx, 0.0 - cy
+    d = math.hypot(dx, dy)
+    ang = math.atan2(dy, dx) - psi
+    if dx < 0.3 or d > 4.5 or abs(ang) > math.radians(35) or rng.random() < 0.2:
+        return None
+    true = 'a' if goal == 0 else 'b'
+    lab = true if rng.random() < p_correct(d, true, abs(cy) > 0.3) else ('b' if true == 'a' else 'a')
+    h = 33.0 * 1.7 / d
+    return {'label': lab, 'confidence': 0.8, 'bbox': [300.0, 100.0, 300.0 + h * 0.8, 100.0 + h]}
+
+
+def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0, fair=False):
     rng = np.random.default_rng(seed)
     isl = S.START_TO_ISLAND - S.START_TO_DASH + rng.uniform(-0.10, 0.10)   # 진입(점선 시작) 기준. 트랙 오차 ±10 cm
-    cars = layout(rng, isl)
+    goal = int(rng.choice([0, 2])) if goal is None else goal
+    cars = layout(rng, isl, goal if fair else None)
     car_polys = [rect(x, y, 0.0, CAR_L, CAR_W) for x, y in cars]
     post = rect(isl - 0.03, 0.0, 0.0, 0.06, 0.06)
     # 섬: 양 끝이 뾰족한 육각형 (도면: 끝 0.21 m 동안 좁아짐)
@@ -169,8 +207,7 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
         if xx < isl + JOG1:
             return 0.80 - (xx - isl - JOG0)
         return 0.27
-    goal = int(rng.choice([0, 2])) if goal is None else goal
-    read_t = 0.0                              # 가운데(|y|<0.3)에서 섬 1.45~1.75 m 앞에 있던 시간. 0.8 초면 표지판 확정
+    yolo_rng = np.random.default_rng(seed + 10_000)
     # 참 상태 (뒤 차축)
     x, y, psi = -CAM, rng.uniform(-0.04, 0.04), rng.normal(0, math.radians(2.0))
     steer_act = 0.0
@@ -187,10 +224,10 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
     exit_lane = None
     while t < max_t:
         cx, cy = x + CAM * math.cos(psi), y + CAM * math.sin(psi)
-        if abs(cy) < 0.3 and 1.40 <= isl - cx <= 1.75:
-            read_t += DT
-            if sup.sign_goal is None and read_t >= 0.8:
-                sup.sign_goal = goal
+        if frames % YOLO_EVERY == 0:              # YOLO 속도 (DT 0.05 s 의 배수)
+            det = yolo_sign(cx, cy, psi, isl, goal, yolo_rng)
+            if det is not None:
+                sup.see_signs([det])
         polys = car_polys + [post]
         scan = raycast(cx, cy, psi, polys, rng=rng)
         obs = camera_obs(cx, cy, psi, isl, rng, spurious) if rng.random() > 0.1 else None
@@ -240,11 +277,12 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
 if __name__ == '__main__':
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 100
     spurious = 0.15 if 'noise' in sys.argv else 0.0
+    fair = 'fair' in sys.argv            # 표지판 쪽으로 갈 수 있는 배치만
     nums = [a for a in sys.argv[2:] if a.isdigit()]
     if nums:
-        print(run(int(nums[0]), verbose=True, spurious=spurious))
+        print(run(int(nums[0]), verbose=True, spurious=spurious, fair=fair))
         sys.exit()
-    res = [run(i, spurious=spurious) for i in range(n)]
+    res = [run(i, spurious=spurious, fair=fair) for i in range(n)]
     ok = sum(r['ok'] for r in res)
     right = sum(r['exit_lane'] == r['goal'] for r in res)
     print(f'통과(접촉·이탈 없이 갈림길 차로까지) {ok}/{n}, 표지판 쪽 {right}/{n}, '

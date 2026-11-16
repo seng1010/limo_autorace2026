@@ -118,6 +118,52 @@ def test_center_lane_slows_to_read_sign_when_unknown():
     assert out['v'] == S.V_READ and not k.changing
 
 
+def test_center_lane_stops_to_read_then_falls_back_to_guess():
+    k = core_at()
+    k.s = S.START_TO_ISLAND - S.READ_STOP + 0.02
+    out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), None, now=0.0)
+    assert out['v'] == 0.0 and k.state == 'READ' and not k.changing
+    # 서서 읽는 동안은 후진하지 않는다
+    out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), None, now=S.STUCK_SEC + 0.5)
+    assert out['v'] == 0.0 and not k.reversing
+    # 시간이 지나면 많이 읽힌 쪽(guess)으로
+    k.guess = 0
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), None, now=S.READ_WAIT_SEC + 0.1)
+    k.s = S.START_TO_ISLAND - S.LEAVE_DIST + 0.05
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), None, now=S.READ_WAIT_SEC + 0.2)
+    assert k.changing and k.lane == 0
+
+
+def test_fork_does_not_take_wrong_side_when_sign_side_briefly_blocked():
+    k = core_at()
+    k.s = S.START_TO_ISLAND - S.LEAVE_DIST + 0.05
+    # 표지판은 A(왼쪽)인데 왼쪽 차로 바로 앞에 장애물, 오른쪽은 비어 있음
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with(box(0.6, 0.535)), 0, now=0.0)
+    assert k.lane != 2
+
+
+def test_supervisor_guess_uses_close_reads_and_side_reads():
+    sup = S.Lane3SimpleSupervisor()
+    sup.set_mission('M7')
+    sup.mode = 'on'
+    sup.core.start(0.0, 0.0, (0.0, 0.0, 0.0))
+    far_a = [{'label': 'a', 'confidence': 0.9, 'bbox': [0, 0, 20, 20]}]       # 멀리서 A (모델이 잘 틀림) -> 안 셈
+    for _ in range(10):
+        sup.see_signs(far_a)
+    assert sup.guess is None
+    close_b = [{'label': 'b', 'confidence': 0.9, 'bbox': [0, 0, 40, 40]}]
+    sup.see_signs(close_b)
+    sup.see_signs(close_b)
+    assert sup.guess == 2 and sup.sign_goal is None
+    sup2 = S.Lane3SimpleSupervisor()
+    sup2.set_mission('M7')
+    sup2.mode = 'on'
+    sup2.core.start(-0.535, 0.0, (0.0, 0.0, 0.0))                            # 옆 차로
+    for _ in range(3):
+        sup2.see_signs([{'label': 'a', 'confidence': 0.9, 'bbox': [0, 0, 40, 40]}])
+    assert sup2.sign_goal is None and sup2.guess == 0
+
+
 def test_lines_correct_position_only_when_close():
     k = core_at(0.50)                  # 실제는 왼쪽 차로 가운데 0.535, 바깥 노란 선은 차에서 왼쪽 0.265
     obs = dict(th=0.0, lines=[(0.265, 150, 1.0)], n=1000, ystart={0.265: 0.42}, short=set())
