@@ -8,7 +8,6 @@
   4) TURN      : turn_sec 동안 우회전 (b)
   5) ENTER     : enter_sec 동안 주차 칸 진입 (c)
   6) DONE      : 최종 정지
-  
 """
 
 import os
@@ -30,15 +29,15 @@ TICK_SEC = 0.05  # 20 Hz
 DEFAULTS = {
     'output_topic': '/cmd_vel',
     'approach_speed': 0.25,     # 정지선 접근 속도 [m/s] (너무 빠르면 정지선 지나침)
-    'stop_distance_m': 0.05,    # 정지선 멈춤 기준 거리 [m] (0.05m = 5cm 앞)
-    'settle_sec': 1.0,          # 정지선 도착 후 주차 시작 전 대기 시간 [s]
-    'forward_sec': 1.7,         # a: 정지선에서 직진 시간 [s]
-    'turn_sec': 1.8,            # b: 우회전 시간 [s]
-    'enter_sec': 0.1,           # c: 칸 안으로 직진 시간 [s]
+    'stop_distance_m': 0.0,    # 정지선 멈춤 기준 거리 [m] (0.05m = 5cm 앞)
+    'settle_sec': 0.5,          # 정지선 도착 후 주차 시작 전 대기 시간 [s]
+    'forward_sec': 2.1,         # a: 정지선에서 직진 시간 [s]
+    'turn_sec': 1.9,            # b: 우회전 시간 [s]
+    'enter_sec': 0.10,           # c: 칸 안으로 직진 시간 [s]
     'speed': 0.50,              # 주차 직진 속도 [m/s]
     'turn_speed': 0.50,         # 주차 우회전 속도 [m/s]
     'turn_steer_rad': 0.45,     # 우회전 조향각 크기 [rad]
-    'start_delay_sec': 0.0,     # 실행 후 출발까지 대기 [s]
+    'start_delay_sec': 2.0,     # 실행 후 출발까지 대기 [s]
     'wait_enter': False,        # True면 Enter를 눌러야 출발
 }
 
