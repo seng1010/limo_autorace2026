@@ -60,6 +60,13 @@ except ImportError:
         import three_lane as _three_lane
     except ImportError:
         _three_lane = None
+try:                                    # IMU 자이로로 차 방향 (3차선 위치 추정용)
+    from jetracer_ros2 import imu_heading as _imu_heading
+except ImportError:
+    try:
+        import imu_heading as _imu_heading
+    except ImportError:
+        _imu_heading = None
 try:                                    # 3차선 단순 버전 (three_lane_simple.py). 실행 인자 l3simple 로 고른다
     from jetracer_ros2 import three_lane_simple as _three_lane_simple
 except ImportError:
@@ -141,6 +148,9 @@ LANE3_GOAL = None               # goal_a / goal_b 를 붙이면 갈림길 방향
 LANE3_SIMPLE = False            # l3simple 을 붙이면 3차선을 단순 버전(three_lane_simple.py: odom 위치 + 라이다 지도)으로
 SCAN_TOPIC = '/scan'
 ODOM_TOPIC = '/odom'
+IMU_TOPIC = '/imu'
+USE_IMU = True                  # 3차선 방향을 IMU 자이로로 (odom 방향은 크게 꺾을 때 실제보다 많이 돈다). 끄려면 noimu
+IMU_SIGN = 1.0                  # IMU 가 반대로 달려 왼쪽으로 돌 때 - 가 나오면 imu_flip
 MEM_JUMP = 0.15                 # 이번에 본 선의 시작점이 기억한 같은 쪽 선에서 이보다(m) 멀면 일단 무시
 MEM_BAD_FRAMES = 5              # 위 상황이 이만큼 연속되면 기억을 버리고 새 선으로 교체
 MEM_TAIL_TOL = 0.08             # 이번에 본 선의 먼 쪽 끝이 기억한 선 위(이 거리 안)에 있으면, 그보다 먼 기억은 그대로 둠
@@ -1671,7 +1681,7 @@ def run_ros(mode, topic, record=False):
     from geometry_msgs.msg import Twist
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
-    from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
+    from sensor_msgs.msg import CameraInfo, CompressedImage, Imu, LaserScan
     from std_msgs.msg import String
     from collections import deque
     from nav_msgs.msg import Odometry
@@ -1702,7 +1712,14 @@ def run_ros(mode, topic, record=False):
             self.rec_dir = None
             self.rec_csv = None
             self.rec_n = 0
-            self.odom = deque(maxlen=200)       # (메시지 시각, 받은 시각, x, y, yaw[연속])
+            self.odom = deque(maxlen=200)       # (메시지 시각, 받은 시각, x, y, yaw[연속], imu yaw[없으면 nan])
+            self.imu = None
+            self.odom_moved_t = time.monotonic()  # odom 이 마지막으로 움직인 시각 (IMU 영점 맞출 때 '서 있음' 판단)
+            self.cmd_moving_t = time.monotonic()  # 마지막으로 0 이 아닌 속도를 보낸 시각
+            self.l3_yaw = None                  # 3차선에 넘기는 방향 (IMU 가 있으면 IMU 로, 끊기면 odom 변화량으로 이어 붙임)
+            self.l3_prev = None
+            self.imu_sign_note = ''
+            self.warned_imu = 0.0
             self.odom_mode = None
             self.warned_odom = 0.0
             self.scan = None                    # 가장 최근 라이다 (ranges, angle_min, angle_increment, range_min)
@@ -1739,6 +1756,10 @@ def run_ros(mode, topic, record=False):
             self.odom_seen = {}
             for name in (ODOM_TOPIC, '/limo/odom' if ODOM_TOPIC == '/odom' else '/odom'):
                 self.create_subscription(Odometry, name, lambda m, n=name: self.on_odom(m, n), qos_profile_sensor_data)
+            if self.lane3 is not None and USE_IMU and _imu_heading is not None:
+                self.imu = _imu_heading.ImuYaw(IMU_SIGN)
+                self.create_subscription(Imu, IMU_TOPIC, self.on_imu, qos_profile_sensor_data)
+                print(f'[IMU] 3차선 방향은 {IMU_TOPIC} 자이로로 잽니다 (끄려면 noimu)')
             if self.lane3 is not None:
                 self.create_subscription(LaserScan, SCAN_TOPIC, self.on_scan, qos_profile_sensor_data)
                 self.create_subscription(String, 'mission/active', self.on_mission, 10)
@@ -1798,11 +1819,50 @@ def run_ros(mode, topic, record=False):
                 self.odom.clear()
             q = msg.pose.pose.orientation
             yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            x, y = msg.pose.pose.position.x, msg.pose.pose.position.y
             if self.odom:                                   # yaw 를 끊김 없이 이어 붙임 (+-180도 넘어갈 때)
                 prev = self.odom[-1][4]
                 yaw = prev + math.atan2(math.sin(yaw - prev), math.cos(yaw - prev))
+                if math.hypot(x - self.odom[-1][2], y - self.odom[-1][3]) > 0.0005 or abs(yaw - prev) > 1e-4:
+                    self.odom_moved_t = now
+            iyaw = float('nan')
+            if self.imu is not None and self.imu.fresh(now):
+                iyaw = self.imu.yaw
+                if self.odom and not math.isnan(self.odom[-1][5]) and not self.imu_sign_note:
+                    sign = self.imu.compare(iyaw - self.odom[-1][5], yaw - self.odom[-1][4])
+                    if sign is not None:
+                        self.imu_sign_note = 'ok' if sign > 0 else 'flip'
+                        print('\n[IMU] 방향 부호 ' + ('odom 과 같음 (정상)' if sign > 0 else
+                                                     'odom 과 반대! -> 실행 인자 imu_flip 을 붙이세요'))
             stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            self.odom.append((stamp, time.monotonic(), msg.pose.pose.position.x, msg.pose.pose.position.y, yaw))
+            self.odom.append((stamp, time.monotonic(), x, y, yaw, iyaw))
+
+        def on_imu(self, msg):
+            now = time.monotonic()
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            # 서 있음: odom 이 0.5 초 안 움직였거나, 속도 0 을 1 초 넘게 보냈을 때 (서 있을 때 odom 이 떨리는 차도 있어서)
+            still = now - self.odom_moved_t > 0.5 or now - self.cmd_moving_t > 1.0
+            self.imu.add(stamp if stamp > 0.0 else now, msg.angular_velocity.z, now, stationary=still)
+            if not self.imu.fresh(now) and now - self.t_start > 8.0 and now - self.warned_imu > 5.0:
+                self.warned_imu = now
+                print('\n[IMU] 아직 영점을 못 맞춤 (차가 서 있는 걸 못 알아봄) -> 3차선 방향은 odom 으로')
+
+        def lane3_pose(self, pose5):
+            """3차선에 넘길 자세 (x, y, 방향, odom 방향). 방향은 IMU 변화량으로, IMU 가 없거나 끊긴 프레임은 odom 변화량으로
+            이어 붙인다 (값이 갑자기 튀지 않게). odom 방향은 거리의 앞뒤 부호를 정하는 데만 쓴다."""
+            if pose5 is None:
+                return None
+            x, y, oyaw, iyaw = pose5
+            if self.l3_prev is None:
+                self.l3_yaw = oyaw
+            else:
+                p_oyaw, p_iyaw = self.l3_prev
+                if not math.isnan(iyaw) and not math.isnan(p_iyaw):
+                    self.l3_yaw += iyaw - p_iyaw
+                else:
+                    self.l3_yaw += oyaw - p_oyaw
+            self.l3_prev = (oyaw, iyaw)
+            return (x, y, self.l3_yaw, oyaw)
 
         def pose_for(self, img_stamp, now):
             """영상에 맞는 odom 자세 (x, y, yaw). 영상 시각이 odom 기록 범위 안이면 그 시각으로 보간,
@@ -1819,7 +1879,7 @@ def run_ros(mode, topic, record=False):
                         a, b = self.odom[k - 1], self.odom[k]
                         if a[0] <= img_stamp:
                             w = 0.0 if b[0] <= a[0] else (img_stamp - a[0]) / (b[0] - a[0])
-                            pose = tuple(a[n] + w * (b[n] - a[n]) for n in (2, 3, 4))
+                            pose = tuple(a[n] + w * (b[n] - a[n]) for n in (2, 3, 4, 5))
                             break
             else:
                 mode, pose = 'latest', self.odom[-1][2:]
@@ -1827,7 +1887,7 @@ def run_ros(mode, topic, record=False):
                 self.odom_mode = mode
                 print('\n[odom] 연결됨: ' + ('영상 시각에 맞춰 사용' if mode == 'stamp' else
                                               '영상 시각을 쓸 수 없어 가장 최근 값 사용'))
-            return tuple(pose)
+            return tuple(pose)          # (x, y, odom yaw, imu yaw 또는 nan)
 
         def undistort(self, image):
             if self.K is None:
@@ -1839,6 +1899,8 @@ def run_ros(mode, topic, record=False):
             return cv2.remap(image, self.maps[0], self.maps[1], cv2.INTER_LINEAR)
 
         def send(self, v, angle):
+            if abs(v) > 1e-3:
+                self.cmd_moving_t = time.monotonic()
             if self.pub is None:
                 return
             msg = Twist()
@@ -1879,7 +1941,9 @@ def run_ros(mode, topic, record=False):
             self.last_img_t = now
             image = cv2.resize(self.undistort(raw), (IMG_W, IMG_H))
             self.tune = self.gui.read(self.tune)
-            pose = self.pose_for(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9, now)
+            pose5 = self.pose_for(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9, now)
+            pose = None if pose5 is None else tuple(pose5[:3])
+            l3pose = self.lane3_pose(pose5) if self.imu is not None else pose
             if pose is None and now - self.warned_odom > 3.0 and now - self.t_start > 2.0:
                 self.warned_odom = now
                 print(f'\n[주의] {ODOM_TOPIC} 가 안 들어옴 -> 코너에서 돈 각도를 시간으로 추정합니다'
@@ -1894,13 +1958,16 @@ def run_ros(mode, topic, record=False):
                     both = (res['left'] is not None and res['right'] is not None
                             and 0.42 <= res['lane_width'] <= 0.62)
                     scan = self.scan if now - self.scan_t < 0.5 else None
-                    l3 = self.lane3.step(image, pose, scan, both, self.tune)
+                    l3 = self.lane3.step(image, l3pose, scan, both, self.tune)
                     if self.lane3.message:
                         print('\n' + self.lane3.message)
                         self.lane3.message = ''
                     if l3 is not None:
                         cmd = (l3['v'], l3['steer'], l3['state'], l3['reason'])
                         res['note'] = l3['note']
+                        if self.imu is not None and pose5 is not None:
+                            res['note'] += (f" imu{'-' if math.isnan(pose5[3]) else 'ok'}"
+                                            f" dyaw{math.degrees(self.l3_yaw - pose5[2]):+.0f}")
             except (cv2.error, ValueError, np.linalg.LinAlgError) as e:
                 print(f'\n[처리 오류] {e} -> 정지')
                 self.send(0.0, 0.0)
@@ -1988,10 +2055,14 @@ def run_ros(mode, topic, record=False):
 
 
 def main():
-    global STEER_GAIN, PRESET, MEM, LANE3, LANE3_GOAL, LANE3_SIMPLE, ODOM_TOPIC
+    global STEER_GAIN, PRESET, MEM, LANE3, LANE3_GOAL, LANE3_SIMPLE, ODOM_TOPIC, USE_IMU, IMU_SIGN
     args = sys.argv[1:]
     if 'l3simple' in args:
         LANE3_SIMPLE = True
+    if 'noimu' in args:
+        USE_IMU = False
+    if 'imu_flip' in args:
+        IMU_SIGN = -1.0
     if 'mem' in args:
         MEM = True
     if 'lane3' in args:

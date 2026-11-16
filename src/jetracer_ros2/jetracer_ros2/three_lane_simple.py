@@ -252,8 +252,13 @@ class SimpleThreeLane:
             return
         # 앞뒤 부호가 있는 이동 거리: odom 변위를 차 방향에 투영한다. 서 있을 때 odom 이 떨리면 hypot 은 늘 +로 쌓여
         # 위치가 조금씩 밀렸다 (11/16 실차: 막혀서 섰다 후진했다 되풀이하는 동안 0.4 m)
-        yaw_mid = prev[2] + dyaw / 2.0
-        ds = dx * math.cos(yaw_mid) + dy * math.sin(yaw_mid)
+        # pose 가 (x, y, 방향, odom 방향) 이면 방향은 IMU 로 잰 값이다. odom 변위는 odom 자신의 방향으로 쌓인 것이라
+        # 투영은 odom 방향으로 한다 (거리만 odom 으로 쓰고, 차가 돈 양 dyaw 는 IMU 값)
+        if len(pose) > 3 and len(prev) > 3:
+            oyaw_mid = prev[3] + (pose[3] - prev[3]) / 2.0
+        else:
+            oyaw_mid = prev[2] + dyaw / 2.0
+        ds = dx * math.cos(oyaw_mid) + dy * math.sin(oyaw_mid)
         if self.reversing:
             self.reverse_left -= abs(ds)
         # odom 기준점(뒤 차축)을 옮긴 뒤 카메라 투영점을 다시 구한다. 차가 틀어지면 카메라는 뒤 차축보다 옆으로 더 움직인다
