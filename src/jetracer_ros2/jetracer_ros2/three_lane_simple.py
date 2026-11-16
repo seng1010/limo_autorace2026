@@ -99,6 +99,8 @@ STUCK_SEC = 1.5                      # 이만큼 서 있으면 후진
 REVERSE_M = 0.40                     # 한 번에 후진하는 거리
 REVERSE_MAX_COUNT = 3
 V_REVERSE = 0.10
+ISLAND_LOOK_FROM = 2.3                # 섬 앞끝 도면 위치보다 이만큼 앞에서부터 카메라로 섬을 찾는다
+ISLAND_TRUST = 0.80                  # 카메라로 본 섬 위치가 도면과 이 이상 다르면 버린다
 ISLAND_CONFIRM = 3                   # 카메라로 섬을 이만큼 연속 비슷한 위치에서 봐야 믿는다
 ISLAND_MIN_VIEW = 0.55               # 섬 앞끝이 이보다 가까우면 카메라 값을 새로 받지 않는다 (카메라 사각)
 ARM_AFTER_M = 1.4                    # M7 시작 후 이만큼 간 뒤부터 진입을 찾는다 (그 전은 코너)
@@ -269,7 +271,9 @@ class SimpleThreeLane:
         self.c += LINE_GAIN * (cc - self.c)
 
     def _camera_island(self, obs):
-        if not obs or obs.get('yellow_xy') is None:
+        # 섬은 도면상 시작선 4.36 m. 그보다 한참 앞(1차선 구간)에서는 1차선 노란 선(+-0.26)이 섬처럼 보여
+        # 섬을 시작선 근처(-0.6 m)로 잡고 가운데 차로를 막아 출발도 못 했다 (11/16 실차 run15)
+        if not obs or obs.get('yellow_xy') is None or self.s < START_TO_ISLAND - ISLAND_LOOK_FROM:
             return
         d = T.island_distance(obs['yellow_xy'], self.c, self.th)
         if d is None or d < ISLAND_MIN_VIEW:
@@ -278,6 +282,8 @@ class SimpleThreeLane:
         self._isl_seen = [p for p in self._isl_seen[-(ISLAND_CONFIRM - 1):] if abs(p - pos) < 0.30] + [pos]
         if len(self._isl_seen) >= ISLAND_CONFIRM:
             est = float(np.median(self._isl_seen))
+            if abs(est - START_TO_ISLAND) > ISLAND_TRUST:
+                return                             # 도면과 너무 다르면 잘못 본 것
             self.island_s = est if self.island_s is None else min(self.island_s, est)
 
     @property

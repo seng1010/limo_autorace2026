@@ -232,3 +232,13 @@ def test_entry_is_forced_when_lines_never_confirm(monkeypatch):
     assert sup.step(None, (0.0, 0.0, 0.0), None, False, now=0.0) is None and sup.mode == 'armed'
     out = sup.step(None, (0.0, 0.0, 0.0), None, False, now=S.ENTRY_WAIT_SEC + 0.1)
     assert sup.mode == 'on' and out is not None and out['v'] > 0.0
+
+
+def test_island_is_not_seen_near_the_start_line():
+    """1차선 구간에서 1차선 노란 선을 섬으로 보지 않는다 (11/16 실차: 섬을 -0.6 m 로 잡고 출발 못 함)."""
+    k = core_at(0.0)
+    k.s = -1.0
+    xy = np.array([[x, f] for x in (-0.26, 0.26) for f in np.arange(0.6, 1.8, 0.02)])
+    for _ in range(5):
+        k._camera_island(dict(yellow_xy=xy))
+    assert k.island_s is None and abs(k.island_at - S.START_TO_ISLAND) < 1e-9
