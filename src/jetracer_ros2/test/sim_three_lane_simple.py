@@ -68,8 +68,9 @@ def raycast(ox, oy, yaw, polys, n=250, a0=-1.92, inc=3.84 / 249, rng=None):
 GAP_LO, GAP_HI = 1.0, 1.5
 
 
-def feasible(rows, isl):
-    """줄마다 빈 차로 집합. 줄 간격 1.0 m 이상이면 한 칸, 1.9 m 이상이면 두 칸 옮길 수 있다고 본다."""
+def feasible(rows, isl, goal=None):
+    """줄마다 빈 차로 집합. 줄 간격 1.0 m 이상이면 한 칸, 1.9 m 이상이면 두 칸 옮길 수 있다고 본다.
+    goal: 주면 그 갈림길 차로까지 갈 수 있는 배치만 (마지막 줄 뒤 섬까지 1.2 m 면 한 칸, 2.2 m 면 두 칸)."""
     reach, prev_s = {1}, 0.0
     for s, blocked in rows:
         g = s - prev_s
@@ -78,10 +79,14 @@ def feasible(rows, isl):
         if not reach:
             return False
         prev_s = s
+    if goal is not None:
+        g = isl - prev_s
+        step = 2 if g >= 2.2 else (1 if g >= 1.2 else 0)
+        return any(abs(goal - r) <= step for r in reach)
     return bool(reach & {0, 2}) or (isl - prev_s >= 1.2)
 
 
-def layout(rng, isl):
+def layout(rng, isl, goal=None):
     """정차 LIMO 를 줄 단위로 놓는다. 한 줄은 1~2개 (최소 한 차로는 빈다). 최대 7대. 지나갈 수 있는 배치만."""
     for _ in range(200):
         rows, s, n = [], rng.uniform(0.9, 1.3), 0
@@ -90,7 +95,7 @@ def layout(rng, isl):
             rows.append((s, set(int(j) for j in rng.choice(3, size=k, replace=False))))
             n += k
             s += rng.uniform(GAP_LO, GAP_HI)
-        if feasible(rows, isl):
+        if feasible(rows, isl, goal):
             break
     cars = []
     for s, blocked in rows:
@@ -153,10 +158,13 @@ def camera_obs(cx, cy, psi, isl, rng, spurious=0.0):
     return dict(th=th, lines=merged, n=1000, ystart=ystart, yellow_xy=yellow_xy, short=set(), edges=[])
 
 
-def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
+def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0, side_sign=True, fair=False):
+    """fair: 표지판 쪽 갈림길까지 갈 수 있는 배치만 (대회 배치는 그럴 것이다)."""
     rng = np.random.default_rng(seed)
     isl = S.START_TO_ISLAND - S.START_TO_DASH + rng.uniform(-0.10, 0.10)   # 진입(점선 시작) 기준. 트랙 오차 ±10 cm
-    cars = layout(rng, isl)
+    if fair and goal is None:
+        goal = int(rng.choice([0, 2]))
+    cars = layout(rng, isl, goal if fair else None)
     car_polys = [rect(x, y, 0.0, CAR_L, CAR_W) for x, y in cars]
     post = rect(isl - 0.03, 0.0, 0.0, 0.06, 0.06)
     # 섬: 양 끝이 뾰족한 육각형 (도면: 끝 0.21 m 동안 좁아짐)
@@ -170,7 +178,8 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
             return 0.80 - (xx - isl - JOG0)
         return 0.27
     goal = int(rng.choice([0, 2])) if goal is None else goal
-    read_t = 0.0                              # 가운데(|y|<0.3)에서 섬 1.45~1.75 m 앞에 있던 시간. 0.8 초면 표지판 확정
+    read_at = None
+    read_t = side_t = 0.0                              # 가운데(|y|<0.3)에서 섬 1.45~1.75 m 앞에 있던 시간. 0.8 초면 표지판 확정
     # 참 상태 (뒤 차축)
     x, y, psi = -CAM, rng.uniform(-0.04, 0.04), rng.normal(0, math.radians(2.0))
     steer_act = 0.0
@@ -191,6 +200,12 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
             read_t += DT
             if sup.sign_goal is None and read_t >= 0.8:
                 sup.sign_goal = goal
+                read_at = ('center', round(isl - cx, 2))
+        elif side_sign and abs(cy) >= 0.3 and 1.2 <= isl - cx <= (1.9 if goal == 2 else 1.55):
+            side_t += DT                      # 옆 차로에서 읽기 (B 는 30 px ~ 1.9 m, A 는 36 px ~ 1.55 m 부터)
+            if sup.sign_goal is None and side_t >= 0.8:
+                sup.sign_goal = goal
+                read_at = ('side', round(isl - cx, 2))
         polys = car_polys + [post]
         scan = raycast(cx, cy, psi, polys, rng=rng)
         obs = camera_obs(cx, cy, psi, isl, rng, spurious) if rng.random() > 0.1 else None
@@ -232,7 +247,7 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
             print(f't{t:5.1f} x{x:5.2f} y{y:+.2f} psi{math.degrees(psi):+4.0f} v{v:+.2f} | {out["note"]} | {out["reason"]}')
     passed = max(0.0, x)
     ok = exit_lane in (0, 2) and contact == 0 and out_frames == 0 and island_frames == 0
-    return dict(seed=seed, ok=ok, exit_lane=exit_lane, goal=goal, contact=contact, out=out_frames,
+    return dict(read_at=read_at, seed=seed, ok=ok, exit_lane=exit_lane, goal=goal, contact=contact, out=out_frames,
                 island=island_frames, t=t, x=passed, cars=len(cars), reverse=sup.core.reverse_count,
                 state=sup.core.state, reason=sup.core.reason)
 
@@ -240,11 +255,12 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0):
 if __name__ == '__main__':
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 100
     spurious = 0.15 if 'noise' in sys.argv else 0.0
+    fair = 'fair' in sys.argv
     nums = [a for a in sys.argv[2:] if a.isdigit()]
     if nums:
-        print(run(int(nums[0]), verbose=True, spurious=spurious))
+        print(run(int(nums[0]), verbose=True, spurious=spurious, fair=fair))
         sys.exit()
-    res = [run(i, spurious=spurious) for i in range(n)]
+    res = [run(i, spurious=spurious, fair=fair) for i in range(n)]
     ok = sum(r['ok'] for r in res)
     right = sum(r['exit_lane'] == r['goal'] for r in res)
     print(f'통과(접촉·이탈 없이 갈림길 차로까지) {ok}/{n}, 표지판 쪽 {right}/{n}, '

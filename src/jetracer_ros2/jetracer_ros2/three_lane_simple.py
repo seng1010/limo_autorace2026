@@ -19,6 +19,7 @@ simple_lane.py 에서 Lane3Supervisor 대신 쓴다 (실행 인자 l3simple). �
 
 import math
 import time
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -94,6 +95,13 @@ HEADING_TIGHT = math.radians(45.0)
 ARRIVE_TOL = 0.10                    # 목표 차로 가운데에서 이 안 + 도로와 나란하면 옮기기 끝
 ABORT_BACK = 0.15                    # 옮기기 시작 직후 그 차로가 막히면, 아직 이 안이면 원래 차로로 돌아간다
 PREF_FRAMES = 5                      # '가고 싶은 차로'로 옮기는 조건이 연속 이만큼 맞아야 옮긴다
+SIDE_BACK_M = 0.90                   # 표지판 쪽으로 건너가려고 물러날 때 최대 거리
+CROSS_MARGIN = 0.30                  # 표지판 쪽으로 건너갈 때는 섬(과 반대쪽 갈림길)이 이만큼 앞에 있다고 보고 계획한다 (섬 위치 추정 오차)
+WRONG_SIDE_FROM = 0.20               # 표지판 반대쪽 바깥 차로는 섬 앞끝 + 이만큼부터 섬 끝까지 막힌 것으로 계획한다 (갈림길 반대쪽으로 들어가지 않게)
+# 옆 차로에서 읽은 표지판: 가운데보다 엄하게 (비스듬히 보면 틀린 적이 있다). 모델은 멀리서 B 를 A 라고 하는 쪽으로 틀리므로 B 는 조금 멀리서도 믿는다
+SIDE_SIGN_MIN_H = {'a': 36.0, 'b': 30.0}   # 상자 높이 [px] (가운데 기준 33 px 가 약 1.7 m)
+SIDE_SIGN_WINDOW = 6
+SIDE_SIGN_NEED = 5
 TH_GAIN = 0.15                       # 카메라 도로 방향으로 고치는 비율 (한 프레임)
 TH_ACCEPT = math.radians(15.0)       # odom 으로 예상한 방향과 이 이상 다르면 카메라 방향을 안 쓴다
 # (6도로 두었더니, odom 이 조향 명령으로 방향을 계산해 실제보다 크게 돈 걸로 나올 때 카메라 값을 버려 15도 넘게 틀어졌다 - 11/16 실차)
@@ -188,6 +196,8 @@ class SimpleThreeLane:
         self.plan_text = ''
         self._goal = None
         self._guard_hit = False
+        self._side_back = False      # 표지판 쪽으로 건너가려고 물러나야 함
+        self.side_back_done = False  # 그 후진은 한 번만
         self.change_from = 1
         self.state = 'KEEP'
         self.reason = ''
@@ -401,7 +411,7 @@ class SimpleThreeLane:
         self.lane_run = 0.0
         self.state, self.reason = 'CHANGE', why
 
-    def _plan(self, goal):
+    def _plan(self, goal, margin=0.0):
         """지도 위에서 앞 PLAN_HORIZON 동안의 차로 순서를 고른다 (동적 계획).
         칸마다 '이 차로에 있을 수 있나'를 보고, 차로를 옮기는 동안은(PLAN_CHANGE_1/2) 지나가는 차로가 모두 비어 있어야 한다.
         가장 멀리 갈 수 있는 계획을 고르고, 같으면 덜 옮기는 쪽, 그다음 표지판 쪽(모르면 기본 쪽)에서 끝나는 쪽.
@@ -413,6 +423,11 @@ class SimpleThreeLane:
         lo = self.s - 0.5
         m = int((PLAN_HORIZON + 1.0) / res)
         occ = np.zeros((3, m), bool)
+        extra = []
+        if goal in (0, 2):
+            # 표지판 반대쪽 갈림길은 막힌 것으로 본다 -> 계획이 표지판 쪽으로 (필요하면 두 칸) 건너가는 길을 찾는다
+            w = LANE_CENTER[2 - goal]
+            extra.append((self.island_at + WRONG_SIDE_FROM, self.island_at + ISLAND_LEN, w - 0.1, w + 0.1))
         ss, ll = self.map._s, self.map._lat
         for j in range(3):
             if ss.size:
@@ -420,7 +435,8 @@ class SimpleThreeLane:
                 idx = np.floor((ss[sel] - lo) / res).astype(int)
                 idx = idx[(idx >= 0) & (idx < m)]
                 occ[j, idx] = True
-            for v_from, v_end, vlo, vhi in self.map.virtual:
+            for v_from, v_end, vlo, vhi in self.map.virtual + extra:
+                v_from -= margin
                 if vlo <= LANE_CENTER[j] <= vhi:
                     a0, a1 = int(max(0, (v_from - lo) / res)), int(min(m, (v_end - lo) / res + 1))
                     if a1 > a0:
@@ -487,6 +503,7 @@ class SimpleThreeLane:
 
     def _decide(self, goal, front):
         """반환: 속도."""
+        self._side_back = False
         self.ahead = [self._free(j) for j in range(3)]
         cur = self.lane
         a = self.ahead[cur]
@@ -534,6 +551,16 @@ class SimpleThreeLane:
                 return V_CHANGE
         # 1) 가운데 차로에서 섬이 가까우면 옆으로 빠진다 (가운데 차로는 섬에서 끝난다)
         if cur == 1 and to_island < LEAVE_DIST:
+            if goal in (0, 2):
+                # 표지판 쪽이 옆 장애물로 잠깐 막혀 있으면, 가운데에서 조금 더 가다 옮기는 게 나을 수 있다 (계획으로 본다)
+                j, stay_reach, go_reach = self._plan(goal)
+                self.plan_text = f'계획 {stay_reach:.1f}/{go_reach:.1f}'
+                if j == goal and go_reach >= stay_reach - 0.05:
+                    self._begin(j, f'섬 {to_island:.1f} m -> 표지판 쪽 차로 {j} ({self.plan_text})')
+                    return V_CHANGE
+                if stay_reach > go_reach + 0.05 and a >= STOP_DIST:
+                    self.state, self.reason = 'KEEP', f'섬 {to_island:.1f} m, 표지판 쪽 옆이 비기를 기다림 ({self.plan_text})'
+                    return V_SLOW
             j = self._pick(1, min(a, max(to_island, 0.0)), goal)
             if j is not None:
                 self._begin(j, f'섬 {to_island:.1f} m -> 차로 {j}')
@@ -556,6 +583,29 @@ class SimpleThreeLane:
                 self.state, self.reason = 'BLOCKED', f'앞 {a:.2f} m, 옮길 때를 기다림 ({self.plan_text})'
                 return V_SLOW
         # 3) 막히지 않았으면 가고 싶은 차로로 (표지판 쪽, 모르면 가운데에서 표지판 읽기)
+        if goal in (0, 2) and cur != goal:
+            # 표지판 쪽으로: 계획으로 본다. 가운데가 비어 있으면 두 칸도 한 번에 건너간다
+            # (가운데 차로가 늘 비어 있지는 않다. 한 칸씩만 보면 가운데가 조금만 막혀도 반대쪽 갈림길로 갔다)
+            j, stay_reach, go_reach = self._plan(goal, margin=CROSS_MARGIN)
+            self.plan_text = f'계획 {stay_reach:.1f}/{go_reach:.1f}'
+            full = PLAN_HORIZON - 0.15
+            if (j is not None and (j - cur) * (goal - cur) > 0
+                    and (go_reach > stay_reach + 0.05 or (go_reach >= full and stay_reach >= full))):
+                # 옮겨서 더 멀리 가거나(= 반대쪽 갈림길을 피함), 섬이 아직 멀어 어느 쪽이든 끝까지 갈 수 있을 때
+                self._pref_count += 1
+                if self._pref_count >= PREF_FRAMES:
+                    self._begin(j, f'표지판 쪽 -> 차로 {j} ({self.plan_text})')
+                    return V_CHANGE
+                self.state, self.reason = 'KEEP', f'표지판 쪽으로 옮길 준비 ({self.plan_text})'
+                return V_KEEP
+            self._pref_count = 0
+            if cur == 2 - goal and to_island > -0.1 and not self.side_back_done and self._back_toward(goal):
+                # 반대쪽 바깥 차로에서 표지판을 늦게 읽었다: 조금 물러나면 (두 칸) 건너갈 수 있다 -> 서서 후진
+                self._side_back = True
+                self.state, self.reason = 'STOP', f'표지판 쪽으로 건너가려고 물러남 ({self.plan_text})'
+                return 0.0
+            self.state, self.reason = 'KEEP', f'표지판 쪽 길 없음 ({self.plan_text})'
+            return V_KEEP
         if goal in (0, 2):
             pref = goal
         else:
@@ -579,6 +629,30 @@ class SimpleThreeLane:
             return V_READ
         return V_KEEP
 
+    def _reverse_room(self, side=False):
+        """뒤로 얼마나 갈 수 있나: 지나오며 기억한 장애물(지도)의 바로 뒤 것까지. 지나온 길 밖은 모르니 지나온 거리까지만.
+        side: 표지판 쪽으로 건너가려고 물러날 때. 이 차로에서 달린 거리가 짧아도(막 옮겨 왔어도) 지도로 뒤를 본다
+        (라이다는 지나온 길을 앞에서 2 m 넘게 미리 봤다). 1차선 구간까지는 물러나지 않는다."""
+        most = SIDE_BACK_M if side else REVERSE_M
+        room = min(most, self.s - CHANGE_FROM_S - 0.3) if side else min(most, self.lane_run)
+        behind = self.map.last_in_lane(self.lane, self.s - CAR_REAR - most - 0.10, self.s - CAR_REAR)
+        if behind is not None:
+            room = min(room, self.s - CAR_REAR - behind - 0.10)
+        return room
+
+    def _back_toward(self, goal):
+        """물러나면 표지판 쪽으로 건너갈 길이 생기나."""
+        room = self._reverse_room(side=True)
+        if room < 0.20 or self.reverse_count >= REVERSE_MAX_COUNT:
+            return False
+        s0 = self.s
+        self.s = s0 - room
+        try:
+            j, stay, go = self._plan(goal, margin=CROSS_MARGIN)
+        finally:
+            self.s = s0
+        return j is not None and (j - self.lane) * (goal - self.lane) > 0 and go >= PLAN_HORIZON - 0.15
+
     def _recover(self, speed, now):
         """서 있으면 후진. 반환: (속도, 후진 중인지)."""
         if self.reversing:
@@ -594,11 +668,7 @@ class SimpleThreeLane:
             self.stop_since = now
         if now - self.stop_since < STUCK_SEC or self.reverse_count >= REVERSE_MAX_COUNT:
             return 0.0, False
-        # 뒤로 얼마나 갈 수 있나: 지나오며 기억한 장애물(지도)의 바로 뒤 것까지. 지나온 길 밖은 모르니 지나온 거리까지만
-        room = min(REVERSE_M, self.lane_run)
-        behind = self.map.last_in_lane(self.lane, self.s - CAR_REAR - REVERSE_M - 0.10, self.s - CAR_REAR)
-        if behind is not None:
-            room = min(room, self.s - CAR_REAR - behind - 0.10)
+        room = self._reverse_room(side=self._side_back)
         if room < 0.10:
             return 0.0, False
         # 후진해서 계획이 나아질 때만 후진한다 (나아지지 않으면 같은 길을 되풀이할 뿐 - 11/16 실차 run17)
@@ -610,12 +680,14 @@ class SimpleThreeLane:
         finally:
             self.s = s0
         a_now = self._free(self.lane)
-        if (not self._guard_hit
+        if (not (self._guard_hit or self._side_back)
                 and max(stay1, go1) - room <= max(a_now + 0.30, max(stay0, go0) + 0.05)):   # 물러나도 지금 막힌 곳을 못 지나간다
             self.state, self.reason = 'STOP', f'막힌 길 (후진해도 갈 길 없음, 계획 {max(stay0, go0):.1f} m)'
             return 0.0, False
         self.reversing, self.reverse_left = True, room
         self.reverse_count += 1
+        if self._side_back:
+            self.side_back_done = True
         self.lane_run = 0.0
         return -V_REVERSE, True
 
@@ -702,6 +774,7 @@ class Lane3SimpleSupervisor:
         self.sign_goal = goal
         self.fixed_goal = goal is not None
         self.vote = T.SignVote()
+        self.side_vote = deque(maxlen=SIDE_SIGN_WINDOW)
         self.arm_travel = 0.0
         self._pose = None
         self._white = self._both = self._lost = 0
@@ -724,6 +797,7 @@ class Lane3SimpleSupervisor:
                 self._white = self._both = self._lost = 0
                 self._seen = None
                 self.vote.reset()
+                self.side_vote.clear()
                 if not self.fixed_goal:
                     self.sign_goal = None
         elif name != 'M2':
@@ -750,8 +824,21 @@ class Lane3SimpleSupervisor:
         height = float(best['bbox'][3]) - float(best['bbox'][1])
         # 기록용: 마지막으로 본 표지판과, 안 쓴 이유 (side = 옆 차로라서, small = 멀어서)
         if self.mode == 'on' and abs(self.core.c) > T.SIGN_CENTER_HALF:
-            self.sign_note = f"{best['label'].upper()}{height:.0f}side"
-            return                          # 옆 차로에서 비스듬히 읽은 값은 틀린다
+            # 옆 차로: 가까이서(SIDE_SIGN_MIN_H) 읽은 것만, 최근 SIDE_SIGN_WINDOW 개 중 SIDE_SIGN_NEED 개가 같을 때만.
+            # 가운데에서 이미 확정했으면 그것을 따른다 (가운데가 더 정확하다)
+            lab = best['label']
+            ok = height >= SIDE_SIGN_MIN_H[lab]
+            self.sign_note = f"{lab.upper()}{height:.0f}side" + ('' if ok else 'small')
+            if not ok:
+                return
+            self.side_vote.append(lab)
+            if self.vote.goal is None:
+                for name, lane in (('a', 0), ('b', 2)):
+                    if self.side_vote.count(name) >= SIDE_SIGN_NEED and self.sign_goal != lane:
+                        self.sign_goal = lane
+                        self.message = (f"[3차선S] 표지판 {'A(왼쪽)' if lane == 0 else 'B(오른쪽)'} 확정 - 옆 차로에서 읽음 "
+                                        f"(상자 높이 {height:.0f} px)")
+            return
         self.sign_note = f"{best['label'].upper()}{height:.0f}" + ('small' if height < T.SIGN_MIN_H else '')
         decided = self.vote.add(best['label'], height)
         if decided is not None:

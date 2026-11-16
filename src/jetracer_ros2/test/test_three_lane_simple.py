@@ -127,7 +127,7 @@ def test_lines_correct_position_only_when_close():
     assert k.c == 0.0
 
 
-def test_supervisor_only_in_m7_and_ignores_side_lane_signs():
+def test_supervisor_only_in_m7_and_side_lane_signs_need_more():
     sup = S.Lane3SimpleSupervisor()
     sup.set_mission('M3')
     assert sup.mode == 'off'
@@ -135,14 +135,62 @@ def test_supervisor_only_in_m7_and_ignores_side_lane_signs():
     assert sup.mode == 'armed'
     sup.mode = 'on'
     sup.core.start(-0.535, 0.0, (0.0, 0.0, 0.0))
-    det = [{'label': 'a', 'confidence': 0.9, 'bbox': [0, 0, 40, 50]}]
-    for _ in range(5):
-        sup.see_signs(det)
+    small_a = [{'label': 'a', 'confidence': 0.9, 'bbox': [0, 0, 40, 34]}]     # 가운데라면 쓰는 크기지만 옆 차로 A 는 36 px 부터
+    for _ in range(6):
+        sup.see_signs(small_a)
     assert sup.sign_goal is None
-    sup.core.c = 0.0
+    big_a = [{'label': 'a', 'confidence': 0.9, 'bbox': [0, 0, 40, 40]}]
+    for _ in range(4):
+        sup.see_signs(big_a)
+    assert sup.sign_goal is None              # 옆 차로는 6 개 중 5 개
+    sup.see_signs(big_a)
+    assert sup.sign_goal == 0
+    sup.core.c = 0.0                          # 가운데에서 읽은 값이 이긴다
+    b = [{'label': 'b', 'confidence': 0.9, 'bbox': [0, 0, 40, 40]}]
+    for _ in range(4):
+        sup.see_signs(b)
+    assert sup.sign_goal == 2
+
+
+def test_side_lane_b_sign_is_trusted_a_little_farther():
+    sup = S.Lane3SimpleSupervisor()
+    sup.set_mission('M7')
+    sup.mode = 'on'
+    sup.core.start(0.535, 0.0, (0.0, 0.0, 0.0))
+    det = [{'label': 'b', 'confidence': 0.9, 'bbox': [0, 0, 40, 31]}]
     for _ in range(5):
         sup.see_signs(det)
-    assert sup.sign_goal == 0
+    assert sup.sign_goal == 2
+
+
+def test_crosses_two_lanes_to_sign_side_when_room():
+    """왼쪽(A) 차로, 표지판 B, 섬 2.6 m 앞, 앞이 다 빔: 가운데가 비어 있으면 B 까지 두 칸을 건넌다."""
+    k = core_at(0.535)
+    k.lane = 0
+    k.s = S.START_TO_ISLAND - 2.6
+    for i in range(S.PREF_FRAMES + 1):
+        k.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), 2, now=0.1 * i)
+    assert k.changing and k.lane in (1, 2)    # 두 칸 한 번에, 또는 가운데를 거쳐
+
+
+def test_backs_up_to_cross_when_sign_read_late_on_wrong_side():
+    """왼쪽(A) 차로에서 섬 1.4 m 앞에 B 를 읽음: 그대로는 못 건너지만 물러나면 건널 수 있다 -> 서서 후진."""
+    k = core_at(0.535)
+    k.lane = 0
+    k.s = S.START_TO_ISLAND - 1.4
+    k.lane_run = 0.2                          # 막 옮겨 왔어도
+    outs = [k.step_obs(None, (0.0, 0.0, 0.0), scan_with([]), 2, now=0.1 * i) for i in range(25)]
+    assert outs[0]['v'] == 0.0
+    assert any(o['v'] < 0.0 for o in outs)
+
+
+def test_center_waits_for_sign_side_beside_obstacle_to_pass():
+    """가운데, 섬 1.3 m 앞, 표지판 A, A 차로 옆에 장애물(곧 지나감), B 는 빔: B 로 가지 않고 가운데에서 기다렸다 A 로."""
+    k = core_at(0.0)
+    k.s = S.START_TO_ISLAND - 1.3
+    pts = box(0.25, 0.535)                    # A 차로 장애물 뒷면이 라이다 앞 0.25 m (차 옆)
+    out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), 0, now=0.0)
+    assert not (k.changing and k.lane == 2)
 
 
 def test_closed_loop_simulation_passes_without_contact():
