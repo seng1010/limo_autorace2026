@@ -53,6 +53,9 @@ class Owner:
     def _advance(self,*a):
         self._active='M8' if self._active=='M2' else 'M1'
         self.m8.enter(self._active)
+    def _transition_to(self, target, reason):
+        self._active = target
+        self.m8.enter(target)
 
 
 @pytest.fixture

@@ -14,6 +14,7 @@ M1 (신호등) 판단은 ``m1_traffic_light.TrafficLightMission`` 이 하고, �
 """
 
 import math
+import json
 import os
 import signal
 import subprocess
@@ -33,6 +34,7 @@ from jetracer_ros2.stop_approach import (
     FullStopDetector, StopApproachConfig, StopApproachController)
 from jetracer_ros2.stop_line_detector import OdomPathIntegrator
 from jetracer_ros2.section_logic import LinePassDetector
+from jetracer_ros2.mission_handoffs import LANE3_PROGRESS_TOPIC
 
 
 MISSION_ORDER = ('M5', 'M6', 'M3', 'M7', 'M2', 'M8', 'M1', 'M4')
@@ -195,6 +197,7 @@ class MissionManagerNode(Node):
                                  lambda msg: self._store_cmd('parking', msg), 10)
         self.create_subscription(String, self.get_parameter('mission_event_topic').value,
                                  self._mission_event_callback, 10)
+        self.create_subscription(String, LANE3_PROGRESS_TOPIC, self._lane3_progress_callback, 10)
         self.create_subscription(String, 'mission/yolo_event', self._yolo_callback, 10)
         self.create_subscription(Float32, 'mission/stop_line_distance', self._stop_line_callback, 10)
         self.create_subscription(String, 'mission/traffic_light_state', self._traffic_callback, 10)
@@ -209,6 +212,37 @@ class MissionManagerNode(Node):
     def _store_cmd(self, source, msg):
         setattr(self, f'_{source}_cmd', msg)
         self._last_cmd_ns[source] = self.get_clock().now().nanoseconds
+
+    def _lane3_progress_callback(self, msg):
+        if self._active != 'M7' or self._operator_stop or self._blocked:
+            return
+        now = self.get_clock().now().nanoseconds
+        try:
+            progress = json.loads(msg.data)
+            stamp = progress['stamp_ns']
+            side = progress['fork_side']
+            if (type(stamp) is not int or stamp < self._mission_enter_ns
+                    or not 0 <= now-stamp <= 500_000_000):
+                return
+        except (ValueError, TypeError, KeyError):
+            return
+        if not self._odom_fresh(now):
+            return
+        if side is None and progress.get('route_complete') is True:
+            # A stopped vehicle can prepare observation; this does not move it.
+            self.m8.allow_m7_entry_watch()
+            return
+        if self._odom_speed <= 0.02:
+            return
+        lane_age = now-self._last_cmd_ns['lane']
+        if not 0 <= lane_age <= 500_000_000 or self._lane_cmd.linear.x <= 0:
+            return
+        if type(side) is int and side in (0, 2):
+            label = 'A(left)' if side == 0 else 'B(right)'
+            sign = progress.get('sign_side')
+            if type(sign) is not int or sign not in (0, 2):
+                return
+            self._transition_to('M2', f'M7 fork motion started: chosen={label} sign={sign} match={sign == side}')
 
     def _mission_event_callback(self, msg):
         event = msg.data.strip().upper()
@@ -317,14 +351,24 @@ class MissionManagerNode(Node):
         if self._index >= len(MISSION_ORDER) - 1:
             self.get_logger().info(f'final mission retained ({reason})')
             return
+        self._transition_to(MISSION_ORDER[self._index + 1], reason)
+
+    def _transition_to(self, target, reason):
+        """One authority handoff, including M7 -> M8 without an M2 reset."""
+        if self._operator_stop or target == self._active:
+            return
+        target_index = MISSION_ORDER.index(target)
+        if target_index <= self._index:
+            return
         previous = self._active
         self._leave_mission(previous)
-        self._index += 1
-        self._active = MISSION_ORDER[self._index]
+        self._index = target_index
+        self._active = target
         self.get_logger().info(f'{previous} -> {self._active}: {reason}')
         self._enter_mission(self._active)
 
     def _enter_mission(self, mission, initial=False):
+        self._mission_enter_ns = self.get_clock().now().nanoseconds
         self._slow = False
         self._blocked = False
         self._traffic = 'unknown'

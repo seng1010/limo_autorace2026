@@ -712,12 +712,14 @@ class Lane3SimpleSupervisor:
         self._armed_t = None
         self.last = None                    # see_signs 가 쓰는 .ok / .c
         self.message = ''
+        self.route_complete = False  # 정상 합류만 기록; 유실/거리 제한 종료와 구분
 
     def set_mission(self, name):
         if self.forced:
             return
         if name == 'M7':
             if self.mode == 'off':
+                self.route_complete = False
                 self.mode, self.arm_travel = 'armed', 0.0
                 self._armed_t = None
                 self.core = SimpleThreeLane()
@@ -841,6 +843,7 @@ class Lane3SimpleSupervisor:
                   and abs(core.c) < 0.12 and abs(core.th) < math.radians(15.0))
         self._both = self._both + 1 if merged else 0
         if self._both >= EXIT_FRAMES:
+            self.route_complete = True
             self.mode = 'done'
             side = {0: 'A(왼쪽)', 2: 'B(오른쪽)'}.get(self.side_taken, '?')
             self.message = f"[3차선S] 끝: 갈림길 {side} 지나 합류 완료 -> 기본 주행"
