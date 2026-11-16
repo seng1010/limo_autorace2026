@@ -8,7 +8,7 @@ import pytest
 
 from jetracer_ros2 import three_lane as T
 from jetracer_ros2 import three_lane_simple as S
-from jetracer_ros2.m7_navigation import MappedSupervisor, MappedThreeLane, VisibilityMap, central_white_pair
+from jetracer_ros2.m7_navigation import MappedSupervisor, MappedThreeLane, VisibilityMap, NavigationConfig, central_white_pair
 
 sys.path.insert(0, str(Path(__file__).parent))
 from sim_three_lane_simple import raycast, rect
@@ -188,14 +188,15 @@ def test_obstacle_diagnostics_are_sorted_and_allow_multiple_lanes():
 def test_sign_aliases_are_voted_only_from_central_lane():
     sup = MappedSupervisor(forced=True)
     sup.mode = 'on'
-    sup.core.c = .535
+    sup.core.start(.535,0.,(0.,0.,0.),1.)
     det = [dict(label='sign_a',confidence=.9,bbox=[0,0,40,45])]
-    for _ in range(8):
-        sup.see_signs(det)
+    for i in range(8):
+        sup.see_signs(det,stamp=i*.1,capture_pose=(0.,0.,0.),now=i*.1)
     assert sup.sign_goal is None
-    sup.core.c = 0.
-    for _ in range(T.SIGN_NEED):
-        sup.see_signs(det)
+    sup.core.start(0.,0.,(0.,0.,0.),1.)
+    sup.core.road_filter.update(white_observation(),0.,0.,1.)
+    for i in range(T.SIGN_NEED):
+        sup.see_signs(det,stamp=1.+i*.1,capture_pose=(0.,0.,0.),now=1.+i*.1)
     assert sup.sign_goal==0
 
 
@@ -213,7 +214,9 @@ def test_range_max_limits_free_evidence_and_invalid_scan_id_is_not_cached():
         assert not m.observe(scan+((0,0,0),2,0.),(0,0,0),0.)
     invalid = (np.full(250,9.),scan[1],scan[2],scan[3],(0,0,0),3,8.)
     assert not m.observe(invalid,(0,0,0),0.)
-    blind = VisibilityMap()
+    # Physical near blind range is separate from the driver's hit validity
+    # filter. Explicitly model a sensor that cannot raytrace nearer than .5m.
+    blind = VisibilityMap(NavigationConfig(raytrace_min_range=.5))
     assert blind.observe((scan[0],scan[1],scan[2],.5),(0,0,0),0.)
     assert not blind.known(np.array([[.4,0]]),0.)[0]
 
@@ -249,7 +252,7 @@ def test_unread_sign_gets_time_for_multiple_central_lane_votes():
 
 def test_island_post_does_not_falsely_occupy_the_whole_exit_lane():
     k = core()
-    k.c,k.s = -.535,S.START_TO_ISLAND-.6
+    k.start(-.535,0.,(0.,0.,0.),S.START_TO_ISLAND-.6)
     scan = raycast(.184,0,0,[rect(.784,.235,0,.06,.06)])
     out = k.step_obs(None,k.pose,scan,goal=2,now=0.)
     assert out['v']>0 and k.lane==2
@@ -411,7 +414,7 @@ def test_reverse_completion_requires_rest_and_replanning_before_forward():
 def test_old_free_cells_cannot_certify_reverse_space():
     m = VisibilityMap()
     m.free[(10,0)] = 0.
-    point = np.array([[.525,.025]])
+    point = (np.array([[10,0]])+.5)*m.cfg.resolution
     assert m.known(point,1.)[0]
     assert not m.known(point,1.,m.cfg.reverse_free_age)[0]
 
@@ -449,28 +452,16 @@ def test_new_detection_with_braking_inertia_waits_until_vehicle_has_stopped():
     assert resumed and 0 < x < .06
 
 
-def test_blocked_front_can_reverse_only_after_rest_with_fresh_rear_observation():
+def test_fully_blocked_road_does_not_reverse_without_a_useful_escape():
     k = core()
     objects = [rect(.65,y,0.,.32,.55) for y in T.LANE_CENTER]
-    x = 0.
-    reversed_at = None
-    stopped_after_reverse = False
-    for i in range(70):
-        pose = (x,0.,0.)
-        scan = raycast(x+S.CAM_FROM_ODOM+S.LIDAR_AHEAD,0.,0.,objects,
+    for i in range(25):
+        pose = (0.,0.,0.)
+        scan = raycast(S.CAM_FROM_ODOM,0.,0.,objects,
                        n=720,a0=-math.pi,inc=2*math.pi/720)+(pose,i)
         out = k.step_obs(white_observation(),pose,scan,now=i*.1)
-        if out['v']<0:
-            if reversed_at is None:
-                reversed_at = i*.1
-                assert reversed_at>=k.config.wait_before_reverse
-            x += out['v']*.1
-        elif reversed_at is not None:
-            assert out['v']==0 and out['state']=='OBSERVE_STOP'
-            stopped_after_reverse = True
-            break
-    assert reversed_at is not None and stopped_after_reverse
-    assert -.27 < x < 0 and k.reverse_count==1
+        assert out['v']==0.
+    assert k.reverse_count==0
 
 
 def test_supervisor_odom_loss_interrupts_reverse_and_requires_rest_again():

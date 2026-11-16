@@ -92,7 +92,10 @@ class YoloDetectionNode(Node):
                     annotated = result.plot()
             except Exception as error:  # backend errors differ between ONNX/TRT/PyTorch
                 self.get_logger().error(f'YOLO inference failed: {error}')
-        payload = {'stamp_ns': self.get_clock().now().nanoseconds, 'detections': detections}
+        payload = {'stamp_ns': self.get_clock().now().nanoseconds,
+                   'image_stamp_ns': msg.header.stamp.sec*1000000000+msg.header.stamp.nanosec,
+                   'image_width': int(image.shape[1]), 'image_height': int(image.shape[0]),
+                   'detections': detections}
         self.detections_pub.publish(String(data=json.dumps(payload, separators=(',', ':'))))
         self._publish_stable_event(detections)
         if self.get_parameter('publish_debug').value:

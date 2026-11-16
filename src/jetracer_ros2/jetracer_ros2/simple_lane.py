@@ -1669,6 +1669,16 @@ def run_turncal(topic='/cmd_vel', speed=0.20, gains=(1.0, 1.4, 1.8, 2.2, 2.6), s
 
 
 def run_ros(mode, topic, record=False):
+    if LANE3_MAPPED:
+        from jetracer_ros2.m7_runtime import run_ros as run_m7_ros
+        args = sys.argv[1:]
+        config = None
+        if '--m7-config' in args:
+            index = args.index('--m7-config')
+            if index+1>=len(args):
+                raise ValueError('--m7-config requires a JSON file')
+            config = args[index+1]
+        return run_m7_ros(mode,topic,record,sys.modules[__name__],config,'--headless' in args)
     import rclpy
     from geometry_msgs.msg import Twist
     from rclpy.node import Node

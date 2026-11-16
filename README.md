@@ -127,8 +127,12 @@ YOLO 학습 클래스 이름은 위 값 그대로 쓰는 것을 권장합니다.
 `perception/detections` 형식:
 
 ```json
-{"stamp_ns": 1730000000000000000, "detections": [{"label": "sign_a", "confidence": 0.91, "bbox": [300, 160, 340, 200]}]}
+{"stamp_ns": 1730000000000000000, "image_stamp_ns": 1729999999900000000, "image_width": 640, "image_height": 480, "detections": [{"label": "sign_a", "confidence": 0.91, "bbox": [300, 160, 340, 200]}]}
 ```
+
+`stamp_ns`는 발행 시각, 추가된 `image_stamp_ns`는 카메라 header의 촬영 시각입니다.
+M7 `l3mapped`는 촬영 시점의 차로 위치·방향으로 A/B 표지판을 검증하므로 갱신된 YOLO 노드를 함께 실행합니다.
+기존 `detections`와 이벤트 출력 형식은 유지합니다.
 
 ### 주행 명령 (→ `mission_manager_node`가 하나 선택)
 
@@ -149,6 +153,18 @@ YOLO 학습 클래스 이름은 위 값 그대로 쓰는 것을 권장합니다.
 | `mission/cone/state` | `std_msgs/String` | `mission_cone_avoid_node` | manager | `tracking` / `lost` / `emergency_stop` |
 | `mission/parking/start` | `std_msgs/Bool` | manager | `mission_parking_node` | `true`면 주차 시작 |
 | `mission/parking/state` | `std_msgs/String` | `mission_parking_node` | manager | `waiting` / `searching` / `advance` / `reverse_turn` / `reverse_straight` / `complete` |
+
+### M7 융합 주행의 진단·복구
+
+| 토픽 | 타입 | 발행 | 구독 | 값 |
+|---|---|---|---|---|
+| `/simple_lane/debug/m7` | `std_msgs/String` (JSON) | `simple_lane ... l3mapped` | bag / debug | 차로·장애물·경로·복구 상태, 제안 명령과 실제 발행 명령, 센서/제어 지연, CPU 계측 |
+| `mission/obstacle_avoid/recovery` | `std_msgs/String` | 테스트 터미널 | `simple_lane ... l3mapped` | `hold`: 정지 유지. `resume`: 정지·새 관측·경로 확인 후 재개. 지도 삭제나 강제 전진 기능은 없음. |
+
+실행·설정·검증 방법은 [M7 융합 주행 문서](docs/M7_FUSED.md)를 참고합니다.
+현재 측정 버전은 `m7-measurement-20261117`: 고정 도로 맵, 아커만 곡선 계획,
+짧은 조향 후진, 조향 여유에 따른 최대 0.4m/s 제어를 포함합니다.
+기존 `lane_following_node`, `l3simple`, 기본 `simple_lane` 주행은 기존 구현을 사용합니다.
 
 ### 수동 명령 (테스트용)
 

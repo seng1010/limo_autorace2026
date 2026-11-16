@@ -1,0 +1,21 @@
+{
+  "scope": "One retained-map blocked scene; desktop CPython, serial 30 planner builds and 200 footprint writes per snapshot. Before/after snapshots are from this work, not m7-simple. Not LIMO CPU or general speedup.",
+  "before": {
+    "planning_median_ms": 61.60868681035936,
+    "planning_p95_ms": 120.79357700422405,
+    "footprint_median_ms": 3.872958477586508,
+    "route_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "route_source": "blocked",
+    "planning_samples": 30,
+    "footprint_samples": 200
+  },
+  "after": {
+    "planning_median_ms": 37.523187696933746,
+    "planning_p95_ms": 51.41224819235502,
+    "footprint_median_ms": 0.4166041035205126,
+    "route_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "route_source": "blocked",
+    "planning_samples": 30,
+    "footprint_samples": 200
+  }
+}

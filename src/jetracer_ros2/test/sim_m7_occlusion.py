@@ -11,12 +11,13 @@ import math
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from dataclasses import replace
 
 import numpy as np
 
 from jetracer_ros2 import three_lane as T
 from jetracer_ros2 import three_lane_simple as S
-from jetracer_ros2.m7_navigation import MappedSupervisor
+from jetracer_ros2.m7_navigation import MappedSupervisor, NavigationConfig
 from sim_three_lane_simple import rect, overlap, raycast
 
 
@@ -74,33 +75,59 @@ def observation(c, psi, rng, yellow=True, s=0.):
                 short=set(), ystart={}, yellow_xy=None)
 
 
-def run_case(kind='corridor', mirror=False, seed=0, faults=False, verbose=False, signs=False):
+def run_case(kind='corridor', mirror=False, seed=0, faults=False, verbose=False, signs=False,
+             profile='baseline', planner='hybrid', duration=120.):
     rng = np.random.default_rng(seed)
     polys, goal = layout(kind, mirror, seed)
     i = S.START_TO_ISLAND
     island = np.array([(i,0.),(i+.21,.27),(i+S.ISLAND_LEN-.21,.27),
                        (i+S.ISLAND_LEN,0.),(i+S.ISLAND_LEN-.21,-.27),(i+.21,-.27)])
     x, y, psi = .30-S.CAM_FROM_ODOM, rng.uniform(-.01,.01), 0.
-    sup = MappedSupervisor(forced=True, goal=None if signs else goal)
+    sup = MappedSupervisor(forced=True, goal=None if signs else goal,
+                           config=replace(NavigationConfig(),planner=planner))
     sup.mode = 'on'
     ox, oy, oyaw = 5., -2., 1.3
     sup.core.start(y,0.,(ox,oy,oyaw),.30)
     distance_scale = rng.uniform(.985,1.015) if faults else 1.
     yaw_scale = rng.uniform(.99,1.01) if faults else 1.
     steer = 0.
-    dt = .10
+    dt = .10 if profile=='baseline' else .05
+    velocity = 0.
+    last_scan,last_camera = -math.inf,-math.inf
+    scan_queue = []
+    latest_scan = None
+    scan_ident = 0
     touched, out_count, island_count = set(), 0, 0
     max_yaw, max_stop, stopped = 0., 0., 0.
     compute, states, reverses = [], set(), 0
     trace = []
-    for frame in range(700):
+    for frame in range(int(duration/dt)):
         t = frame*dt
         cx, cy = x+S.CAM_FROM_ODOM*math.cos(psi), y+S.CAM_FROM_ODOM*math.sin(psi)
-        scan = raycast(cx,cy,psi,polys)  # Painted island is a road constraint, not a lidar wall.
-        obs = observation(cy,psi,rng,yellow=abs(psi)<math.radians(15),s=cx)
         pose = (ox,oy,oyaw)
+        if t-last_scan>=.10-1e-8:
+            raw = list(raycast(cx,cy,psi,polys))  # Painted island is a road constraint.
+            if profile in ('partial','delayed'):
+                raw[0][rng.random(len(raw[0]))<.40] = 0.
+                valid = np.isfinite(raw[0]) & (raw[0]>0)
+                raw[0][valid] += .008+rng.uniform(-.008,.008,int(valid.sum()))
+            elif profile=='blind':
+                angles = raw[1]+np.arange(len(raw[0]))*raw[2]
+                raw[0][np.abs(angles)<math.radians(85)] = 0.
+            scan_ident += 1
+            scan_queue.append((t+(.10 if profile=='delayed' else 0.),tuple(raw)+(pose,scan_ident,8.)))
+            last_scan = t
+        while scan_queue and scan_queue[0][0]<=t+1e-8:
+            _,latest_scan = scan_queue.pop(0)
+        scan = latest_scan
+        obs = None
+        if t-last_camera>=(.10 if profile!='baseline' else dt)-1e-8:
+            obs = observation(cy,psi,rng,yellow=abs(psi)<math.radians(15),s=cx)
+            obs['_observed_at'] = t
+            last_camera = t
         if signs and abs(cy)<.3 and 1.4<S.START_TO_ISLAND-cx<1.75:
-            sup.see_signs([dict(label='sign_a' if goal==0 else 'sign_b',confidence=.9,bbox=[100,100,140,145])])
+            sup.see_signs([dict(label='sign_a' if goal==0 else 'sign_b',confidence=.9,bbox=[100,100,140,145])],
+                          stamp=t,capture_pose=pose,now=t,monotonic_now=t)
         if faults:
             if 2.0 <= t < 2.5:
                 pose = None
@@ -118,7 +145,14 @@ def run_case(kind='corridor', mirror=False, seed=0, faults=False, verbose=False,
         stopped = stopped+dt if abs(v)<1e-5 else 0.
         max_stop = max(max_stop,stopped)
         steer += (cmd-steer)*min(1.,dt/.15)
-        ds = v*dt
+        if profile=='baseline':
+            velocity = v
+        else:
+            # Independent plant: commands do not stop the chassis instantly.
+            limit = (.35 if abs(v)<abs(velocity) or v*velocity<0 else .25)*dt
+            next_velocity = velocity+float(np.clip(v-velocity,-limit,limit))
+            velocity = next_velocity
+        ds = velocity*dt
         curvature = (math.copysign(1/(T.WHEELBASE/math.tan(abs(steer))+T.TRACK/2),steer)
                      if abs(steer)>1e-5 else 0.)
         dpsi = ds*curvature
@@ -146,14 +180,18 @@ def run_case(kind='corridor', mirror=False, seed=0, faults=False, verbose=False,
     safe = not touched and not out_count and not island_count
     complete = (sup.mode=='done' and lane==1 and sup.side_taken==goal
                 and (not signs or sup.sign_goal==goal))
+    expected_stop = kind=='blocked' or profile=='blind'
     result = dict(kind=kind,mirror=mirror,seed=seed,faults=faults,signs=signs,sign_goal=sup.sign_goal,obstacles=len(polys),
-                  width=.55,ok=safe and (complete if kind!='blocked' else not complete and max_stop>=15),
+                  profile=profile,planner=planner,expected='stop' if expected_stop else 'complete',
+                  width=.55,ok=safe and (not complete and max_stop>=15 if expected_stop else complete),
                   complete=complete,contacts=len(touched),out_frames=out_count,island_frames=island_count,
                   t=round(t,1),s=round(x,3),c=round(y,3),max_yaw_deg=round(math.degrees(max_yaw),1),
                   max_stop_sec=round(max_stop,1),reverse_count=sup.core.reverse_count,
                   state=sup.core.state,reason=sup.core.reason,
                   median_ms=round(float(np.median(compute))*1000,1),
-                  p95_ms=round(float(np.percentile(compute,95))*1000,1))
+                  p95_ms=round(float(np.percentile(compute,95))*1000,1),
+                  p99_ms=round(float(np.percentile(compute,99))*1000,1),plan_count=sup.core.planner.plan_count,
+                  control_ticks=frame+1,scan_updates=sup.core.visibility.sequence)
     result['trace'] = trace
     return result
 
@@ -169,9 +207,13 @@ if __name__=='__main__':
     parser.add_argument('--kind',choices=['all','corridor','weave','blocked'],default='all')
     parser.add_argument('--output')
     parser.add_argument('--signs',action='store_true',help='Use synthetic detections from the centre lane (weave layout).')
+    parser.add_argument('--profile',choices=['baseline','partial','delayed','blind'],default='baseline')
+    parser.add_argument('--planner',choices=['hybrid','lattice'],default='hybrid')
+    parser.add_argument('--duration',type=float,default=120.)
     args = parser.parse_args()
     kinds = ['corridor','weave','blocked'] if args.kind=='all' else [args.kind]
-    cases = [(k,m,s,f,False,args.signs) for k in kinds for m in (False,True) for s in range(args.seeds) for f in (False,True)]
+    cases = [(k,m,s,f,False,args.signs,args.profile,args.planner,args.duration)
+             for k in kinds for m in (False,True) for s in range(args.seeds) for f in (False,True)]
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         results = list(pool.map(worker,cases))
     report = dict(cases=len(results),passed=sum(r['ok'] for r in results),results=results)
@@ -180,7 +222,7 @@ if __name__=='__main__':
         with trace_path.open('w') as stream:
             for result in results:
                 trace = result.pop('trace')
-                case = {k:result[k] for k in ('kind','mirror','seed','faults','signs')}
+                case = {k:result[k] for k in ('kind','mirror','seed','faults','signs','profile','planner')}
                 stream.write(json.dumps(dict(case,trace=trace))+'\n')
         report['trace_file'] = trace_path.name
         with open(args.output,'w') as stream:

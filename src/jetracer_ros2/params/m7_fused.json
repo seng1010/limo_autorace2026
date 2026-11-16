@@ -1,0 +1,42 @@
+{
+  "entry_s": 0.3,
+  "camera_hz": 12.0,
+  "control_hz": 20.0,
+  "deskew": false,
+  "scan_timing_verified": false,
+  "navigation": {
+    "planner": "hybrid",
+    "resolution": 0.02,
+    "margin": 0.035,
+    "speed": 0.4,
+    "reverse_speed": 0.08,
+    "reverse_max_distance": 0.65,
+    "raytrace_min_range": 0.02,
+    "scan_range": 3.3,
+    "lidar_x": 0.184,
+    "lidar_y": 0.0,
+    "lidar_yaw": 0.0,
+    "search_budget": 0.08,
+    "search_nodes": 650,
+    "replan_interval": 0.35,
+    "acceleration": 0.25,
+    "lateral_acceleration": 0.3,
+    "obstacle_group_distance": 0.5,
+    "sign_stop_before": 0.95,
+    "sign_center_half": 0.25,
+    "sign_heading_max": 0.20943951023931956,
+    "sign_min_confidence": 0.65,
+    "sign_min_height": 33.0
+  },
+  "depth": {
+    "enabled": false,
+    "calibration_verified": false,
+    "topic": "/camera/depth/image_raw",
+    "camera_info_topic": "/camera/depth/camera_info",
+    "frame_id": "",
+    "T_base_optical": null,
+    "stride": 4,
+    "scale_16u": 0.001,
+    "scale_32f": 1.0
+  }
+}
