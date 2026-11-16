@@ -78,7 +78,9 @@ TURN_CYCLES = 4          # 한 번 막혔을 때 후진+전진을 최대 몇 번
 TURN_TRIES = 3           # 방향 틀기를 몇 번까지 시도 (그 뒤는 예전 곧은 후진)
 TURN_MARGIN = 0.05       # 방향 틀며 움직일 때 차체와 장애물(지도) 사이 최소 여유 [m]
 TURN_GO_MARGIN = 0.05    # 빈 차로까지 가는 경로의 여유가 이만큼 나오면 방향 틀기를 끝내고 간다
-TURN_MAX_HEADING = math.radians(55.0)   # 도로 방향에서 이보다 더 돌리지 않는다
+TURN_MAX_HEADING = math.radians(40.0)   # 도로 방향에서 이보다 더 돌리지 않는다 (45도 넘으면 흰 점선·노란 선으로 위치를 못 고친다)
+TURN_LINE_MARGIN = 0.03  # 차체 모서리와 카메라로 본 노란 선 사이 최소 여유 [m] (노란 선 = 벽, 흰 점선만 넘어도 된다)
+TURN_FROM_S = 0.80       # 시작선에서 이 위치(카메라) 전에는 방향 틀기 안 함: 뒤쪽이 1차선(노란 선 +-0.26) 구간이라 후진하면 밟는다
 V_TURN = 0.10            # 방향 틀 때 전진 속도 (후진은 V_REVERSE)
 
 # ---------------------------------------------------------------------------
@@ -217,6 +219,7 @@ class SimpleThreeLane:
         self.turn = None             # 방향 틀기 중이면 dict(target, side, phase, t0, cycles, stuck)
         self.turn_tries = 0
         self._rec_steer = 0.0        # 방향 틀기 중 조향 명령
+        self._walls = []             # 카메라로 본 노란 선 [(도로 옆 위치, 쪽 +1 왼쪽/-1 오른쪽, 시작 s)]. 방향 틀기 중에는 기억
 
     # ----- 위치 -----
     def start(self, c, th, pose, s=START_TO_DASH):
@@ -597,6 +600,31 @@ class SimpleThreeLane:
         return V_KEEP
 
     # ----- 막혔을 때 방향 틀기 -----
+    def _camera_walls(self, obs):
+        """카메라로 본 노란 선(바깥 선·섬 테두리)을 벽으로 적어 둔다. 선의 옆 위치는 카메라 기준 거리(u)로 잡으므로
+        odom 옆 위치가 틀려도 차와 선 사이 거리는 맞다. 방향 틀기 중에는 차가 비스듬해져 선이 화면에서 빠져도 기억한다."""
+        if not obs:
+            if self.turn is None:
+                self._walls = []
+            return
+        short = obs.get('short', ())
+        ystart = obs.get('ystart') or {}
+        seen = []
+        for u, n, ratio in obs['lines']:
+            if ratio < 0.75 or n < 50 or u in short or abs(u) > 1.2:
+                continue
+            start = ystart.get(u, 0.0)
+            seen.append((self.c + T._shrink(u), 1.0 if u > 0 else -1.0, self.s + start if start > 0.60 else -1e9))
+        if self.turn is None:
+            self._walls = seen
+            return
+        for lat, side, s_from in seen:                 # 방향 틀기 중: 같은 선이면 새로 본 값으로, 아니면 더한다
+            same = [k for k, w in enumerate(self._walls) if w[1] == side and abs(w[0] - lat) < 0.10]
+            if same:
+                self._walls[same[0]] = (lat, side, min(s_from, self._walls[same[0]][2]))
+            else:
+                self._walls.append((lat, side, s_from))
+
     def _turn_points(self):
         """방향 틀기·경로 확인에 쓰는 장애물 점 (도로 좌표 s, lat): 지도(지나친 것 포함) + 섬 테두리."""
         s, lat = self.map._s, self.map._lat
@@ -608,14 +636,18 @@ class SimpleThreeLane:
         return (np.concatenate([s, np.full(ls.size, isl), ks, ks]),
                 np.concatenate([lat, ls, np.full(ks.size, -e), np.full(ks.size, e)]))
 
-    @staticmethod
-    def _body_clear(x, y, psi, ps, pl):
-        """뒤 차축 (x=s, y=lat), 방향 psi 일 때: (차체와 점 사이 최소 거리, 차체 모서리가 바깥 노란 선을 넘은 양)."""
+    def _body_clear(self, x, y, psi, ps, pl):
+        """뒤 차축 (x=s, y=lat), 방향 psi 일 때: (차체와 점 사이 최소 거리,
+        차체 모서리가 노란 선을 넘은 양 - 카메라로 본 노란 선(여유 TURN_LINE_MARGIN)과 도면상 바깥 선 중 큰 것)."""
         cs, sn = math.cos(psi), math.sin(psi)
         excess = -1.0
         for fx in (T.CAR_BODY_CENTER - T.CAR_BODY_HALF_LEN, T.CAR_BODY_CENTER + T.CAR_BODY_HALF_LEN):
             for fy in (-T.CAR_HALF_WIDTH, T.CAR_HALF_WIDTH):
-                excess = max(excess, abs(y + fx * sn + fy * cs) - T.PATH_ROAD_HALF)
+                cx, cy = x + fx * cs - fy * sn, y + fx * sn + fy * cs
+                excess = max(excess, abs(cy) - T.PATH_ROAD_HALF)
+                for lat, side, s_from in self._walls:
+                    if cx >= s_from:
+                        excess = max(excess, side * (cy - lat) + TURN_LINE_MARGIN)
         if ps.size == 0:
             return T.LIDAR_MAX, excess
         dx, dy = ps - x, pl - y
@@ -728,7 +760,7 @@ class SimpleThreeLane:
             self.stop_since = now
         if now - self.stop_since < STUCK_SEC:
             return 0.0, False
-        if TURN_ON and self.turn_tries < TURN_TRIES:
+        if TURN_ON and self.turn_tries < TURN_TRIES and self.s >= TURN_FROM_S:
             j = self._turn_target()
             if j is not None:
                 side = 1.0 if LANE_CENTER[j] > self.c else -1.0
@@ -769,6 +801,7 @@ class SimpleThreeLane:
         self._camera_heading(obs)
         self._camera_lines(obs)
         self._camera_island(obs)
+        self._camera_walls(obs)
         front = T.LIDAR_MAX
         if scan is not None:
             self._scan_to_map(scan)

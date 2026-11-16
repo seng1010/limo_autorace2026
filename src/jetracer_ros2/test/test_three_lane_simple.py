@@ -365,3 +365,55 @@ def test_turn_rev_sign_flips_only_the_reverse_command(monkeypatch):
     out = k.step_obs(None, (x, 0.0, 0.0), SIM.raycast(1.5, 0.0, 0.0, [SIM.rect(cx, cy, 0, SIM.CAR_L, SIM.CAR_W) for cx, cy in cars]),
                      None, now=S.STUCK_SEC + 0.1)
     assert out['state'] == 'TURN' and out['v'] < 0.0 and out['steer'] < 0.0
+
+
+def _yellow_obs(u, start=0.0):
+    """카메라가 차 옆 u m(왼쪽 +)에 노란 실선을 본 것처럼 만든 선 검출 결과."""
+    return dict(th=0.0, lines=[(u, 200, 1.0)], n=400, short=set(), ystart={u: start}, yellow_xy=None)
+
+
+def test_turn_reverse_keeps_off_yellow_line_seen_by_camera():
+    """오른쪽 차로에서 차 앞을 왼쪽으로 돌리며 후진하면 차 뒤가 오른쪽(바깥 노란 선)으로 휜다.
+    카메라로 본 노란 선이 가까우면 그만큼 덜 움직인다 (odom 옆 위치가 틀려도 카메라 기준 거리로 막는다)."""
+    k = core_at(c=-0.535)
+    k.map.refresh()
+    ps, pl = k._turn_points()
+    free_run = k._sweep(-S.TURN_STEER, -S.TURN_BACK_M, ps, pl)
+    k._camera_walls(_yellow_obs(-0.15))            # 노란 선이 카메라 오른쪽 15 cm (차 옆면에서 4 cm)
+    near_run = k._sweep(-S.TURN_STEER, -S.TURN_BACK_M, ps, pl)
+    assert free_run >= S.TURN_BACK_M - 0.03 and near_run < free_run
+    # 멈춘 자리에서 차체 모서리는 선 안쪽 (여유 TURN_LINE_MARGIN)
+    psi, x, y = 0.0, k.s - S.CAM_FROM_ODOM, k.c
+    r = SIM.T.WHEELBASE / math.tan(S.TURN_STEER) + SIM.T.TRACK / 2.0
+    d = 0.0
+    while d + 0.02 <= near_run + 1e-9:
+        dpsi = 0.02 / r                                # 오른쪽 조향 후진 -> 차 앞이 왼쪽으로
+        x -= 0.02 * math.cos(psi + dpsi / 2)
+        y -= 0.02 * math.sin(psi + dpsi / 2)
+        psi += dpsi
+        d += 0.02
+    line = k.c - 0.15
+    for fx in (SIM.T.CAR_BODY_CENTER - SIM.T.CAR_BODY_HALF_LEN, SIM.T.CAR_BODY_CENTER + SIM.T.CAR_BODY_HALF_LEN):
+        for fy in (-SIM.T.CAR_HALF_WIDTH, SIM.T.CAR_HALF_WIDTH):
+            assert y + fx * math.sin(psi) + fy * math.cos(psi) >= line + S.TURN_LINE_MARGIN - 1e-6
+
+
+def test_turn_walls_remembered_while_turning_and_reset_after():
+    k = core_at()
+    k._camera_walls(_yellow_obs(-0.80))
+    k.turn = dict(target=0, side=1.0, phase='back', t0=0.0, cycles=0, idle=0)
+    k._camera_walls(None)                          # 차가 비스듬해서 선이 안 보여도 기억
+    assert len(k._walls) == 1
+    k.turn = None
+    k._camera_walls(None)
+    assert k._walls == []
+
+
+def test_no_turn_near_start_line():
+    """시작선 가까이(뒤가 1차선 구간)에서는 방향 틀기를 하지 않는다."""
+    k = S.SimpleThreeLane()
+    k.start(0.0, 0.0, (0.0, 0.0, 0.0), S.TURN_FROM_S - 0.2)
+    pts = box(0.30, 0.0)
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
+    out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=S.STUCK_SEC + 0.1)
+    assert out['state'] != 'TURN' and k.turn is None
