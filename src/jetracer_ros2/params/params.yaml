@@ -183,15 +183,14 @@ mission_manager_node:
                                       # 11/15 실차: M3 시작 -> 정지선 0.93 m. M5 가 일찍 끝나는 경우까지 덮게 2.2
                                       # = M3 시작 지점(M6 끝)~횡단보도 정지선 거리 + 0.5 m. 트랙에서 재서 조정
     # M1 신호등 (m1_traffic_light.py). 신호 색은 mission_traffic_light_node 가 판단
-    m1_trigger: 'light'               # 대회용: 신호등 본 뒤 정지선에서 판단
-                                      # YOLO 없이 테스트: --ros-args -p m1_trigger:=light_or_line
+    m1_trigger: 'light_or_line'       # 첫 선은 서행, 두 번째 선은 신호가 안 보여도 정지 후 판단
     m1_line_arm_distance_m: 0.80      # 정지선이 이 거리 안이면 정지/통과 판단
     m1_light_valid_distance_m: 2.0    # 신호등 본 뒤 이 거리 안의 정지선만 인정
-    m1_stop_on_green_arrival: false   # true: 녹색에 도착해도 일단 정지 후 출발
+    m1_stop_on_green_arrival: true    # 녹색이어도 odom 완전정지 확인 후 신선한 녹색으로 출발
     m1_stop_switch_min_m: 0.15        # 녹색 통과 중 적·황으로 바뀌면 이 거리 이상 남았을 때만 정지
     m1_max_wait_sec: 0.0              # 녹색 없이 시간만으로 출발하는 우회 비활성. 양수는 명시적 시험용
     m1_done_distance_m: 0.50          # 출발/통과 후 이만큼 가면 M1 완료 -> M4
-    m1_max_approach_distance_m: 2.0   # M1 시작 후 판단 못 하고 이만큼 가면 M1 건너뜀 (트랙 보고 조정)
+    m1_max_approach_distance_m: 0.0   # 호환용. 매니저는 양수를 지정해도 거리만으로 M1을 완료하지 않음
     m1_skip_lines: 1                  # M1 구간 앞쪽 정지선 무시 개수.
                                       # 경기장은 횡단보도 앞에 '천천히' 시작선이 하나 있어 1.
                                       # 천천히 선이 없는 배치면 0
@@ -209,6 +208,7 @@ mission_manager_node:
     # M4 접근은 차선 조향 유지. 정지 확인 후 parking_line_detection의 기존 시간제 시퀀스에 인계.
     m4_line_arm_distance_m: 0.80
     m4_stop_offset_m: 0.01            # 앞바퀴 축 -> 정지선, M3 공용값과 동일한 초기값. 실차 정지 위치 확인 필요
+    m4_full_stop_sec: 0.5             # odom 정지가 연속 0.5초 확인된 뒤 주차 시작 허가
     # 전체 주행에서도 M2에서 M8 단독 launch와 같은 입구 감시를 사용한다.
     # M2 진입 즉시 콘 제어로 바꾸지 않음: 55cm 사전검사, 45cm/전방 위험 시 보호접근.
     m8_entry_arm_after_m: -1.0

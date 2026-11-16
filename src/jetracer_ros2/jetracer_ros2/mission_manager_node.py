@@ -77,29 +77,35 @@ class MissionManagerNode(Node):
             'm3_sign_valid_distance_m': 1.5,
             'm3_max_approach_distance_m': 1.5,
             # M1
-            'm1_trigger': 'light',
+            'm1_trigger': 'light_or_line',          # 두 번째 선에서는 신호 미인식이어도 먼저 정지
             'm1_line_arm_distance_m': 0.80,
             'm1_light_valid_distance_m': 2.0,
-            'm1_stop_on_green_arrival': False,
+            'm1_stop_on_green_arrival': True,
             'm1_stop_switch_min_m': 0.15,
             'm1_max_wait_sec': 0.0,                 # 녹색 없이 시간만으로 출발하지 않음
             'm1_done_distance_m': 0.50,
-            'm1_max_approach_distance_m': 2.0,
-            'm1_skip_lines': 0,
+            'm1_max_approach_distance_m': 0.0,      # 호환용: 매니저에서는 거리 초과 M1 완료를 허용하지 않음
+            'm1_skip_lines': 1,
             'm1_lost_line_revert_m': 0.30,
             'm3_lost_line_revert_m': 0.30,
             'm1_stop_offset_m': -1.0,
             'm3_stop_offset_m': -1.0,
-            'm1_slow_speed': -1.0,
+            'm1_slow_speed': 0.15,
             'm1_slow_after_lines': 1,
             'm3_hold_sec': 3.5,
             'm3_done_distance_m': 0.50,
             'm4_line_arm_distance_m': 0.80,
             'm4_stop_offset_m': 0.01,               # 앞바퀴 축이 정지선 가까운 끝 부근에 오도록
+            'm4_full_stop_sec': 0.5,                # 주차 시작 허가 전 연속 실측 정지 확인
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         p = lambda name: self.get_parameter(name).value  # noqa: E731
+        if p('m1_max_approach_distance_m') != 0.0:
+            self.get_logger().warn(
+                'm1_max_approach_distance_m은 호환용으로만 유지: 거리 초과로 M1을 건너뛰지 않습니다')
+        if not math.isfinite(p('m4_full_stop_sec')) or p('m4_full_stop_sec') < 0.3:
+            raise ValueError('m4_full_stop_sec은 0.3초 이상이어야 합니다')
         start = str(p('start_mission')).strip().upper()
         if start not in MISSION_ORDER:
             raise ValueError(f'start_mission 은 {MISSION_ORDER} 중 하나')
@@ -154,7 +160,7 @@ class MissionManagerNode(Node):
                      stop_switch_min_m=p('m1_stop_switch_min_m'),
                      max_wait_sec=p('m1_max_wait_sec'),
                      done_distance_m=p('m1_done_distance_m'),
-                     max_approach_distance_m=p('m1_max_approach_distance_m'),
+                     max_approach_distance_m=0.0,
                      skip_lines=p('m1_skip_lines'),
                      lost_line_revert_m=p('m1_lost_line_revert_m'),
                      slow_speed=p('m1_slow_speed'),
@@ -163,7 +169,7 @@ class MissionManagerNode(Node):
             FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
         self._mission_last_state = ''
         self._m4_approach = make_approach('m4_stop_offset_m')
-        self._m4_full_stop = FullStopDetector(p('full_stop_speed'), p('full_stop_sec'))
+        self._m4_full_stop = FullStopDetector(p('full_stop_speed'), p('m4_full_stop_sec'))
         self._m4_state = 'approach'
         self._m4_stop_latched = False
 
@@ -331,6 +337,10 @@ class MissionManagerNode(Node):
             self._m4_full_stop.reset()
             self._stop_line_ns = 0  # M1 통과에 사용한 정지선 거리를 주차 시작에 재사용하지 않는다.
         self.m8.enter(mission)
+        if mission == 'M2' and self.get_parameter('auto_start_mission_nodes').value:
+            # 단독 M8 launch처럼 입구 관측 전에 프로세스를 준비한다. 제안만 생성하며
+            # watch_entry에서는 기존 차선 제어를 유지한다. 인계·신선도·충돌 조건은 불변.
+            self._start_process('mission_cone_avoid_node')
         self.lane_mode_pub.publish(String(data='center'))
         self.active_pub.publish(String(data=mission))
         process = DYNAMIC_NODE.get(mission)
@@ -410,6 +420,10 @@ class MissionManagerNode(Node):
         line_text = f'{stop_line:.3f}' if stop_line is not None else 'none'
         self._debug(f'{decision.state} line={line_text} v={speed:.3f}{extra}')
         if decision.done:
+            if self._active == 'M1' and decision.skipped:
+                # 과거 설정/다른 호출에서 skipped가 와도 신호등 성공으로 취급하지 않는다.
+                self.get_logger().warn('M1 skipped는 완료가 아님 — M4 인계 금지, 정지 유지')
+                return 0.0
             self._mission_last_state = ''
             if decision.skipped:
                 self.get_logger().warn(skip_text)
@@ -434,8 +448,8 @@ class MissionManagerNode(Node):
         decision = self._m1.update(now_ns / 1e9, stop_line, speed, self._odom.s,
                                    light, last_light_s=self._last_light_s)
         return self._report(decision, stop_line, speed, 'M1 신호등 통과 완료',
-                            'M1 신호등을 못 보고 구간을 지나침 — M1 건너뜀',
-                            extra=f' light={light}')
+                            'M1 미완료 — M4 인계 금지',
+                            extra=f' light={light} lines={self._m1.lines_seen}')
 
     def _m4_tick(self, now_ns):
         """M3와 같은 거리 감속·실측 정지 확인 후에만 튜닝된 주차 동작에 인계."""

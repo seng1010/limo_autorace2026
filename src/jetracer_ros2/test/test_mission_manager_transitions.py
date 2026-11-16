@@ -153,7 +153,7 @@ def test_clear_does_not_clear_a_mission_specific_stop(modules):
 
 
 def test_red_does_not_depart_after_old_thirty_second_timeout(modules):
-    n = owner(modules, 'M1', m1_trigger='light_or_line')
+    n = owner(modules, 'M1', m1_trigger='light_or_line', m1_skip_lines=0)
     for _ in range(45):
         step(n, 1., line=.005, light='red')
     assert n._m1.state == 'hold' and n._active == 'M1'
@@ -163,7 +163,7 @@ def test_red_does_not_depart_after_old_thirty_second_timeout(modules):
 
 
 def test_stale_green_cannot_authorize_arrival(modules):
-    n = owner(modules, 'M1')
+    n = owner(modules, 'M1', m1_skip_lines=0)
     n._traffic_callback(NS(data='green'))
     step(n, 1., line=.40, speed=.20)
     step(n, line=.40, speed=.20)  # existing line counter confirms on two updates
@@ -175,7 +175,7 @@ def test_stale_green_cannot_authorize_arrival(modules):
 
 @pytest.mark.parametrize('mission', ['M1', 'M3'])
 def test_missing_odom_never_confirms_stop_or_completes_wait(modules, mission):
-    n = owner(modules, mission, m3_trigger='line', m1_trigger='light_or_line')
+    n = owner(modules, mission, m3_trigger='line', m1_trigger='light_or_line', m1_skip_lines=0)
     for _ in range(10):
         step(n, .1, line=.005, light='red')
     controller = n._m1 if mission == 'M1' else n._m3
@@ -227,7 +227,7 @@ def test_parking_approach_keeps_lane_curvature_and_waits_for_measured_stop(modul
     for _ in range(10):
         step(n, line=.005, speed=.03)
     assert n._m4_state == 'stopping'
-    for _ in range(8):
+    for _ in range(12):
         step(n, line=.005, speed=0.)
     assert n._m4_state == 'parking' and n.parking_start_pub.messages[-1].data
     assert n.cmd_pub.messages[-1].linear.x == 0.  # no fresh parking command yet
@@ -479,14 +479,16 @@ def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monk
 
     # The configured first marking is skipped, then the traffic stop line holds.
     n._odom.s = 2.4
+    step(n, line=-1., speed=.20, light='green')  # begin M1 well before the first marking
+    n._odom.s = 4.5  # regression: the old 2m bypass skipped M1 here
     for _ in range(3):
         step(n, line=.20, speed=.15, light='red')
     assert n._m1.lines_seen == 1 and n._m1.state == 'approach'
-    n._odom.s = 2.8
+    n._odom.s = 5.3
     for _ in range(3):
         step(n, line=.40, speed=.15, light='red')
     assert n._m1.lines_seen == 2 and n._m1.state == 'stopping'
-    n._odom.s = 3.18
+    n._odom.s = 5.68
     for _ in range(25):
         step(n, line=.02, light='red')
     assert n._m1.state == 'hold' and n.cmd_pub.messages[-1].linear.x == 0.
@@ -520,3 +522,120 @@ def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monk
         if not transitions or transitions[-1] != msg.data:
             transitions.append(msg.data)
     assert transitions == ['M2', 'M8', 'M1', 'M4']
+
+
+@pytest.mark.parametrize('old_limit', [0., 2.])
+@pytest.mark.parametrize('arrival_light', ['red', 'green', 'unknown'])
+def test_m1_two_lines_beyond_two_metres_always_stop_before_fresh_green(
+        modules, old_limit, arrival_light):
+    n = owner(modules, 'M1', m1_max_approach_distance_m=old_limit)
+    step(n, line=-1., speed=.20, light=arrival_light)
+    n._odom.s = 2.01
+    for _ in range(3):
+        step(n, line=.12, speed=.15, light=arrival_light)
+    assert n._active == 'M1' and n._m1.lines_seen == 1
+    assert n._m1.state == 'approach'
+    assert n.cmd_pub.messages[-1].linear.x == .15
+    assert n.cmd_pub.messages[-1].angular.z == pytest.approx(.10*.15/.25)
+    assert 'parking_line_detection_managed' not in n.started
+    n._odom.s = 2.3
+    step(n, line=-1., speed=.15, light=arrival_light)
+    n._odom.s = 3.2
+    for _ in range(3):
+        step(n, line=.20, speed=.15, light=arrival_light)
+    assert n._m1.lines_seen == 2 and n._m1.state == 'stopping'
+    for _ in range(10):
+        step(n, line=.005, speed=.04, light=arrival_light)
+    assert n._active == 'M1' and n._m1.state == 'stopping'
+    assert n.cmd_pub.messages[-1].linear.x == 0.
+    # An old green must not authorize departure after the measured stop.
+    n._traffic_callback(NS(data='green'))
+    step(n, .6, line=.005, speed=0.)
+    for _ in range(10):
+        step(n, line=.005, speed=0.)
+    assert n._m1.state == 'hold' and n.cmd_pub.messages[-1].linear.x == 0.
+    step(n, line=.005, light='green')
+    assert n._m1.state == 'go' and n._active == 'M1'
+    n._odom.s += .6
+    step(n, line=-1., light='green')
+    assert n._active == 'M4'
+
+
+def test_m1_green_on_arrival_waits_for_full_measured_stop(modules):
+    n = owner(modules, 'M1', m1_skip_lines=0)
+    for _ in range(8):
+        step(n, line=.005, speed=.02, light='green')
+    assert n._m1.state == 'stopping' and n.cmd_pub.messages[-1].linear.x == 0.
+    for _ in range(5):
+        step(n, line=.005, speed=0., light='green')
+    assert n._m1.state == 'stopping'
+    for _ in range(3):
+        step(n, line=.005, speed=0., light='green')
+    assert n._m1.state == 'go' and n.cmd_pub.messages[-1].linear.x > 0.
+
+
+def test_m1_skip_result_is_never_a_parking_start(modules):
+    n = owner(modules, 'M1')
+    decision = NS(done=True, skipped=True, state='skipped', speed_limit=None)
+    limit = n._report(decision, .12, .15, 'done', 'skip')
+    assert limit == 0. and n._active == 'M1'
+    assert 'parking_line_detection_managed' not in n.started
+
+
+def test_m2_prewarms_cone_observation_without_transferring_control(modules):
+    n = owner(modules, 'M2', m8_entry_arm_near_line_m=.45, m8_entry_precheck_m=.55)
+    assert 'mission_cone_avoid_node' in n.started
+    # A warm planner may already see a gate. It must not steal an early curve.
+    for _ in range(60):
+        n.now += 50_000_000
+        n._odom_ns = n.now
+        n.m8._store_cone_cmd(proposal(n))
+        lane(n, .22, -.12)
+        n._control_tick()
+        assert n._active == 'M2' and n.m8._m8_phase_sent == 'watch_entry'
+        assert n.cmd_pub.messages[-1].linear.x == .22
+        assert n.cmd_pub.messages[-1].angular.z == -.12
+    # Fresh partial tape plus the already-running planner can hand over before
+    # the tape's 0.8s lifetime elapses. No widening of its evidence window.
+    for _ in range(3):
+        n.now += 50_000_000
+        n._odom_ns = n.now
+        cue = proposal(n)
+        cue.header.frame_id, cue.point.x = 'front_axle', .49
+        n.m8._m8_partial_callback(cue)
+        n.m8._store_cone_cmd(proposal(n))
+        n._control_tick()
+    assert n._active == 'M8' and n.cmd_pub.messages[-1].linear.x == .10
+
+
+def test_external_launch_ownership_does_not_start_duplicate_cone_node(modules):
+    n = owner(modules, 'M2', auto_start_mission_nodes=False)
+    assert not n.started
+    step(n)
+    assert n._active == 'M2' and n.cmd_pub.messages[-1].linear.x > 0.
+
+
+def test_m4_half_second_dwell_resets_on_movement_and_odom_loss(modules):
+    n = owner(modules, 'M4')
+    for _ in range(9):
+        step(n, line=.005, speed=0.)
+    assert n._m4_state == 'stopping' and not n.parking_start_pub.messages[-1].data
+    step(n, line=.005, speed=.03)
+    for _ in range(9):
+        step(n, line=.005, speed=0.)
+    assert not n.parking_start_pub.messages[-1].data
+    step(n, .6, line=.005, refresh_odom=False)
+    for _ in range(9):
+        step(n, line=.005, speed=0.)
+    assert not n.parking_start_pub.messages[-1].data
+    for _ in range(3):
+        step(n, line=.005, speed=0.)
+    assert n._m4_state == 'parking' and n.parking_start_pub.messages[-1].data
+
+
+def test_shipped_m1_two_line_stop_and_parking_dwell_profile():
+    params = (Path(__file__).parents[1] / 'params/params.yaml').read_text()
+    for setting in ("m1_trigger: 'light_or_line'", 'm1_stop_on_green_arrival: true',
+                    'm1_max_approach_distance_m: 0.0', 'm1_skip_lines: 1',
+                    'm1_slow_speed: 0.15', 'm4_full_stop_sec: 0.5'):
+        assert setting in params
