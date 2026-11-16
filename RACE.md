@@ -119,8 +119,9 @@ ros2 launch jetracer_ros2 all_in_node.launch.py
 ```bash
 # 전체 (매니저와 함께)
 ros2 launch jetracer_ros2 all_in_node.launch.py lane3:=simple
-# 단독 시험 (3차선 입구에 놓고). 갈림길 방향 지정은 뒤에 goal_a / goal_b
-ros2 run jetracer_ros2 simple_lane drive lane3 l3simple rec
+# 단독 시험 (3차선 입구에 놓고): 3차선 + YOLO(표지판) 같이. 하드웨어 launch 는 따로
+ros2 launch jetracer_ros2 lane3_test.launch.py            # goal:=a / goal:=b 로 방향 고정, yolo:=false, rec:=false
+# (예전 방식) ros2 run jetracer_ros2 simple_lane drive lane3 l3simple rec  [goal_a|goal_b]
 ```
 
 - 기존 버전과 다른 점: 카메라로 '몇 번 차로인지'를 매 프레임 맞추지 않는다 (실차 실패 대부분이 여기서 나옴).

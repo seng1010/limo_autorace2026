@@ -703,6 +703,7 @@ class Lane3SimpleSupervisor:
         self._seen = None
         self.steer = 0.0
         self.side_taken = None
+        self.sign_note = ''
         self._armed_t = None
         self.last = None                    # see_signs 가 쓰는 .ok / .c
         self.message = ''
@@ -740,10 +741,13 @@ class Lane3SimpleSupervisor:
                 signs.append(dict(d, label=lab))
         if not signs:
             return
-        if self.mode == 'on' and abs(self.core.c) > T.SIGN_CENTER_HALF:
-            return                          # 옆 차로에서 비스듬히 읽은 값은 틀린다
         best = max(signs, key=lambda d: d.get('confidence', 0.0))
         height = float(best['bbox'][3]) - float(best['bbox'][1])
+        # 기록용: 마지막으로 본 표지판과, 안 쓴 이유 (side = 옆 차로라서, small = 멀어서)
+        if self.mode == 'on' and abs(self.core.c) > T.SIGN_CENTER_HALF:
+            self.sign_note = f"{best['label'].upper()}{height:.0f}side"
+            return                          # 옆 차로에서 비스듬히 읽은 값은 틀린다
+        self.sign_note = f"{best['label'].upper()}{height:.0f}" + ('small' if height < T.SIGN_MIN_H else '')
         decided = self.vote.add(best['label'], height)
         if decided is not None:
             self.sign_goal = decided
@@ -850,5 +854,5 @@ class Lane3SimpleSupervisor:
                   + (f" | {out['reason']}" if out['reason'] else '') + (f" | {out['wall_text']}" if out['wall_text'] else ''))
         note = (f"L3S {out['state']} tgt{core.lane} c{core.c:+.2f} th{math.degrees(core.th):+.0f} s{core.s:.2f} "
                 f"free{free} goal{goal_text} isl{core.island_at:.1f}" + ('' if core.island_s is None else 'cam')
-                + (' WALL' if out['wall_text'] else ''))
+                + (' WALL' if out['wall_text'] else '') + (f' sign{self.sign_note}' if self.sign_note else ''))
         return dict(v=out['v'], steer=self.steer, state='LANE3', reason=reason, note=note)

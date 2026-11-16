@@ -2039,7 +2039,7 @@ def main():
         run_replay(args[1])
         return
     mode = args[0] if args and args[0] in ('drive', 'calib') else 'view'
-    record = 'rec' in args      # 기록은 rec 를 붙였을 때만 (예: python3 simple_lane.py drive rec)
+    record = 'rec' in args or 'rec_true' in args      # 기록은 rec 를 붙였을 때만 (예: python3 simple_lane.py drive rec). launch 에서는 rec_true
     for p in PRESETS:
         if p in args:
             PRESET = p
