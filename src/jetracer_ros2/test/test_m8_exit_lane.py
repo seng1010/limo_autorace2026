@@ -100,12 +100,41 @@ def test_blue_clipped_white_tape_and_yellow_glare_are_not_swapped():
     assert not tape_contours(image)  # Longitudinal white glare is not a transverse tape.
 
 
-def test_tape_less_tracking_expires_without_refreshing_its_own_anchor():
+def test_continuously_observed_line_retains_role_after_tape_leaves_view():
     resolver=ExitLaneResolver();image,r,g=scene();run(resolver,image,r,g)
     image[:]=0
     for stamp in np.arange(1.165,5.4,.05):
         v=resolver.update(image,r,g,(0.,0.,0.),float(stamp))
-    assert not v['valid'] and not resolver.tracks
+    assert v['valid'] and v['roles']==['right']
+    assert resolver.tracks['right']['anchor_time'] < 1.14
+    # The old tape is diagnostic history, not permission to drive unseen.
+    r['left']=None
+    assert not resolver.update(image,r,g,(0.,0.,0.),5.45)['valid']
+    assert not resolver.update(image,r,g,(0.,0.,0.),5.75)['valid']
+    assert not resolver.tracks
+    _,r,g=scene(tape=False)
+    assert not resolver.update(image,r,g,(0.,0.,0.),5.80)['valid']
+
+
+def test_role_follows_observed_boundary_beyond_first_contact_distance():
+    resolver=ExitLaneResolver();image,r,g=scene(ordinary_correct=True)
+    assert run(resolver,image,r,g)['aligned']
+    image[:]=0
+    # A straight road provides fresh overlapping observations while odom
+    # advances. More than 1 m from the original contact must not drop it.
+    for i in range(1,151):
+        v=resolver.update(image,r,g,(i*.01,0.,0.),1.132+i*.05)
+        assert v['valid'] and v['aligned']
+    assert resolver.tracks['right']['anchor_pose'][0] < 0.
+
+
+def test_fresh_but_different_line_cannot_extend_previous_role():
+    resolver=ExitLaneResolver();image,r,g=scene();run(resolver,image,r,g)
+    image[:]=0
+    r['left'].xs+=.20
+    for stamp in (1.165,1.198,1.231,1.5):
+        assert not resolver.update(image,r,g,(0.,0.,0.),stamp)['valid']
+    assert not resolver.tracks
 
 
 def test_one_direct_contact_does_not_confirm_itself_through_prediction():
@@ -114,3 +143,17 @@ def test_one_direct_contact_does_not_confirm_itself_through_prediction():
     image[:]=0
     for stamp in (1.033,1.066,1.099):
         assert not resolver.update(image,r,g,(0.,0.,0.),stamp)['valid']
+
+
+def test_conflicting_new_tape_does_not_flip_tracked_boundary():
+    resolver=ExitLaneResolver();image,r,g=scene();run(resolver,image,r,g)
+    image,r,g=scene(role='left')
+    v=resolver.update(image,r,g,(0.,0.,0.),1.165)
+    assert not v['valid'] and v['reason']=='tape_odom_role_conflict'
+
+
+def test_duplicate_detections_cannot_claim_the_same_boundary():
+    resolver=ExitLaneResolver();image,r,g=scene();run(resolver,image,r,g)
+    r['right']=r['left']
+    v=resolver.update(image,r,g,(0.,0.,0.),1.165)
+    assert not v['valid'] and v['reason']=='ambiguous_boundary_association'

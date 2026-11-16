@@ -21,7 +21,7 @@ def node_module(monkeypatch):
                          ReliabilityPolicy=NS(BEST_EFFORT=1),QoSProfile=lambda **kw:kw),
         'geometry_msgs.msg':dict(PointStamped=Stamped,PolygonStamped=Stamped,Twist=Twist,TwistStamped=Stamped),
         'nav_msgs.msg':dict(Odometry=Stamped), 'sensor_msgs.msg':dict(LaserScan=Stamped),
-        'std_msgs.msg':dict(Bool=NS,Header=NS,String=NS),
+        'std_msgs.msg':dict(Bool=NS,Float32=NS,Header=NS,String=NS),
     }.items():
         mod=types.ModuleType(name);mod.__dict__.update(attrs)
         monkeypatch.setitem(sys.modules,name,mod)
@@ -47,6 +47,7 @@ def make_node(mod):
     n.exit_evidence=Stamped()
     n.exit_evidence.header.stamp=NS(sec=10,nanosec=0)
     n.exit_evidence.point.x=1.
+    n.exit_evidence.point.y=1.
     n.lane_center=(10_000_000_000,[(.3+i*.01,.1) for i in range(20)])
     return n
 
@@ -101,3 +102,75 @@ def test_no_exit_command_or_recovery_from_unverified_geometry(node_module,monkey
     monkeypatch.setattr(node_module,'lane_forward_recovery',lambda *a,**kw: pytest.fail('unverified recovery'))
     offer=n._publish_exit(dict(points=np.ones((4,2)),scan=((),np.array([]))),NS(sec=10,nanosec=0))
     assert offer is None and n.exit_cmd_pub.messages[-1].twist.linear.x==0.
+
+
+def test_unaligned_ordinary_command_uses_corrected_connector_only(node_module,monkeypatch):
+    n=make_node(node_module);n.m8_phase='exit_prepare';n.exit_evidence.point.y=0.
+    # In normal transport the observer already zeros the wrong command;
+    # independently enforce its alignment evidence at the receiving node.
+    n.exit_lane.twist.linear.x=0.
+    n.lane_hint=Stamped();n.lane_hint.header.stamp=NS(sec=10,nanosec=0)
+    n.lane_hint.twist.linear.x=.1
+    monkeypatch.setattr(node_module,'checked_exit_lane',lambda *a,**kw:pytest.fail('unaligned lane'))
+    monkeypatch.setattr(node_module,'safe_lane_arc',lambda *a:(.1,-.03))
+    n._publish_exit(dict(points=np.ones((4,2)),scan=((),np.array([]))),NS(sec=10,nanosec=0))
+    assert n.exit_cmd_pub.messages[-1].twist.angular.z==-.03
+
+
+def test_aligned_live_command_still_uses_unchanged_margin_and_speed(node_module):
+    n=make_node(node_module);n.m8_phase='exit_lane';n.exit_lane.twist.angular.z=0.
+    assert n.config.cone_padding==.015 and n.config.clearance==.020
+    angles=np.linspace(-1.9,1.9,250)
+    scan=((-1.9,1.9,angles[1]-angles[0],0.,.1,.01,10.),np.full(250,3.))
+    # .034 m measured side clearance is < .015 padding + .020 clearance.
+    points=np.array([[.2,n.config.half_width+.034],[1.,1.],[1.,-1.],[2.,0.]])
+    n.lane_center=None
+    n._publish_exit(dict(points=points,scan=scan),NS(sec=10,nanosec=0))
+    assert n.exit_cmd_pub.messages[-1].twist.linear.x==0.
+    points[0,1]=n.config.half_width+.036
+    for _ in range(2):
+        n._publish_exit(dict(points=points,scan=scan),NS(sec=10,nanosec=0))
+    assert n.exit_cmd_pub.messages[-1].twist.linear.x==.1
+
+
+def test_observer_checker_manager_handoff_completes_only_after_odom_passage(node_module,monkeypatch):
+    from test_m8_control_adapter import Owner
+    from test_m8_exit_lane import scene
+    from jetracer_ros2.m8_control import M8Control
+    from jetracer_ros2.m8_observers import M8LaneObserver
+    class Polygon(Stamped):
+        def __init__(self):super().__init__();self.polygon=NS(points=[])
+    monkeypatch.setattr(sys.modules['geometry_msgs.msg'],'PolygonStamped',Polygon)
+    monkeypatch.setattr(sys.modules['geometry_msgs.msg'],'Point32',NS,raising=False)
+    owner=Owner();owner.m8=M8Control(owner);owner.m8.enter('M8')
+    owner._odom.s=1.;owner.m8._m8_exit.reset(0.)
+    ob=M8LaneObserver(owner,.184);n=make_node(node_module)
+    n.get_clock=lambda:NS(now=lambda:NS(nanoseconds=owner.now,to_msg=lambda:NS(
+        sec=owner.now//10**9,nanosec=owner.now%10**9)))
+    image,r,g=scene(right=.26,ordinary_correct=True);r['raw_angle']=0.
+    angles=np.linspace(-1.9,1.9,250)
+    scan=((-1.9,1.9,angles[1]-angles[0],0.,.1,.01,10.),np.full(250,3.))
+    points=np.array([[.2,.5],[.2,-.5],[1.,1.],[1.,-1.]])
+    for i in range(95):
+        owner.now=10_000_000_000+i*100_000_000;owner._odom_ns=owner.now
+        # Observe >4s while stopped, then integrate physical forward motion.
+        travelled=max(0,i-50)*.02;owner._odom.s=1.+travelled
+        stamp=NS(sec=owner.now//10**9,nanosec=owner.now%10**9)
+        if i<3:
+            line=Stamped();line.header.stamp=stamp;line.header.frame_id='front_axle';line.point.x=.3
+            owner.m8._m8_exit_line_callback(line)
+        ob._phase(NS(data=owner.m8._m8_phase_sent))
+        ob.update(stamp,r,(.2,0.,'TRACK'),image=image,pose=(travelled,0.,0.),geometry=g)
+        if i==4:image[:]=0
+        owner.m8._store_exit_evidence(ob.evidence.messages[-1])
+        n.m8_phase=owner.m8._m8_phase_sent;n.exit_lane=ob.command.messages[-1]
+        n.lane_hint=ob.hint.messages[-1];n.exit_evidence=ob.evidence.messages[-1]
+        n.lane_center=(owner.now,np.array([(p.x,p.y) for p in ob.path.messages[-1].polygon.points]))
+        n._publish_exit(dict(points=points,scan=scan),stamp)
+        owner.m8._store_exit_lane(n.exit_cmd_pub.messages[-1]);owner.m8.tick(owner.now)
+        if owner._active=='M1':
+            assert owner._odom.s>=1.60  # exit line 1.30 + unchanged .30 pass margin
+            break
+        if i>=5:assert owner.output[-1]==(.1,0.)
+        if i<=50:assert owner._active=='M8'
+    assert owner._active=='M1'

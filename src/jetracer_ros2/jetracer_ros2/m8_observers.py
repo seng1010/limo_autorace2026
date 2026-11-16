@@ -215,15 +215,20 @@ class M8LaneObserver:
                                        and abs(cmd[1]-exit_path['angle']) <= math.radians(10.))
                 # x: role-verified live path; y: ordinary race path agrees.
                 if self.phase in ('exit_prepare','exit_lane'):
-                    observed.twist.linear.x=observed.twist.angular.z=0.
+                    # A matching live race command can use the existing
+                    # LiDAR sweep directly. Forcing even an aligned lane
+                    # through a short connector rejects distant visible
+                    # points solely because its endpoint cannot reach them.
+                    if not (exit_path['valid'] and evidence.point.y):
+                        observed.twist.linear.x=observed.twist.angular.z=0.
                     path.polygon.points=[]
                     hint.twist.linear.x=hint.twist.angular.z=0.
                     if exit_path['valid']:
                         path.polygon.points=[Point32(x=float(x),y=float(y)) for x,y in exit_path['path']]
                         hint.twist.linear.x=MIN_M8_SPEED
                         hint.twist.angular.z=float(inner_angle_to_omega(exit_path['angle'],MIN_M8_SPEED))
-                        # Even when the race path agrees, let the existing
-                        # LiDAR connector check the proposed exit geometry.
+                        # Keep the role-corrected connector as fallback when
+                        # the ordinary lane is mislabelled or not yet aligned.
         elif self.phase in ('cone','exit_prepare','exit_lane'):
             self.resolver.reset()
         self.evidence.publish(evidence)

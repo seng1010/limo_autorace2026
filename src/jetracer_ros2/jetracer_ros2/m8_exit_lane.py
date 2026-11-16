@@ -116,9 +116,13 @@ class ExitLaneResolver:
             if dt > .5 or np.linalg.norm(delta) > .15 or delta[0] < -.015 or abs(turn) > .35:
                 self.reset()
         self.last = stamp, pose.copy()
+        # Tape establishes the road role; a matching CURRENT observation
+        # keeps it alive. Expiring from the first tape contact discards a
+        # continuously visible line once the tape leaves the camera view.
+        # No blind propagation: a gap breaks association, and every usable
+        # path below is rebuilt from this frame's measured yellow points.
         self.tracks = {role: t for role, t in self.tracks.items()
-                       if stamp-t['anchor_time'] <= 4. and
-                       np.linalg.norm(pose[:2]-t['anchor_pose']) <= 1.0}
+                       if 0 < stamp-t['seen'] <= .25}
         contours = tape_contours(image)
         candidates = []
         for side in ('left', 'right'):
@@ -192,7 +196,7 @@ class ExitLaneResolver:
             path = np.column_stack((x, np.mean(ys, axis=0)))
         else:
             path = paths[0]
-        # Geometry only. The existing LiDAR connector makes the final command.
+        # Geometry only. The existing LiDAR checker makes the final command.
         distance = np.linalg.norm(path, axis=1)
         arc = np.r_[0., np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
         eligible = np.flatnonzero((distance >= .7) & (arc >= .15))

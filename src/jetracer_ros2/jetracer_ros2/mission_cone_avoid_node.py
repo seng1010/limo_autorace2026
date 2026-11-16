@@ -226,7 +226,8 @@ class MissionConeAvoidNode(Node):
                 return not exit_mode or (verified_stamp > 0 and verified_stamp == t)
 
             if (lane is not None and fresh(lidar) and fresh(_stamp_ns(lane.header.stamp))
-                    and authorized(_stamp_ns(lane.header.stamp))):
+                    and authorized(_stamp_ns(lane.header.stamp))
+                    and (not exit_mode or evidence.point.y == 1.)):
                 requested = lane.twist.linear.x, lane.twist.angular.z
                 stamp = min((scan_stamp, lane.header.stamp), key=_stamp_ns)
                 command = checked_exit_lane(

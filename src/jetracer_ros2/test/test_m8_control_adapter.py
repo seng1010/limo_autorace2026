@@ -637,6 +637,41 @@ def test_observer_changes_only_m8_exit_proposals_not_race_result(owner,monkeypat
     assert observer.command.messages[-1].twist.linear.x==.2
 
 
+@pytest.mark.parametrize('phase',['exit_prepare','exit_lane'])
+def test_observer_forwards_only_current_aligned_lane_command(owner,monkeypatch,phase):
+    from test_m8_exit_lane import scene, run
+    from jetracer_ros2.m8_exit_lane import ExitLaneResolver
+    from jetracer_ros2.m8_observers import M8LaneObserver
+    from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
+    class Polygon(Stamped):
+        def __init__(self):
+            super().__init__();self.polygon=NS(points=[])
+    monkeypatch.setattr(sys.modules['geometry_msgs.msg'],'PolygonStamped',Polygon,raising=False)
+    monkeypatch.setattr(sys.modules['geometry_msgs.msg'],'Point32',NS,raising=False)
+    image,r,g=scene(ordinary_correct=True)
+    angle=run(ExitLaneResolver(),image,r,g)['angle'];r['raw_angle']=angle
+    observer=M8LaneObserver(owner,.184);observer._phase(NS(data=phase))
+    for i in range(180):  # Visible for >4 s even without another tape contact.
+        observer.update(NS(sec=10+i//20,nanosec=(i%20)*50_000_000),r,(.2,angle,'TRACK'),
+                        image=image,pose=(0.,0.,0.),geometry=g)
+        if i==4:image[:]=0
+    command=observer.command.messages[-1]
+    assert observer.evidence.messages[-1].point.y==1.
+    assert command.twist.linear.x==.2
+    assert command.twist.angular.z==pytest.approx(inner_angle_to_omega(angle,.2))
+    assert command.header.stamp==observer.evidence.messages[-1].header.stamp
+    # A stale held command is not a fresh observation, even with a fitted path.
+    observer.update(NS(sec=19,nanosec=0),r,(.2,angle,'HOLD'),image=image,pose=(0.,0.,0.),geometry=g)
+    assert observer.command.messages[-1].twist.linear.x==0.
+    # A live path with an unrelated steering command also cannot authorize it.
+    observer.update(NS(sec=19,nanosec=50_000_000),r,(.2,angle-1.,'TRACK'),
+                    image=image,pose=(0.,0.,0.),geometry=g)
+    assert observer.command.messages[-1].twist.linear.x==0.
+    observer.update(NS(sec=19,nanosec=100_000_000),None,(0.,0.,'LOST'))
+    assert observer.evidence.messages[-1].point.x==0.
+    assert observer.command.messages[-1].twist.linear.x==0.
+
+
 def test_exit_line_keeps_cone_until_a_fresh_checked_lane(owner):
     confirm_exit(owner)
     proposal(owner)
