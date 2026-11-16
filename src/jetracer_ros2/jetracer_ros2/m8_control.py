@@ -81,6 +81,7 @@ class M8Control:
         self.m8_phase_pub = self.node.create_publisher(
             String, M8_PHASE_TOPIC, QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._m8_operator_stop = False
+        self._m7_entry_allowed = False
         self.node.create_subscription(TwistStamped, 'mission/cone/safe_cmd_vel', self._store_cone_cmd, 1)
         self.node.create_subscription(TwistStamped, M8_EXIT_COMMAND_TOPIC, self._store_exit_lane, 1)
         self.node.create_subscription(TwistStamped, M8_RECOVERY_COMMAND_TOPIC, self._store_recovery, 1)
@@ -90,6 +91,19 @@ class M8Control:
         self.node.create_subscription(PointStamped, M8_EXIT_PROGRESS_TOPIC, self._store_exit_progress, 1)
         self.node.create_subscription(PointStamped, M8_PARTIAL_ENTRY_TOPIC, self._m8_partial_callback, 1)
         self.node.create_subscription(PointStamped, M8_EXIT_LANE_EVIDENCE_TOPIC, self._store_exit_evidence, 1)
+
+    def _entry_source(self):
+        return self.node._active == 'M2' or (self.node._active == 'M7' and self._m7_entry_allowed)
+
+    def allow_m7_entry_watch(self):
+        if self.node._active != 'M7' or self._m7_entry_allowed:
+            return
+        self._m7_entry_allowed = True
+        if self._m8_near_line > 0:
+            self._set_m8_phase('watch_entry')
+            if self.node.get_parameter('auto_start_mission_nodes').value:
+                self.node._start_process('mission_cone_avoid_node')
+            self.node.get_logger().info('M7 fork passage observed: M8 observation only; lane retains control')
 
     def _store_exit_evidence(self, msg):
         if msg.header.frame_id == 'rear_axle':
@@ -105,7 +119,7 @@ class M8Control:
 
     def _m8_partial_callback(self, msg):
         n = self.node
-        if (n._active != 'M2' or self._m8_phase_sent != 'watch_entry'
+        if (not self._entry_source() or self._m8_phase_sent != 'watch_entry'
                 or self._m8_near_line <= 0 or n._blocked):
             return
         now = n.get_clock().now().nanoseconds
@@ -127,7 +141,7 @@ class M8Control:
         # Odom extrapolation from stop_line_node is not an independent observation.
         now = self.node.get_clock().now().nanoseconds
         if self._odom_fresh(now):
-            if self.node._active == 'M2':
+            if self._entry_source():
                 if self.node._odom_speed < M8_REVERSE_SPEED:
                     self._m8_reversing = True
                     self._m8_entry.observations.clear()
@@ -204,7 +218,7 @@ class M8Control:
         self._cone_rx_ns = self.node.get_clock().now().nanoseconds
         self._cone_stamp_ns = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
         self._cone_cmd = msg.twist.linear.x, msg.twist.angular.z
-        if self.node._active == 'M2' and self._m8_entry.started_s is not None and self._cone_cmd[0] > 0:
+        if self._entry_source() and self._m8_entry.started_s is not None and self._cone_cmd[0] > 0:
             self.node._control_tick()
         elif self.node._active == 'M8':
             self._publish_m8_control(self._cone_rx_ns, trigger='cone_rx')
@@ -247,7 +261,7 @@ class M8Control:
             self._odom_fresh(now) and now-n._odom_ns <= 100_000_000, normal, offer)
 
     def _store_approach_risk(self, msg):
-        if self.node._active != 'M2' or self._m8_phase_sent != 'preflight':
+        if not self._entry_source() or self._m8_phase_sent != 'preflight':
             return
         if self._m8_reversing or self.node._odom_speed < M8_REVERSE_SPEED:
             return
@@ -311,7 +325,7 @@ class M8Control:
                 self._arm_m8('odom distance to entry line')
         auto_arm = (self._m8_arm_after >= 0 and self._m2_start_s is not None and
                     self.node._odom.s-self._m2_start_s >= self._m8_arm_after)
-        if odom_ok and (self._m8_arm_requested or auto_arm or self._m8_arm_after == 0):
+        if odom_ok and self.node._active == 'M2' and (self._m8_arm_requested or auto_arm or self._m8_arm_after == 0):
             self._arm_m8()
         state = self._m8_entry.decide(self.node._odom.s, odom_ok)
         if state == 'off' and (self._m8_arm_requested or self._m8_arm_after == 0):
@@ -414,7 +428,8 @@ class M8Control:
         return False
 
     def enter(self,mission):
-        if mission == 'M2':
+        if mission in ('M7', 'M2'):
+            self._m7_entry_allowed = False
             self._recovery_budget.reset()
             self._m8_entry.reset()
             self._m8_partial.reset()
@@ -447,7 +462,7 @@ class M8Control:
         if n._active=='M8':
             self._publish_m8_control(now)
             return True
-        if n._active!='M2':
+        if not self._entry_source():
             return False
         if n._blocked:
             self._recovery_command(now, False, eligible=False)
@@ -463,6 +478,8 @@ class M8Control:
             self._m8_partial.reset()
             if self._m8_phase_sent == 'preflight':
                 self._m8_risk_ns = 0
+            if n._active == 'M7':
+                return False  # observation must not override M7 lane driving
             if (self._m8_phase_sent in ('preflight', 'approach')
                     or self._m8_arm_requested or self._m8_arm_after == 0):
                 n._publish(Twist())
@@ -488,9 +505,13 @@ class M8Control:
                                self._odom_fresh(now),cone[0]>0,lane[0]>0 and limit>=MIN_M8_SPEED)
         if action=='cone':
             self._recovery_command(now, True, eligible=False)
-            n._advance('M8 local cone gate acquired')
+            n._transition_to('M8', f'{n._active} -> M8 local cone gate acquired')
             self._publish_m8_control(now,trigger='entry')
         else:
+            if n._active == 'M7':
+                # No guarded-lane/recovery/stop intervention before a checked
+                # cone command actually takes authority from M7.
+                return False
             v,w=lane if action=='guarded_lane' else (0.,0.)
             recovery = self._recovery_command(now, v > 0,
                 eligible=gate == 'approach' and limit >= MIN_M8_SPEED, after_stamp=fresh_after)

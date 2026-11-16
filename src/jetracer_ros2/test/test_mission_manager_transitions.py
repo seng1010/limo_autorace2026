@@ -574,15 +574,23 @@ def test_managed_entrypoint_is_registered_and_preserves_tuning_arguments(modules
             'jetracer_ros2.parking_line_detection:managed_main') in setup
 
 
-def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monkeypatch):
+@pytest.mark.parametrize('start', ['M2', 'M7'])
+def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monkeypatch, start):
     """Continuous callback simulation: no DONE events or forced controller states.
 
     Inputs emulate observed line distances, checked cone/lane proposals, light
     states and odom. It tests authority/lifecycle, not perception or physics.
     """
-    n = owner(modules, 'M2', normal_speed=.30, m8_entry_arm_after_m=-1.,
+    n = owner(modules, start, normal_speed=.30, m8_entry_arm_after_m=-1.,
               m8_entry_arm_near_line_m=.45, m8_entry_precheck_m=.55,
               m1_skip_lines=1, m1_stop_offset_m=.03)
+    if start == 'M7':
+        import json
+        # No M7_DONE injection: use the same fresh route-progress interface
+        # as the lane reporter; its sign/plan/movement producer is tested in
+        # test_mission_handoffs.py. Here exercise direct M7 -> M8 -> M1 -> M4.
+        n._lane3_progress_callback(NS(data=json.dumps(dict(
+            stamp_ns=n.now, fork_side=None, route_complete=True))))
     # Before the cone entrance, preserve the curved lane command.
     lane(n, .25, -.12)
     n._control_tick()
@@ -674,7 +682,7 @@ def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monk
     for msg in n.active_pub.messages:
         if not transitions or transitions[-1] != msg.data:
             transitions.append(msg.data)
-    assert transitions == ['M2', 'M8', 'M1', 'M4']
+    assert transitions == [start, 'M8', 'M1', 'M4']
 
 
 def test_crosswalk_end_seen_during_m1_is_not_recounted_as_parking_in_m4(modules):

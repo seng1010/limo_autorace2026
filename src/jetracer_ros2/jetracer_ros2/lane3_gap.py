@@ -606,8 +606,11 @@ class GapSupervisor:
         self._fork_end = 0.0
         self.message = ''
         self.side_taken = None
+        self.route_complete = False
+        self._fork_observed = False
 
     def _reset(self):
+        self.route_complete = self._fork_observed = False
         self.core = GapCore()
         self.vote.reset()
         self.arm_travel = 0.0
@@ -672,6 +675,7 @@ class GapSupervisor:
         if self.mode == 'fork':                 # 갈림길 차로 ~ 합류: 기본 주행이 몰고, latch 만 꺼 둔다
             self.core._advance(pose, now)
             if self.core.sP >= self._fork_end:
+                self.route_complete = self._fork_observed
                 self.mode, self.message = 'done', '[3차선G] 합류 끝 -> 기본 주행 (코너 조향 다시 켬)'
             return None
         if self.mode == 'armed':
@@ -714,6 +718,9 @@ class GapSupervisor:
         if core.travel >= MAX_ON_M:
             done, self._fork_end = '최대 거리', core.sP
         if done:
+            self._fork_observed = (core.isl is not None and not core.give_up
+                                   and core.sP-core.isl[0] >= HANDOVER_IN
+                                   and core.travel < MAX_ON_M)
             self.mode = 'fork'
             side = core.side_taken if core.isl is None else (0 if core.latP > core.isl[1] else 2)
             self.side_taken = side

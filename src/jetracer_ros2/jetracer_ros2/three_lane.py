@@ -1108,12 +1108,14 @@ class Lane3Supervisor:
         self.steer = 0.0
         self.last = None                  # 마지막 ThreeLaneOutput (화면·기록용)
         self.message = ''                 # 상태가 바뀔 때 한 번 찍을 글
+        self.route_complete = False
 
     def set_mission(self, name):
         if self.forced:
             return
         if name == 'M7':
             if self.mode == 'off':
+                self.route_complete = False
                 self.mode, self.arm_travel = 'armed', 0.0
                 self.tl.reset()
                 self._white = self._both = self._lost = 0
@@ -1219,6 +1221,7 @@ class Lane3Supervisor:
                 and out.island is not None and out.island > EXIT_HOLD)
         self._both = self._both + 1 if (on_side and (both_yellow or island) and not hold) else 0
         if self._both >= EXIT_FRAMES:
+            self.route_complete = True  # 관측된 갈림길 차로 진입; 유실/최대거리 제외
             self.mode = 'done'
             self.message = f"[3차선] 끝: 갈림길 {'A(왼쪽)' if out.target == 0 else 'B(오른쪽)'} 차로 진입 -> 기본 주행"
             return None

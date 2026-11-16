@@ -1687,7 +1687,11 @@ def run_ros(mode, topic, record=False):
             self.pub = self.create_publisher(Twist, topic, 10) if self.drive else None
             import importlib.util
             self.m8_observer = None
+            self.fork_reporter = self.fork_progress_pub = None
             if self.drive and importlib.util.find_spec('jetracer_ros2') is not None:
+                from jetracer_ros2.mission_handoffs import ForkProgressReporter, LANE3_PROGRESS_TOPIC
+                self.fork_reporter = ForkProgressReporter()
+                self.fork_progress_pub = self.create_publisher(String, LANE3_PROGRESS_TOPIC, 10)
                 from jetracer_ros2.m8_observers import M8LaneObserver
                 self.m8_observer = M8LaneObserver(self, CAMERA_FORWARD_OFFSET)
             self.K = self.D = None
@@ -1774,6 +1778,8 @@ def run_ros(mode, topic, record=False):
 
         def on_mission(self, msg):
             self.lane3.set_mission(msg.data.strip())
+            if self.fork_reporter is not None:
+                self.fork_reporter.set_mission(msg.data.strip())
 
         def on_detections(self, msg):
             # 갈림길 표지판은 YOLO 가 '확정'해 보낸 이벤트(mission/yolo_event)가 아니라 프레임별 결과로 직접 판정한다
@@ -1913,6 +1919,11 @@ def run_ros(mode, topic, record=False):
             if self.drive and now - self.t_start < RESET_SEC:
                 cmd = (0.0, 0.0, 'WAIT', '시작 전 조향 초기화')
             self.send(cmd[0], cmd[1])
+            if self.fork_reporter is not None:
+                stamp_ns = msg.header.stamp.sec*10**9 + msg.header.stamp.nanosec
+                progress = self.fork_reporter.update(self.lane3, pose, cmd[0], stamp_ns)
+                if progress is not None:
+                    self.fork_progress_pub.publish(String(data=json.dumps(progress)))
             if self.m8_observer is not None:
                 self.m8_observer.update(msg.header.stamp, res, cmd, now - self.t_start < RESET_SEC,
                                         image=image, pose=pose, geometry=self.engine.geo)
