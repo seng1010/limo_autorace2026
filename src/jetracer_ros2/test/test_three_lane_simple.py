@@ -242,3 +242,12 @@ def test_island_is_not_seen_near_the_start_line():
     for _ in range(5):
         k._camera_island(dict(yellow_xy=xy))
     assert k.island_s is None and abs(k.island_at - S.START_TO_ISLAND) < 1e-9
+
+
+def test_plan_avoids_lane_that_is_blocked_further_ahead():
+    """가운데 1.0 m 막힘. 오른쪽은 1.9 m 에서 막히고 왼쪽은 끝까지 빔: 표지판이 B 여도 왼쪽으로 (지금 더 빈 쪽이 아니라 더 멀리 가는 쪽)."""
+    k = core_at()
+    pts = box(1.0, 0.0) + box(1.9, -0.535)
+    for _ in range(3):
+        k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), 2, now=0.0)
+    assert k.changing and k.lane == 0

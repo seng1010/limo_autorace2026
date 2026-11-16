@@ -53,6 +53,14 @@ CHANGE_FROM_S = 0.20     # 이 위치(카메라 투영점) 전에는 차로를 �
 LEAVE_DIST = 1.45        # 가운데 차로에서 섬이 이 안으로 오면 옆 차로로 빠진다
 READ_SLOW_BELOW = 2.0    # 표지판을 아직 모르고 가운데 차로에 있으면, 섬이 이 안일 때 천천히 (표지판은 약 1.7 m 안에서만 맞게 읽힌다)
 V_READ = 0.08
+PLAN_DIST = 2.2         # 내 차로 앞 장애물이 이 안이면 차로 계획(PLAN)을 세운다
+PLAN_HORIZON = 3.0      # 계획을 보는 거리 [m]
+PLAN_STEP = 0.10
+PLAN_CHANGE_1 = 0.90    # 한 칸 옮기는 데 드는 앞 거리 [m] (실차·시뮬레이션: 40도로 꺾어 0.9~1.1 m)
+PLAN_CHANGE_2 = 1.60    # 두 칸
+PLAN_FRONT = 0.30       # 차가 그 칸에 있으려면 카메라 투영점 앞 이만큼까지 비어 있어야 한다 (앞범퍼 0.08 + 여유)
+PLAN_BACK = 0.05        # 차로에 머무를 때 뒤로 비어 있어야 하는 거리. 옮겨 가는 차로는 카메라 + SIDE_PASSED 부터만 본다
+                        # (옆에 거의 지나친 장애물은 옆 간격만 맞으면 괜찮다 - _side_clear). 지금 차로는 MIN_START 만큼 앞이 비어야 꺾는다
 TRANSIT_NEED = 1.00      # 두 칸 건너기: 가운데 차로가 이만큼 비어 있어야 한다
 CENTER_NEED = 2.00       # 바깥 차로에서 가운데로 들어가려면 가운데 차로가 이만큼 비어 있어야 한다 (섬 포함)
 DEFAULT_SIDE = 2         # 표지판을 끝까지 못 읽었을 때 갈 쪽 (2 = 오른쪽 = B)
@@ -96,7 +104,7 @@ WHITE_OFF_ISLAND = 1.70              # 섬이 이 안이면 흰 선으로 위치
 LINE_TH_MAX = math.radians(45.0)     # 도로와 이보다 크게 틀어져 있으면 선으로 고치지 않는다
 GUARD_DIST = 0.30                    # 정면 통로에 물체가 이 안이면 무조건 정지
 STUCK_SEC = 1.5                      # 이만큼 서 있으면 후진
-REVERSE_M = 0.40                     # 한 번에 후진하는 거리
+REVERSE_M = 0.60                     # 한 번에 후진하는 거리
 REVERSE_MAX_COUNT = 3
 V_REVERSE = 0.10
 ISLAND_LOOK_FROM = 2.3                # 섬 앞끝 도면 위치보다 이만큼 앞에서부터 카메라로 섬을 찾는다
@@ -169,6 +177,7 @@ class SimpleThreeLane:
         self.lane = 1                # 지금 따라가는(또는 옮겨 가는) 목표 차로
         self.changing = False
         self.tight = False
+        self.plan_text = ''
         self.change_from = 1
         self.state = 'KEEP'
         self.reason = ''
@@ -368,6 +377,90 @@ class SimpleThreeLane:
         self.lane_run = 0.0
         self.state, self.reason = 'CHANGE', why
 
+    def _plan(self, goal):
+        """지도 위에서 앞 PLAN_HORIZON 동안의 차로 순서를 고른다 (동적 계획).
+        칸마다 '이 차로에 있을 수 있나'를 보고, 차로를 옮기는 동안은(PLAN_CHANGE_1/2) 지나가는 차로가 모두 비어 있어야 한다.
+        가장 멀리 갈 수 있는 계획을 고르고, 같으면 덜 옮기는 쪽, 그다음 표지판 쪽(모르면 기본 쪽)에서 끝나는 쪽.
+        반환: (지금 옮길 차로 또는 None, 지금 차로 그대로일 때 갈 수 있는 거리, 가장 좋은 계획으로 갈 수 있는 거리).
+        탐욕적으로 '지금 더 빈 쪽'을 고르면 그 앞에서 막혀 서는 일이 되풀이됐다 (11/16 실차 run12~16)."""
+        step = PLAN_STEP
+        n = int(PLAN_HORIZON / step)
+        res = 0.05
+        lo = self.s - 0.5
+        m = int((PLAN_HORIZON + 1.0) / res)
+        occ = np.zeros((3, m), bool)
+        ss, ll = self.map._s, self.map._lat
+        for j in range(3):
+            if ss.size:
+                sel = np.abs(ll - LANE_CENTER[j]) <= LANE_BAND
+                idx = np.floor((ss[sel] - lo) / res).astype(int)
+                idx = idx[(idx >= 0) & (idx < m)]
+                occ[j, idx] = True
+            for v_from, v_end, vlo, vhi in self.map.virtual:
+                if vlo <= LANE_CENTER[j] <= vhi:
+                    a0, a1 = int(max(0, (v_from - lo) / res)), int(min(m, (v_end - lo) / res + 1))
+                    if a1 > a0:
+                        occ[j, a0:a1] = True
+        cum = np.concatenate([np.zeros((3, 1), int), np.cumsum(occ, axis=1)], axis=1)
+
+        def free(j, s_from, s_to):
+            a0 = int(np.clip(np.floor((s_from - lo) / res), 0, m))
+            a1 = int(np.clip(np.ceil((s_to - lo) / res), 0, m))
+            return a1 <= a0 or cum[j, a1] - cum[j, a0] == 0
+
+        side = goal if goal in (0, 2) else DEFAULT_SIDE
+        k1, k2 = int(round(PLAN_CHANGE_1 / step)), int(round(PLAN_CHANGE_2 / step))
+        # val[j][k] = (갈 수 있는 칸 수, -옮긴 횟수, 끝 차로 점수), act[j][k] = (다음 차로, 다음 칸)
+        val = [[None] * (n + 1) for _ in range(3)]
+        act = [[None] * (n + 1) for _ in range(3)]
+        for j in range(3):
+            val[j][n] = (n, 0, 1 if j == side else 0)
+        for k in range(n - 1, -1, -1):
+            sk = self.s + k * step
+            for j in range(3):
+                best, how = (k, 0, 0), None
+                if free(j, sk + step - PLAN_BACK, sk + step + PLAN_FRONT):
+                    best, how = val[j][k + 1], (j, k + 1)
+                for jj, kk in ((j - 1, k1), (j + 1, k1), (j - 2, k2), (j + 2, k2)):
+                    if not 0 <= jj <= 2:
+                        continue
+                    ke = min(n, k + kk)
+                    se = self.s + ke * step
+                    lanes = range(min(j, jj), max(j, jj) + 1)
+                    ok = (free(j, sk, sk + MIN_START)
+                          and all(free(x, sk + SIDE_PASSED, se + PLAN_FRONT) for x in lanes if x != j))
+                    if not ok:
+                        continue
+                    v = val[jj][ke]
+                    cand = (v[0], v[1] - abs(jj - j), v[2])     # 두 칸은 두 번 옮긴 것으로 센다
+                    if cand > best:
+                        best, how = cand, (jj, ke)
+                val[j][k], act[j][k] = best, how
+        cur = self.lane
+        stay = None
+        if free(cur, self.s + step - PLAN_BACK, self.s + step + PLAN_FRONT):
+            stay = val[cur][1]
+        # 지금 옮기는 경우들 중 가장 좋은 것
+        go, go_val = None, None
+        sk = self.s
+        for jj, kk in ((cur - 1, k1), (cur + 1, k1), (cur - 2, k2), (cur + 2, k2)):
+            if not 0 <= jj <= 2:
+                continue
+            ke = min(n, kk)
+            se = self.s + ke * step
+            lanes = range(min(cur, jj), max(cur, jj) + 1)
+            if not (free(cur, sk, sk + MIN_START)
+                    and all(free(x, sk + SIDE_PASSED, se + PLAN_FRONT) for x in lanes if x != cur)
+                    and all(self._side_clear(x, MIN_START) for x in lanes if x != cur)):
+                continue
+            v = val[jj][ke]
+            cand = (v[0], v[1] - abs(jj - cur), v[2])
+            if go_val is None or cand > go_val:
+                go, go_val = jj, cand
+        stay_reach = stay[0] * step if stay is not None else 0.0
+        go_reach = go_val[0] * step if go_val is not None else 0.0
+        return go, stay_reach, go_reach
+
     def _decide(self, goal, front):
         """반환: 속도."""
         self.ahead = [self._free(j) for j in range(3)]
@@ -416,18 +509,23 @@ class SimpleThreeLane:
             if j is not None:
                 self._begin(j, f'섬 {to_island:.1f} m -> 차로 {j}')
                 return V_CHANGE
-        # 2) 내 차로가 막힘
-        if a < BLOCK_DIST:
-            if a >= MIN_START:
-                j = self._pick(cur, a, goal)
-                if j is not None:
-                    self._begin(j, f'차로 {cur} 앞 {a:.2f} m 막힘 -> 차로 {j}')
-                    return V_CHANGE
+        # 2) 앞에 장애물: 계획을 세워 지금 옮길지 정한다 (지금 옮겨야만 더 멀리 갈 수 있을 때만 옮긴다)
+        if a < PLAN_DIST:
+            j, stay_reach, best_reach = self._plan(goal)
+            self.plan_text = f'계획 {stay_reach:.1f}/{best_reach:.1f}'
+            # 지금 옮겨야 더 멀리 가거나, 앞이 가까운데(BLOCK_DIST) 지금 옮겨도 똑같이 멀리 갈 수 있으면 지금 옮긴다
+            # (마지막 순간까지 기다리면 반응이 늦은 차에서는 못 옮긴다)
+            if j is not None and (best_reach > stay_reach + 0.05
+                                  or (a < BLOCK_DIST and a >= MIN_START and best_reach >= stay_reach - 0.05)):
+                self.tight = a < TIGHT_BELOW
+                self._begin(j, f'차로 {cur} 앞 {a:.2f} m -> 계획대로 차로 {j} ({self.plan_text})')
+                return V_CHANGE
             if a < STOP_DIST:
-                self.state, self.reason = 'STOP', f'앞 {a:.2f} m, 옮길 차로 없음'
+                self.state, self.reason = 'STOP', f'앞 {a:.2f} m, 옮길 길 없음 ({self.plan_text})'
                 return 0.0
-            self.state, self.reason = 'BLOCKED', f'앞 {a:.2f} m, 옮길 차로 없음 -> 서행'
-            return V_SLOW
+            if a < BLOCK_DIST:
+                self.state, self.reason = 'BLOCKED', f'앞 {a:.2f} m, 옮길 때를 기다림 ({self.plan_text})'
+                return V_SLOW
         # 3) 막히지 않았으면 가고 싶은 차로로 (표지판 쪽, 모르면 가운데에서 표지판 읽기)
         if goal in (0, 2):
             pref = goal
