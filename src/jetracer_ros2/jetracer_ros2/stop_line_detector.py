@@ -60,6 +60,22 @@ def color_mask(image_bgr: np.ndarray, config: StopLineConfig) -> np.ndarray:
     return mask.astype(np.uint8) * 255
 
 
+def _transverse_strip(contour, height):
+    """Measure thickness across the strip, not its tilted image bounding box.
+
+    Keep the permissive colour mask for shaded tape. Width/area alone also
+    accept a clipped diamond or a bright floor patch; these are not long,
+    thin transverse strips. Wavy/oblique tape need not be perfectly rectangular.
+    """
+    (_, _), (length, thickness), angle = cv2.minAreaRect(contour)
+    if length < thickness:
+        length, thickness, angle = thickness, length, angle + 90.
+    angle = (angle + 90.) % 180. - 90.
+    return (thickness > 0 and length >= 4.5 * thickness
+            and thickness <= .15 * height and abs(angle) <= 35.
+            and cv2.contourArea(contour) >= .35 * length * thickness)
+
+
 def detect_stop_line(image_bgr: np.ndarray,
                      config: StopLineConfig) -> Optional[StopLineDetection]:
     """카메라 하단 ROI 에서 가장 가까운(가장 아래) 넓은 가로선을 찾는다."""
@@ -80,10 +96,27 @@ def detect_stop_line(image_bgr: np.ndarray,
             continue
         if cv2.contourArea(contour) / roi_area < config.minimum_area_ratio:
             continue
+        if not _transverse_strip(contour, height):
+            continue
         if best is None or y + h > best[1] + best[3]:
             best = (x, y, w, h)
     if best is None:
-        return None
+        # The horizontal opening can erase a thin tilted or wavy real tape.
+        # Recover only a current, connected strip spanning the camera centre;
+        # do not join separated white strokes or extend a clipped side marker.
+        raw_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in raw_contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            if (w / width < config.minimum_width_ratio
+                    or cv2.contourArea(contour) / roi_area < config.minimum_area_ratio
+                    or x > .45 * width or x + w < .55 * width
+                    or y < 3 or y + h >= roi.shape[0] - 2
+                    or not _transverse_strip(contour, height)):
+                continue
+            if best is None or y + h > best[1] + best[3]:
+                best = (x, y, w, h)
+        if best is None:
+            return None
     x, y, w, h = best
     bottom = roi_y + y + h
     return StopLineDetection(row_ratio=bottom / float(height), bbox=(x, roi_y + y, w, h))

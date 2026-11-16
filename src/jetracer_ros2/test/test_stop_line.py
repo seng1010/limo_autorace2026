@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 
@@ -46,6 +47,88 @@ def test_vertical_lane_lines_are_not_stop_lines():
 
 def test_line_above_roi_is_ignored():
     assert detect_stop_line(_image_with_band(100, 120), StopLineConfig()) is None
+
+
+@pytest.mark.parametrize('brightness', [150, 160, 170])
+@pytest.mark.parametrize('angle', [-30., -20., -10., 0., 10., 20., 30.])
+def test_dark_oblique_tape_is_not_rejected_as_a_tall_image_box(brightness, angle):
+    image = np.full((480, 640, 3), 60, np.uint8)
+    points = cv2.boxPoints(((320., 375.), (340., 14.), angle)).astype(np.int32)
+    cv2.fillConvexPoly(image, points, (brightness,) * 3)
+    detected = detect_stop_line(image, StopLineConfig(white_lightness_min=145))
+    assert detected is not None
+    # Preserve the opened contour's old lower edge when it already detects
+    # the tape. Only the fallback uses the original visible strip extent.
+    mask = (image[278:, :, 0] >= 145).astype(np.uint8) * 255
+    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 76), np.uint8))
+    contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    legacy = [cv2.boundingRect(c) for c in contours
+              if cv2.boundingRect(c)[2] >= 640 * .42
+              and cv2.contourArea(c) >= mask.size * .018]
+    bottom = max(278 + y + h for x, y, w, h in legacy) if legacy else points[:, 1].max() + 1
+    assert detected.row_ratio * 480 == pytest.approx(bottom, abs=2.)
+
+
+def test_dark_wavy_tape_survives_horizontal_opening_loss():
+    image = np.full((480, 640, 3), 60, np.uint8)
+    for x in range(105, 535):
+        y = 381 + round(7 * np.sin(x / 55))
+        image[y:y + 10, x] = (167, 157, 150)
+    assert detect_stop_line(image, StopLineConfig(white_lightness_min=145)) is not None
+    # Colour threshold was not silently lowered.
+    assert detect_stop_line(image, StopLineConfig()) is None
+
+
+@pytest.mark.parametrize('filled', [False, True])
+@pytest.mark.parametrize('center', [(320, 365), (480, 440)])
+def test_diamond_and_clipped_diamond_are_not_stop_lines(filled, center):
+    image = np.full((480, 640, 3), 60, np.uint8)
+    cx, cy = center
+    polygon = np.array([(cx, cy - 90), (cx + 180, cy), (cx, cy + 90), (cx - 180, cy)], np.int32)
+    if filled:
+        cv2.fillConvexPoly(image, polygon, (160,) * 3)
+    else:
+        cv2.polylines(image, [polygon], True, (160,) * 3, 35)
+    assert detect_stop_line(image, StopLineConfig(white_lightness_min=145)) is None
+
+
+def test_real_line_is_selected_even_with_a_nearer_false_patch():
+    image = _image_with_band(310, 326, (155,) * 3)
+    image[380:480, 368:640] = (160,) * 3
+    detected = detect_stop_line(image, StopLineConfig(white_lightness_min=145))
+    assert detected is not None and detected.row_ratio == pytest.approx(326 / 480)
+
+
+@pytest.mark.parametrize('angle', [-50., 50., 90.])
+def test_slanted_side_markings_are_not_promoted_by_fallback(angle):
+    image = np.full((480, 640, 3), 60, np.uint8)
+    box = cv2.boxPoints(((320., 375.), (500., 14.), angle)).astype(np.int32)
+    cv2.fillConvexPoly(image, box, (160,) * 3)
+    assert detect_stop_line(image, StopLineConfig(white_lightness_min=145)) is None
+
+
+def test_bright_floor_patch_and_separated_short_strokes_are_rejected():
+    image = _image_with_band(300, 480, (180,) * 3, left=0, right=640)
+    assert detect_stop_line(image, StopLineConfig(white_lightness_min=145)) is None
+    image[:] = 60
+    image[380:396, 20:260] = (160,) * 3
+    image[380:396, 380:620] = (160,) * 3
+    assert detect_stop_line(image, StopLineConfig(white_lightness_min=145)) is None
+
+
+def test_clipped_horizontal_tape_retains_existing_near_edge():
+    detected = detect_stop_line(_image_with_band(465, 480), StopLineConfig())
+    assert detected is not None and detected.row_ratio == 1.
+
+
+def test_false_patch_cannot_seed_odom_tracking():
+    config = StopLineConfig(white_lightness_min=145)
+    tracker = _tracker()
+    detection = detect_stop_line(_image_with_band(380, 480, (160,) * 3, left=368, right=640), config)
+    assert detection is None
+    assert tracker.update(None) is None
+    tracker.update_odom(.1)
+    assert tracker.update(None) is None and tracker.source == 'none'
 
 
 # ---- 행 -> 거리 ------------------------------------------------------------ #
