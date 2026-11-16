@@ -103,6 +103,8 @@ ISLAND_CONFIRM = 3                   # 카메라로 섬을 이만큼 연속 비�
 ISLAND_MIN_VIEW = 0.55               # 섬 앞끝이 이보다 가까우면 카메라 값을 새로 받지 않는다 (카메라 사각)
 ARM_AFTER_M = 1.4                    # M7 시작 후 이만큼 간 뒤부터 진입을 찾는다 (그 전은 코너)
 ENTRY_FRAMES = 3
+ENTRY_WAIT_SEC = 2.0                 # 단독 시험(lane3): 켜고 이 시간 안에 못 들어가면 가정하고 시작
+ENTRY_WAIT_M = 1.2                   # 대회(매니저): M7 시작 후 ARM_AFTER_M + 이 거리 안에 못 들어가면 가정하고 시작
 ENTRY_TH_MAX = math.radians(8.0)     # 진입 방향도 이 안으로 자른다 (기본 주행이 1차선을 곧게 따라오는 중)
 ENTRY_C_MAX = 0.10                   # 진입 차로는 가운데 차로 (도면) -> 카메라가 다른 값을 줘도 이 안으로 자른다
 EXIT_FRAMES = 4
@@ -556,6 +558,7 @@ class Lane3SimpleSupervisor:
         self._seen = None
         self.steer = 0.0
         self.side_taken = None
+        self._armed_t = None
         self.last = None                    # see_signs 가 쓰는 .ok / .c
         self.message = ''
 
@@ -565,6 +568,7 @@ class Lane3SimpleSupervisor:
         if name == 'M7':
             if self.mode == 'off':
                 self.mode, self.arm_travel = 'armed', 0.0
+                self._armed_t = None
                 self.core = SimpleThreeLane()
                 self._white = self._both = self._lost = 0
                 self._seen = None
@@ -644,7 +648,19 @@ class Lane3SimpleSupervisor:
             if not self.forced and self.arm_travel < ARM_AFTER_M:
                 return None
             if not self._try_enter(image, pose, tune):
-                return None
+                # 입구에서 기본 주행이 선을 놓쳐 서 버리면 화면이 그대로라 영영 못 들어간다 (11/16 실차: 시작선이
+                # 안 보이게 놓으면 출발도 못 함). 일정 시간/거리 안에 못 들어가면 1차선 가운데·곧은 방향으로 보고 시작한다
+                now_t = time.monotonic() if now is None else now
+                if self._armed_t is None:
+                    self._armed_t = now_t
+                late = (now_t - self._armed_t > ENTRY_WAIT_SEC if self.forced
+                        else self.arm_travel >= ARM_AFTER_M + ENTRY_WAIT_M)
+                if not late or pose is None:
+                    return None
+                self.core = SimpleThreeLane()
+                self.core.start(0.0, 0.0, pose, START_TO_DASH)
+                self.mode = 'on'
+                self.message = '[3차선S] 시작: 선을 확인하지 못해 가운데 차로·곧은 방향으로 가정하고 시작'
         prior = self.core.th
         obs = self.fitter.fit(image, prior, tune)
         return self.step_obs(obs, pose, scan, both_yellow, now)

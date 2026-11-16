@@ -223,3 +223,12 @@ def test_neighbour_lane_with_obstacle_almost_passed_counts_as_free_when_blocked(
     for _ in range(3):
         k.step_obs(None, (0.0, 0.0, 0.0), scan_with(box(0.6, 0.0) + side), None, now=0.0)
     assert k.changing and k.lane == 1
+
+
+def test_entry_is_forced_when_lines_never_confirm(monkeypatch):
+    sup = S.Lane3SimpleSupervisor(forced=True)
+    monkeypatch.setattr(sup._look, 'look', lambda image, tune=None: (None, False))
+    monkeypatch.setattr(sup.fitter, 'fit', lambda image, prior=None, tune=None: None)
+    assert sup.step(None, (0.0, 0.0, 0.0), None, False, now=0.0) is None and sup.mode == 'armed'
+    out = sup.step(None, (0.0, 0.0, 0.0), None, False, now=S.ENTRY_WAIT_SEC + 0.1)
+    assert sup.mode == 'on' and out is not None and out['v'] > 0.0
