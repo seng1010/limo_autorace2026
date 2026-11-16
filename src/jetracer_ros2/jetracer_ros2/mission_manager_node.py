@@ -13,6 +13,7 @@ M1 (신호등) 판단은 ``m1_traffic_light.TrafficLightMission`` 이 하고, �
 서행:     ``mission/speed_limit`` (Float32, section_node) — 차선 주행 속도 상한. M5·M6 서행 구간용
 """
 
+import math
 import os
 import signal
 import subprocess
@@ -39,7 +40,7 @@ DYNAMIC_NODE = {
     # 장애물 하나를 지나면 M7 을 끝내고, 막히면 차를 세워서 7대 구간에는 맞지 않아 켜지 않는다 (11/15)
     'M8': 'mission_cone_avoid_node',
     'M1': 'mission_traffic_light_node',
-    'M4': 'mission_parking_node',
+    'M4': 'parking_line_detection_managed',
 }
 
 
@@ -62,6 +63,7 @@ class MissionManagerNode(Node):
             'odom_topic': '/odom',
             'odom_timeout_sec': 0.5,
             'stop_line_timeout_sec': 0.5,           # 정지선 거리 메시지가 이보다 오래되면 없음 처리
+            'traffic_state_timeout_sec': 0.5,       # 신호등 노드의 10 Hz 상태 발행 감시
             # 정지선 감속·정밀 정지 (M1·M3 공용)
             'approach_start_m': 0.50,
             'approach_gain': 0.8,
@@ -80,7 +82,7 @@ class MissionManagerNode(Node):
             'm1_light_valid_distance_m': 2.0,
             'm1_stop_on_green_arrival': False,
             'm1_stop_switch_min_m': 0.15,
-            'm1_max_wait_sec': 30.0,
+            'm1_max_wait_sec': 0.0,                 # 녹색 없이 시간만으로 출발하지 않음
             'm1_done_distance_m': 0.50,
             'm1_max_approach_distance_m': 2.0,
             'm1_skip_lines': 0,
@@ -92,6 +94,8 @@ class MissionManagerNode(Node):
             'm1_slow_after_lines': 1,
             'm3_hold_sec': 3.5,
             'm3_done_distance_m': 0.50,
+            'm4_line_arm_distance_m': 0.80,
+            'm4_stop_offset_m': 0.01,               # 앞바퀴 축이 정지선 가까운 끝 부근에 오도록
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -110,7 +114,9 @@ class MissionManagerNode(Node):
         self._section_limit_ns = 0
         self._slow = False
         self._blocked = False
+        self._operator_stop = False      # 미션별 blocked와 분리: ESTOP_CLEAR만 해제
         self._traffic = 'unknown'
+        self._traffic_ns = 0
         self._last_light_s = None         # 신호등(아무 색)을 마지막으로 본 odom 위치
         self._obstacle_seen = False
         self._processes = {}
@@ -156,6 +162,10 @@ class MissionManagerNode(Node):
             make_approach('m1_stop_offset_m'),
             FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
         self._mission_last_state = ''
+        self._m4_approach = make_approach('m4_stop_offset_m')
+        self._m4_full_stop = FullStopDetector(p('full_stop_speed'), p('full_stop_sec'))
+        self._m4_state = 'approach'
+        self._m4_stop_latched = False
 
         self.cmd_pub = self.create_publisher(
             Twist, self.get_parameter('output_topic').value, 10)
@@ -191,11 +201,25 @@ class MissionManagerNode(Node):
 
     def _mission_event_callback(self, msg):
         event = msg.data.strip().upper()
+        if event in ('ESTOP', 'ESTOP_CLEAR'):
+            self._operator_stop = event == 'ESTOP'
+            self._reset_stop_confirmation()
+            self.parking_start_pub.publish(Bool(data=False))
+            # 정지 중 쌓인 제안으로 해제 즉시 움직이지 않고 새 입력을 기다린다.
+            self._last_cmd_ns = dict.fromkeys(self._last_cmd_ns, 0)
+            self.m8.discard_commands()
+            self._publish(Twist())
+            self._debug('operator_stop' if self._operator_stop else 'wait_fresh_command')
+            return
+        if self._operator_stop:
+            return  # NEXT/DONE/ARM_M8도 비상정지를 해제하거나 인계를 진행할 수 없다.
         if self.m8.event(event):
             return
         if self._active == 'M4' and event in ('NEXT', 'M4_DONE'):
             self._blocked = True
-            self.cmd_pub.publish(Twist())
+            self._m4_state = 'complete'
+            self.parking_start_pub.publish(Bool(data=False))
+            self._publish(Twist())
             self.get_logger().info('M4 complete event received; vehicle held stopped')
             return
         if event in ('NEXT', f'{self._active}_DONE'):
@@ -204,10 +228,6 @@ class MissionManagerNode(Node):
             mode = {'LANE_CENTER': 'center', 'LANE_LEFT': 'left',
                     'LANE_RIGHT': 'right', 'HEADING_HOLD': 'heading_hold'}[event]
             self.lane_mode_pub.publish(String(data=mode))
-        elif event == 'ESTOP':
-            self._blocked = True
-        elif event == 'ESTOP_CLEAR':
-            self._blocked = False
 
     def _yolo_callback(self, msg):
         event = msg.data
@@ -218,12 +238,15 @@ class MissionManagerNode(Node):
             self._last_pedestrian_s = self._odom.s
         elif self._active == 'M2' and event in ('sign_a', 'sign_b'):
             self.lane_mode_pub.publish(String(data='left' if event == 'sign_a' else 'right'))
-        elif self._active == 'M4' and event == 'parking_sign':
-            self.parking_start_pub.publish(Bool(data=True))
+        # M4 시작은 표지판 단발 이벤트가 아니라 매니저의 정지선·완전정지 확인으로 결정.
 
     def _odom_callback(self, msg):
         pose = msg.pose.pose.position
-        self._odom_speed = float(msg.twist.twist.linear.x)
+        speed = float(msg.twist.twist.linear.x)
+        if not all(math.isfinite(value) for value in (pose.x, pose.y, speed)):
+            self._odom_ns = 0
+            return
+        self._odom_speed = speed
         self._odom.update(pose.x, pose.y, self._odom_speed)
         self._odom_ns = self.get_clock().now().nanoseconds
 
@@ -234,12 +257,15 @@ class MissionManagerNode(Node):
 
     def _stop_line_callback(self, msg):
         distance = msg.data
-        self._stop_line_m = float(distance) if distance >= 0.0 else None
+        self._stop_line_m = float(distance) if math.isfinite(distance) and distance >= 0.0 else None
         self._stop_line_ns = self.get_clock().now().nanoseconds
 
     def _traffic_callback(self, msg):
-        self._traffic = msg.data
-        if msg.data in ('red', 'yellow', 'green'):
+        if self._active != 'M1':
+            return
+        self._traffic = msg.data if msg.data in ('red', 'yellow', 'green') else 'unknown'
+        self._traffic_ns = self.get_clock().now().nanoseconds
+        if self._traffic != 'unknown':
             self._last_light_s = self._odom.s
 
     def _obstacle_callback(self, msg):
@@ -266,11 +292,17 @@ class MissionManagerNode(Node):
         pass  # M8Control reads atomic stamped commands, not out-of-order state strings.
 
     def _parking_state_callback(self, msg):
-        if self._active == 'M4' and msg.data == 'complete':
+        if (self._active == 'M4' and self._m4_state == 'parking'
+                and not self._operator_stop and msg.data == 'complete'):
             self._blocked = True
+            self._m4_state = 'complete'
+            self.parking_start_pub.publish(Bool(data=False))
+            self._publish(Twist())
             self.get_logger().info('M4 parking complete; mission sequence complete')
 
     def _advance(self, reason):
+        if self._operator_stop:
+            return
         if self._index >= len(MISSION_ORDER) - 1:
             self.get_logger().info(f'final mission retained ({reason})')
             return
@@ -285,11 +317,19 @@ class MissionManagerNode(Node):
         self._slow = False
         self._blocked = False
         self._traffic = 'unknown'
+        self._traffic_ns = 0
+        self._last_light_s = None
         self._obstacle_seen = False
+        self._mission_last_state = ''
         if mission == 'M3':
             self._m3.reset()
         if mission == 'M1':
             self._m1.reset()
+        if mission == 'M4':
+            self._m4_state = 'approach'
+            self._m4_stop_latched = False
+            self._m4_full_stop.reset()
+            self._stop_line_ns = 0  # M1 통과에 사용한 정지선 거리를 주차 시작에 재사용하지 않는다.
         self.m8.enter(mission)
         self.lane_mode_pub.publish(String(data='center'))
         self.active_pub.publish(String(data=mission))
@@ -297,7 +337,8 @@ class MissionManagerNode(Node):
         if process and self.get_parameter('auto_start_mission_nodes').value:
             self._start_process(process)
         if mission == 'M4':
-            # Parking node remains stationary until its sign or an explicit start event.
+            self._last_cmd_ns['parking'] = 0  # 이전/시험 주차 노드의 대기 중 제안 재사용 금지
+            # 주차 시퀀스는 접근·완전정지 확인이 끝날 때까지 대기한다.
             self.parking_start_pub.publish(Bool(data=False))
         if initial:
             self.get_logger().info(f'2026 mission manager ready; starting {mission}')
@@ -306,25 +347,52 @@ class MissionManagerNode(Node):
         process = DYNAMIC_NODE.get(mission)
         if process:
             self._stop_process(process)
-        self.cmd_pub.publish(Twist())
+        self._publish(Twist())
 
     def _fresh_stop_line(self, now_ns):
         age = (now_ns - self._stop_line_ns) / 1e9
-        if self._stop_line_ns == 0 or age > self.get_parameter('stop_line_timeout_sec').value:
+        if self._stop_line_ns == 0 or not 0 <= age <= self.get_parameter('stop_line_timeout_sec').value:
             return None
         return self._stop_line_m
 
-    def _measured_speed(self, now_ns):
-        """odom 속도. odom 이 끊기면 마지막으로 내보낸 명령 속도로 대신한다 (경고 1회)."""
+    def _fresh_traffic(self, now_ns):
+        age = (now_ns - self._traffic_ns) / 1e9
+        if not self._traffic_ns or not 0 <= age <= self.get_parameter('traffic_state_timeout_sec').value:
+            return 'unknown'
+        return self._traffic
+
+    def _odom_fresh(self, now_ns):
         age = (now_ns - self._odom_ns) / 1e9
-        if self._odom_ns and age <= self.get_parameter('odom_timeout_sec').value:
+        return (self._odom_ns != 0 and math.isfinite(self._odom_speed)
+                and 0 <= age <= self.get_parameter('odom_timeout_sec').value)
+
+    def _measured_speed(self, now_ns):
+        """실측 속도만 반환한다. 명령 0은 실제 완전정지의 증거가 아니다."""
+        if self._odom_fresh(now_ns):
+            self._odom_warned = False
             return self._odom_speed
         if not self._odom_warned:
-            self.get_logger().warn('odom 없음 — 완전정지 판정을 명령 속도로 대신함')
+            self.get_logger().warn('odom 없음/만료 — 실측 속도 미확인, M1·M3 정지 확인 대기')
             self._odom_warned = True
-        return self._last_out_speed
+        return None
+
+    def _reset_stop_confirmation(self):
+        if self._active == 'M4':
+            self._m4_full_stop.reset()
+            return
+        if self._active not in ('M1', 'M3'):
+            return
+        mission = self._m1 if self._active == 'M1' else self._m3
+        mission.full_stop.reset()
+        if mission.state == 'hold':
+            mission.state = 'stopping'
+            mission.hold_start = None
 
     def _publish(self, command):
+        # 타이머뿐 아니라 M8 제안 수신 콜백의 즉시 발행도 같은 비상정지 적용.
+        if self._operator_stop or not all(math.isfinite(v) for v in
+                                         (command.linear.x, command.angular.z)):
+            command = Twist()
         self._last_out_speed = float(command.linear.x)
         self.cmd_pub.publish(command)
 
@@ -362,11 +430,47 @@ class MissionManagerNode(Node):
     def _m1_tick(self, now_ns):
         stop_line = self._fresh_stop_line(now_ns)
         speed = self._measured_speed(now_ns)
+        light = self._fresh_traffic(now_ns)
         decision = self._m1.update(now_ns / 1e9, stop_line, speed, self._odom.s,
-                                   self._traffic, last_light_s=self._last_light_s)
+                                   light, last_light_s=self._last_light_s)
         return self._report(decision, stop_line, speed, 'M1 신호등 통과 완료',
                             'M1 신호등을 못 보고 구간을 지나침 — M1 건너뜀',
-                            extra=f' light={self._traffic}')
+                            extra=f' light={light}')
+
+    def _m4_tick(self, now_ns):
+        """M3와 같은 거리 감속·실측 정지 확인 후에만 튜닝된 주차 동작에 인계."""
+        if self._m4_state == 'parking':
+            self.parking_start_pub.publish(Bool(data=True))  # 늦게 시작한 노드에도 전달
+            self._debug('parking source=parking')
+            return None
+        self.parking_start_pub.publish(Bool(data=False))
+        if not self._odom_fresh(now_ns):
+            self._m4_full_stop.reset()
+            self._debug('parking_approach wait_odom')
+            return 0.0
+        line = self._fresh_stop_line(now_ns)
+        if line is not None and line <= self.get_parameter('m4_line_arm_distance_m').value:
+            self._m4_state = 'stopping'
+        if self._m4_state == 'approach':
+            self._debug('parking_approach source=lane waiting_line')
+            return None
+        # 가까이서 선을 놓치면 임의로 주차를 시작하지 않고 멈춰 재관측을 기다린다.
+        # stop_line_node의 odom 사각지대 추적 거리는 기존과 같이 사용한다.
+        limit = (0.0 if self._m4_stop_latched or line is None
+                 else self._m4_approach.speed_limit(line))
+        if line is not None and limit == 0.0:
+            self._m4_stop_latched = True
+        if self._m4_stop_latched:
+            if self._m4_full_stop.update(now_ns / 1e9, self._odom_speed) is not None:
+                self._m4_state = 'parking'
+                self._last_cmd_ns['parking'] = 0
+                self.parking_start_pub.publish(Bool(data=True))
+                self.get_logger().info('M4 정지선 앞 완전정지 확인; 기존 주차 시퀀스 시작')
+        else:
+            self._m4_full_stop.reset()
+        line_text = f'{line:.3f}' if line is not None else 'none'
+        self._debug(f'parking_{self._m4_state} line={line_text} v={self._odom_speed:.3f}')
+        return limit
 
     def _control_tick(self):
         now = self.get_clock().now().nanoseconds
@@ -377,25 +481,49 @@ class MissionManagerNode(Node):
             self.active_pub.publish(String(data=self._active))
         if self._stopping:
             self._reap_processes(now)
+        if self._operator_stop:
+            self._reset_stop_confirmation()
+            self.parking_start_pub.publish(Bool(data=False))
+            self._publish(Twist())
+            self._debug('operator_stop')
+            return
         if self.m8.tick(now):
             return
-        if self._active not in ('M1', 'M3'):   # M1·M3는 _report 에서 상태까지 같이 발행
+        if self._active not in ('M1', 'M3', 'M4'):
             line = self._fresh_stop_line(now)
             line_text = f'{line:.3f}' if line is not None else 'none'
-            self._debug(f'{"blocked" if self._blocked else "run"} line={line_text} '
-                        f'v={self._measured_speed(now):.3f}')
+            speed = self._measured_speed(now)
+            speed_text = f'{speed:.3f}' if speed is not None else 'unknown'
+            self._debug(f'{"blocked" if self._blocked else "run"} line={line_text} v={speed_text}')
         if self._blocked:
+            if self._active == 'M4':
+                self.parking_start_pub.publish(Bool(data=False))
+                self._debug(f'parking_{self._m4_state} source=stop')
             self._publish(Twist())
             return
         speed_limit = None
         if self._active in ('M1', 'M3'):
+            if not self._odom_fresh(now):
+                self._reset_stop_confirmation()
+                self._publish(Twist())
+                self._debug('wait_odom')
+                return
+            mission_before = self._active
             speed_limit = self._m1_tick(now) if self._active == 'M1' else self._m3_tick(now)
+            if self._active != mission_before:
+                return  # _leave_mission의 정지 명령을 이전 미션 제안으로 즉시 덮어쓰지 않는다.
             if speed_limit == 0.0:
                 self._publish(Twist())
                 return
-        source = 'cone' if self._active == 'M8' else ('parking' if self._active == 'M4' else 'lane')
+        if self._active == 'M4':
+            speed_limit = self._m4_tick(now)
+            if speed_limit == 0.0:
+                self._publish(Twist())
+                return
+        source = ('cone' if self._active == 'M8' else
+                  'parking' if self._active == 'M4' and self._m4_state == 'parking' else 'lane')
         age = (now - self._last_cmd_ns[source]) / 1e9 if self._last_cmd_ns[source] else float('inf')
-        if age > self.get_parameter('command_timeout_sec').value:
+        if not 0 <= age <= self.get_parameter('command_timeout_sec').value:
             self._publish(Twist())
             return
         command = getattr(self, f'_{source}_cmd')

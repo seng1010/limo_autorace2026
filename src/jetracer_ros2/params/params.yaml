@@ -164,6 +164,7 @@ mission_manager_node:
     odom_topic: '/odom'
     odom_timeout_sec: 0.5
     stop_line_timeout_sec: 0.5
+    traffic_state_timeout_sec: 0.5   # 신호등 상태 발행 중단 시 마지막 녹색을 계속 재사용하지 않음
     # 정지선 감속·정밀 정지 (M1·M3 공용). 거리 = 앞바퀴 -> 정지선 (stop_line_node reference_wheel)
     approach_start_m: 0.50            # 이 거리 안에서부터 감속
     approach_gain: 0.8                # 속도 = gain * 남은거리 [1/s]
@@ -188,7 +189,7 @@ mission_manager_node:
     m1_light_valid_distance_m: 2.0    # 신호등 본 뒤 이 거리 안의 정지선만 인정
     m1_stop_on_green_arrival: false   # true: 녹색에 도착해도 일단 정지 후 출발
     m1_stop_switch_min_m: 0.15        # 녹색 통과 중 적·황으로 바뀌면 이 거리 이상 남았을 때만 정지
-    m1_max_wait_sec: 30.0             # 녹색 안 보이면 이 시간 뒤 출발 (나머지 미션 보호, 0 = 끄기)
+    m1_max_wait_sec: 0.0              # 녹색 없이 시간만으로 출발하는 우회 비활성. 양수는 명시적 시험용
     m1_done_distance_m: 0.50          # 출발/통과 후 이만큼 가면 M1 완료 -> M4
     m1_max_approach_distance_m: 2.0   # M1 시작 후 판단 못 하고 이만큼 가면 M1 건너뜀 (트랙 보고 조정)
     m1_skip_lines: 1                  # M1 구간 앞쪽 정지선 무시 개수.
@@ -205,6 +206,14 @@ mission_manager_node:
     m3_done_distance_m: 0.50          # 출발 후 이만큼 가면 M3 완료 -> M7
     m3_lost_line_revert_m: 0.30       # 정지 전에 이보다 멀리서 선을 놓치면 잘못 본 선 -> 계속 주행
     m3_stop_offset_m: -1.0            # 정지선 앞 몇 m 에 설지 (음수 = approach_stop_offset_m 사용)
+    # M4 접근은 차선 조향 유지. 정지 확인 후 parking_line_detection의 기존 시간제 시퀀스에 인계.
+    m4_line_arm_distance_m: 0.80
+    m4_stop_offset_m: 0.01            # 앞바퀴 축 -> 정지선, M3 공용값과 동일한 초기값. 실차 정지 위치 확인 필요
+    # 전체 주행에서도 M2에서 M8 단독 launch와 같은 입구 감시를 사용한다.
+    # M2 진입 즉시 콘 제어로 바꾸지 않음: 55cm 사전검사, 45cm/전방 위험 시 보호접근.
+    m8_entry_arm_after_m: -1.0
+    m8_entry_arm_near_line_m: 0.45
+    m8_entry_precheck_m: 0.55
 
 mission_traffic_light_node:
   ros__parameters:

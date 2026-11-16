@@ -40,6 +40,7 @@ DEFAULTS = {
     'turn_steer_rad': 0.45,     # 우회전 조향각 크기 [rad]
     'start_delay_sec': 0.0,     # 실행 후 출발까지 대기 [s]
     'wait_enter': False,        # True면 Enter를 눌러야 출발
+    'managed_mode': False,     # True: 접근은 매니저 소유, 시작 신호 뒤 STOP_WAIT부터 실행
 }
 
 
@@ -60,6 +61,12 @@ class ParkingMissionNode(Node):
         self.stop_distance = float(p['stop_distance_m'])
         self.settle_sec = float(p['settle_sec'])
         self.start_delay = float(p['start_delay_sec'])
+        self.managed = bool(p['managed_mode'])
+        self._enabled = False
+        self._enable_at = None
+        self._active_mission = ''
+        self._active_at = None
+        self._pause_since = None
 
         # 정지선 정지 이후 실행할 주차 단계들
         self.parking_phases = [
@@ -79,8 +86,13 @@ class ParkingMissionNode(Node):
         self._go_at = None
 
         # Pub / Sub
-        self.cmd_pub = self.create_publisher(Twist, p['output_topic'], 10)
-        self.state_pub = self.create_publisher(String, 'parking_mission/state', 10)
+        output_topic = 'mission/parking/cmd_vel' if self.managed else p['output_topic']
+        state_topic = 'mission/parking/state' if self.managed else 'parking_mission/state'
+        self.cmd_pub = self.create_publisher(Twist, output_topic, 10)
+        self.state_pub = self.create_publisher(String, state_topic, 10)
+        if self.managed:
+            self.create_subscription(Bool, 'mission/parking/start', self._start_cb, 10)
+            self.create_subscription(String, 'mission/active', self._active_cb, 10)
         self.create_subscription(
             Bool, 'mission/stop_line_detected', self._detected_cb, 10)
         self.create_subscription(
@@ -97,7 +109,30 @@ class ParkingMissionNode(Node):
     def _distance_cb(self, msg: Float32):
         self.stop_line_distance = msg.data
 
+    def _start_cb(self, msg):
+        self._enabled = bool(msg.data)
+        self._enable_at = time.monotonic()
+        if not self._enabled:
+            self._pause()
+
+    def _active_cb(self, msg):
+        self._active_mission = msg.data
+        self._active_at = time.monotonic()
+        if self._active_mission != 'M4':
+            self._pause()
+
+    def _pause(self):
+        if self._pause_since is None:
+            self._pause_since = time.monotonic()
+        self.stop()
+
+    def _publish_state(self):
+        state = 'complete' if self.managed and self._state == 'DONE' else self._state
+        self.state_pub.publish(String(data=state))
+
     def go(self):
+        if self.managed:
+            return  # 단독 실행용 go()/Enter로 매니저의 정지 확인을 우회하지 않는다.
         if self._go_at is None:
             self._go_at = time.monotonic() + self.start_delay
             self.get_logger().info(f'{self.start_delay:.1f}초 뒤 출발합니다.')
@@ -105,7 +140,7 @@ class ParkingMissionNode(Node):
     def _set_state(self, new_state: str, now: float):
         self._state = new_state
         self._state_start = now
-        self.state_pub.publish(String(data=new_state))
+        self._publish_state()
         self.get_logger().info(f'[상태 전환] -> {new_state}')
 
     def _publish_cmd(self, speed: float, steer: float):
@@ -119,6 +154,23 @@ class ParkingMissionNode(Node):
 
     def _tick(self):
         now = time.monotonic()
+        if self.managed:
+            allowed = (self._enabled and self._active_mission == 'M4'
+                       and self._enable_at is not None and now - self._enable_at <= 0.5
+                       and self._active_at is not None and now - self._active_at <= 1.5)
+            if not allowed:
+                self._pause()
+                if self._state == 'DONE':
+                    self._publish_state()
+                return
+            if self._pause_since is not None:
+                if self._state_start is not None:
+                    self._state_start += now - self._pause_since
+                self._pause_since = None
+            if self._state == 'WAIT_START':
+                self.stop()
+                self._set_state('STOP_WAIT', now)
+                return
 
         # 0. 출발 전 대기
         if self._state == 'WAIT_START':
@@ -172,6 +224,8 @@ class ParkingMissionNode(Node):
         # 4. 완료 후 정지 유지
         if self._state == 'DONE':
             self.stop()
+            if self.managed:
+                self._publish_state()
 
 
 def _plain_overrides(argv):
@@ -197,7 +251,7 @@ def main(args=None):
     node = None
     try:
         node = ParkingMissionNode()
-        if node.get_parameter('wait_enter').value and sys.stdin.isatty():
+        if not node.managed and node.get_parameter('wait_enter').value and sys.stdin.isatty():
             input('[parking_mission_node] Enter를 누르면 출발합니다...')
         node.go()
         rclpy.spin(node)
@@ -211,6 +265,14 @@ def main(args=None):
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
+
+def managed_main(args=None):
+    """전체 주행용 진입점. 팀원이 조정하는 주차 단계·파라미터는 공유한다."""
+    argv = list(sys.argv if args is None else args)
+    if '--ros-args' not in argv:
+        argv += ['--ros-args']
+    main(args=argv + ['-p', 'managed_mode:=true'])
 
 
 if __name__ == '__main__':

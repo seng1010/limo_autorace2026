@@ -311,6 +311,11 @@ class M8Control:
 
 
     def _publish_m8_control(self, now, trigger='timer'):
+        if getattr(self.node, '_operator_stop', False):
+            self._recovery_budget.cancel()
+            self.node._publish(Twist())
+            self.node._debug('source=stop reason=operator_stop v=0.000')
+            return
         age = (now-self._cone_stamp_ns)/1e9 if self._cone_stamp_ns > 0 else float('inf')
         (v, omega), reason = select_m8_command(self._cone_cmd, age, self._m8_operator_stop)
         source = 'cone' if v > 0 else 'stop'
@@ -364,6 +369,13 @@ class M8Control:
                     f'proposal_v={pv:.3f} proposal_omega={pw:+.3f} '
                     f'v={v:.3f} omega={omega:+.3f}')
 
+
+    def discard_commands(self):
+        """매니저 비상정지/해제 시 명령만 폐기. 통로·출구·이동거리 판단은 보존."""
+        self._cone_cmd = self._exit_lane_cmd = self._recovery_offer = None
+        self._cone_stamp_ns = self._cone_rx_ns = 0
+        self._exit_lane_stamp_ns = self._exit_lane_rx_ns = 0
+        self._recovery_budget.cancel()
 
     def event(self,event):
         if self.node._active == 'M2' and event in ('NEXT','M2_DONE','ARM_M8'):
