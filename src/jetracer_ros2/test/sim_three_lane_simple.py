@@ -23,6 +23,7 @@ BODY_C = 0.10                     # 차체 가운데: 뒤 차축 앞
 ISL_LEN, ISL_HALF = 1.74, 0.27
 JOG0, JOG1 = 1.79, 2.29          # 섬 앞끝 기준: 바깥 선이 45도로 꺾여 합류하는 구간 (도면)
 DT = 0.05
+STEER_LAG = float(os.environ.get('SIM_STEER_LAG', '0.15'))   # 조향 1차 지연 [s]
 YOLO_EVERY = int(os.environ.get('SIM_YOLO_EVERY', '2'))   # 2 = 10 Hz, 5 = 4 Hz (차에서 실제 속도를 재서 맞출 것)
 
 
@@ -190,11 +191,12 @@ def yolo_sign(cx, cy, psi, isl, goal, rng):
     return {'label': lab, 'confidence': 0.8, 'bbox': [300.0, 100.0, 300.0 + h * 0.8, 100.0 + h]}
 
 
-def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0, fair=False):
+def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0, fair=False, cars=None, x0=None):
+    """cars: 장애물 (x, y) 목록을 직접 줄 때 (진입=흰 점선 시작 기준). x0: 처음 카메라 투영점 위치 (기본: 점선 시작)"""
     rng = np.random.default_rng(seed)
     isl = S.START_TO_ISLAND - S.START_TO_DASH + rng.uniform(-0.10, 0.10)   # 진입(점선 시작) 기준. 트랙 오차 ±10 cm
     goal = int(rng.choice([0, 2])) if goal is None else goal
-    cars = layout(rng, isl, goal if fair else None)
+    cars = layout(rng, isl, goal if fair else None) if cars is None else cars
     car_polys = [rect(x, y, 0.0, CAR_L, CAR_W) for x, y in cars]
     post = rect(isl - 0.03, 0.0, 0.0, 0.06, 0.06)
     # 섬: 양 끝이 뾰족한 육각형 (도면: 끝 0.21 m 동안 좁아짐)
@@ -209,7 +211,7 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0, fair=False):
         return 0.27
     yolo_rng = np.random.default_rng(seed + 10_000)
     # 참 상태 (뒤 차축)
-    x, y, psi = -CAM, rng.uniform(-0.04, 0.04), rng.normal(0, math.radians(2.0))
+    x, y, psi = (-CAM if x0 is None else x0 - CAM), rng.uniform(-0.04, 0.04), rng.normal(0, math.radians(2.0))
     steer_act = 0.0
     k_ds, k_yaw = 1 + rng.normal(0, 0.03), 1 + rng.normal(0, 0.03)
     drift = rng.normal(0, math.radians(1.5))   # 1 m 당 방향 흐름
@@ -218,10 +220,11 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0, fair=False):
     c0, th0 = c_true + rng.normal(0, 0.04), -psi + rng.normal(0, math.radians(2.0))
     sup = S.Lane3SimpleSupervisor(forced=True)
     sup.mode = 'on'
-    sup.core.start(c0, th0, (ox, oy, oyaw), S.START_TO_DASH + rng.normal(0, 0.10))   # 시작선 기준 위치 추정 오차
+    sup.core.start(c0, th0, (ox, oy, oyaw), S.START_TO_DASH + (0.0 if x0 is None else x0) + rng.normal(0, 0.10))   # 시작선 기준 위치 추정 오차
     t, contact, out_frames, island_frames, frames = 0.0, 0, 0, 0, 0
     touched = set()
     exit_lane = None
+    max_psi = max_edge = 0.0
     while t < max_t:
         cx, cy = x + CAM * math.cos(psi), y + CAM * math.sin(psi)
         if frames % YOLO_EVERY == 0:              # YOLO 속도 (DT 0.05 s 의 배수)
@@ -237,7 +240,7 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0, fair=False):
                 exit_lane = sup.side_taken
             break
         v, cmd = out['v'], max(-T.MAX_STEER, min(T.MAX_STEER, out['steer']))
-        steer_act += (cmd - steer_act) * min(1.0, DT / 0.15)
+        steer_act += (cmd - steer_act) * min(1.0, DT / STEER_LAG)
         ds = v * DT
         if abs(steer_act) > 1e-4:
             radius = T.WHEELBASE / math.tan(abs(steer_act)) + T.TRACK / 2.0
@@ -261,6 +264,8 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0, fair=False):
                 contact += 1
         if any(abs(py) > road_half(px) for px, py in body):
             out_frames += 1
+        max_psi = max(max_psi, abs(psi))
+        max_edge = max(max_edge, max(abs(py) for px, py in body) if x < isl else 0.0)
         if overlap(body, island_poly):
             island_frames += 1
         frames += 1
@@ -271,7 +276,7 @@ def run(seed, goal=None, verbose=False, max_t=60.0, spurious=0.0, fair=False):
     ok = exit_lane in (0, 2) and contact == 0 and out_frames == 0 and island_frames == 0
     return dict(seed=seed, ok=ok, exit_lane=exit_lane, goal=goal, contact=contact, out=out_frames,
                 island=island_frames, t=t, x=passed, cars=len(cars), reverse=sup.core.reverse_count,
-                state=sup.core.state, reason=sup.core.reason)
+                state=sup.core.state, reason=sup.core.reason, max_psi=math.degrees(max_psi), max_edge=max_edge)
 
 
 if __name__ == '__main__':

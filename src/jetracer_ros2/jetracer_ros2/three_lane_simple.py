@@ -108,6 +108,8 @@ TIE = 0.30                           # 두 차로 빈 거리가 이 안이면 �
 LOOKAHEAD_KEEP = 0.55
 LOOKAHEAD_CHANGE = 0.40
 HEADING_MAX = math.radians(40.0)     # 옮길 때 도로와 이 이상 틀지 않는다
+ARRIVE_RADIUS = 0.75                 # 바깥 차로로 옮길 때, 이 반지름으로 펴면 목표 차로 가운데에서 곧아지는 각도까지만 튼다 (회전반경 0.51 + 지연)
+ARRIVE_MIN_HEADING = math.radians(10.0)
 TIGHT_BELOW = 0.90                   # 앞 장애물이 이보다 가까운 채로 옮기기 시작하면 급하게 (가까운 목표점, 큰 각도)
 LOOKAHEAD_TIGHT = 0.36
 HEADING_TIGHT = math.radians(45.0)
@@ -903,7 +905,15 @@ class SimpleThreeLane:
         tight = self.changing and self.tight and not merging
         look = MERGE_LOOK if merging else (LOOKAHEAD_TIGHT if tight else (LOOKAHEAD_CHANGE if self.changing else LOOKAHEAD_KEEP))
         steer = T.steer_to_lane(self.c, self.th, self.lane, look)
-        steer = T.limit_heading(steer, self.th, MERGE_HEADING if merging else (HEADING_TIGHT if tight else HEADING_MAX))
+        hmax = MERGE_HEADING if merging else (HEADING_TIGHT if tight else HEADING_MAX)
+        if not merging and self.lane != 1:
+            # 바깥 차로(0, 2)로 갈 때: 남은 옆 거리 안에서 다시 곧게 펼 수 있는 각도까지만 튼다. 그 바깥은 노란 선이다
+            # (11/16 실차 1116_2131xx: 왼쪽 차로로 옮기며 46도까지 틀어져 노란 선을 넘었다. 회전반경 0.51 m 차는 45도에서 펴는 데
+            #  옆으로 0.15 m 더 간다 + 조향 지연)
+            rem = (LANE_CENTER[self.lane] - self.c) * (1.0 if self.lane == 0 else -1.0)   # 바깥쪽으로 남은 거리
+            cap = math.acos(float(np.clip(1.0 - max(rem, 0.0) / ARRIVE_RADIUS, -1.0, 1.0)))
+            hmax = min(hmax, max(cap, ARRIVE_MIN_HEADING))
+        steer = T.limit_heading(steer, self.th, hmax)
         self._guard_hit = front < GUARD_DIST and (speed > 0.0 or self._guard_hit)
         if front < GUARD_DIST and speed > 0.0:
             # 정면에 물체(옮기다 모서리에 걸림 등): 서고, 오래 서 있으면 조금 물러났다가 같은 판단을 다시 한다
