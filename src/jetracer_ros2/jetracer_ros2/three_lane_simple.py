@@ -129,6 +129,17 @@ LINE_GAIN = 0.25                     # 차로 선으로 옆 위치를 고치는 
 LINE_GATE = 0.20                     # 선으로 구한 위치가 지금 위치와 이 안일 때만 쓴다 (선 간격 0.27 의 절반 남짓: 차로를 통째로 옮기지 않는다)
 WHITE_OFF_ISLAND = 1.70              # 섬이 이 안이면 흰 선으로 위치를 고치지 않는다 (섬 테두리·바깥 노란 선만)
 LINE_TH_MAX = math.radians(45.0)     # 도로와 이보다 크게 틀어져 있으면 선으로 고치지 않는다
+# 바깥 노란 선 확정 보정: 섬에서 먼 3차선 안에서, 화면 아래부터 보이는 노란 실선은 바깥 선(+-0.80) 말고는 없다. 어느 쪽인지는
+# 그 선이 차의 왼쪽/오른쪽 어디에 보이는지로 정해진다 -> LINE_GATE 보다 크게 틀려 있어도 고친다
+# (11/16 실차 1117_000047: 왼쪽 차로로 옮기는 동안 위치를 25 cm 안쪽으로 잘못 알아, 0.20 m 문턱 때문에 노란 선 보정을
+#  다 버리고 노란 선 위까지 감. 카메라로는 노란 선이 차 바로 밑으로 들어오는 게 내내 보였다)
+OUTER_FROM_S = 0.70                  # 입구가 벌어지는 구간(시작선~0.55 m)이 지난 뒤부터
+OUTER_YSTART = 0.60                  # 이보다 가까이서 시작하는 선만 (옆에 있는 선)
+OUTER_MIN_N = 150
+OUTER_GATE = 0.45
+OUTER_GAIN = 0.35
+OUTER_MIN_POS = 0.45                 # 지금 위치 + 선 위치가 이 바깥일 때만 바깥 노란 선으로 본다
+ON_LINE_U = 0.10                     # 바깥 노란 선이 차 가운데에서 이 안이면 '선 위' -> 도로 안쪽으로 최대 조향
 GUARD_DIST = 0.30                    # 정면 통로에 물체가 이 안이면 무조건 정지
 STUCK_SEC = 1.5                      # 이만큼 서 있으면 후진
 REVERSE_M = 0.60                     # 한 번에 후진하는 거리
@@ -292,12 +303,43 @@ class SimpleThreeLane:
         if abs(d) <= TH_ACCEPT:
             self.th += TH_GAIN * d
 
+    def _outer_lines(self, obs):
+        """바깥 노란 선으로 확정할 수 있는 선들: [(u, 그 선의 도로 위치 +-0.80)]."""
+        if not obs or self.s < OUTER_FROM_S or self.s > self.island_at - 0.6:
+            return []
+        ystart = obs.get('ystart') or {}
+        out = []
+        for u, n, ratio in obs['lines']:
+            if ratio >= 0.7 and n >= OUTER_MIN_N and ystart.get(u, 9.9) <= OUTER_YSTART:
+                us = T._shrink(u)
+                # 왼쪽 바깥 선은 차 위치에서 왼쪽에(us > -ON_LINE_U), 오른쪽 바깥 선은 오른쪽에 보인다
+                # 지금 위치로 봐도 도로 가장자리 쪽(|c + us| >= OUTER_MIN_POS)이어야 한다: 가운데 근처에서 보이는 노란 선은
+                # 섬 테두리일 수 있다 (섬 위치 추정이 틀리면 '섬에서 멀다'고 잘못 볼 수 있음 - 시뮬레이션 126)
+                if us > -ON_LINE_U and self.c + us >= OUTER_MIN_POS:
+                    out.append((u, T.YELLOW_POS[0]))
+                elif us < ON_LINE_U and self.c + us <= -OUTER_MIN_POS:
+                    out.append((u, T.YELLOW_POS[1]))
+        return out
+
+    def _camera_outer(self, obs):
+        """바깥 노란 선이 확실히 보이면 그것만으로 옆 위치를 고친다. 고쳤으면 True."""
+        outs = self._outer_lines(obs)
+        cands = [p - T._shrink(u) for u, p in outs]
+        cands = [cc for cc in cands if abs(cc - self.c) <= OUTER_GATE]
+        if not cands:
+            return False
+        cc = float(np.median(cands))
+        self.c += OUTER_GAIN * (cc - self.c)
+        return True
+
     def _camera_lines(self, obs):
         """보이는 차로 선(흰 점선 +-0.27, 바깥 노란 선 +-0.80, 섬 옆이면 섬 테두리 +-0.27)으로 옆 위치를 조금씩 고친다.
         선마다 '지금 위치에서 가장 가까운' 자리에만 맞추고, 그 자리가 LINE_GATE 넘게 떨어지면 버린다
         -> 어느 선이 어느 차로 선인지 헷갈려 한 차로씩 튀는 일(three_lane.py 의 실패)은 생기지 않는다.
         odom 방향은 차로를 바꾸며 크게 틀 때 수십 cm 씩 밀린다 (11/15 실차: 오른쪽 -> 가운데로 옮기는 동안 0.5 m)."""
         if not obs or abs(self.th) > LINE_TH_MAX:
+            return
+        if self._camera_outer(obs):
             return
         short = obs.get('short', ())
         ystart = obs.get('ystart') or {}
@@ -941,7 +983,14 @@ class SimpleThreeLane:
                 odd = tuple(u for u, n, ratio in obs['lines']
                             if ratio >= 0.75 and not (abs(self.c + T._shrink(u)) >= WALL_OUTER_MIN
                                                       or (near_island and abs(self.c + T._shrink(u)) <= T.ISLAND_INSIDE + 0.1)))
-                wall = T.yellow_wall(obs['lines'], obs['th'], obs.get('ystart'), skip=cross + odd)
+                # 화면 아래(약 0.42 m)부터 보이는 선은 이미 옆에 있는 선이다. ystart 로 '앞에서 시작하는 선'이라 빼지 않게 한다
+                # (11/17 실차: 노란 선이 차 바로 앞 7 cm 인데 시작 0.51 m 라 벽에서 빠짐)
+                ys = {u: (0.0 if y <= OUTER_YSTART else y) for u, y in (obs.get('ystart') or {}).items()}
+                wall = T.yellow_wall(obs['lines'], obs['th'], ys, skip=cross + odd)
+                for u, p in self._outer_lines(obs):
+                    if abs(T._shrink(u)) <= ON_LINE_U and abs(self.c) >= 0.55:   # 바깥 노란 선 위에 올라탐 -> 도로 안쪽으로
+                        wall = (-math.copysign(T.MAX_STEER, p), f"바깥 노란 선 위 ({'왼쪽' if p > 0 else '오른쪽'}) -> 안쪽으로 최대 조향")
+                        break
                 if wall is not None and wall[0] * self.c > 0.0 and abs(self.c) > WALL_TOWARD_MAX_C:
                     wall = None        # 이미 바깥 차로 바깥쪽에 있는데 더 바깥(노란 선 쪽)으로 꺾으라는 벽은 틀린 것
                 if wall is not None:
