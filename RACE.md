@@ -114,11 +114,14 @@ ros2 launch jetracer_ros2 all_in_node.launch.py
 
 ## 7. 3차선 단순 버전 (three_lane_simple.py, 브랜치 `m7-simple`)
 
-기존 `three_lane.py` 는 그대로 두고, 비교용으로 단순 버전을 따로 넣었다. 실행 인자 하나로 고른다 (기본은 기존 버전).
+전체 launch의 M7 기본 주행기는 단순 버전 `three_lane_simple.py`다. 기존 `three_lane.py`와 비교하려면 `lane3:=full`로 선택한다.
+`three_lane_simple.py`가 기존 모듈의 공용 기능을 사용하므로 `three_lane.py`도 유지한다.
 
 ```bash
-# 전체 (매니저와 함께)
-ros2 launch jetracer_ros2 all_in_node.launch.py lane3:=simple
+# 전체 (매니저와 함께, M7 기본값은 simple)
+ros2 launch jetracer_ros2 all_in_node.launch.py
+# 기존 3차선 주행기로 비교
+ros2 launch jetracer_ros2 all_in_node.launch.py lane3:=full
 # 단독 시험 (3차선 입구에 놓고): 3차선 + YOLO(표지판) 같이. 하드웨어 launch 는 따로
 ros2 launch jetracer_ros2 lane3_test.launch.py            # goal:=a / goal:=b 로 방향 고정, yolo:=false, rec:=false
 # (예전 방식) ros2 run jetracer_ros2 simple_lane drive lane3 l3simple rec  [goal_a|goal_b]
