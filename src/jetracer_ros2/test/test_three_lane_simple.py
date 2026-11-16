@@ -463,3 +463,18 @@ def test_no_turn_near_start_line():
     k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
     out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=S.STUCK_SEC + 0.1)
     assert out['state'] != 'TURN' and k.turn is None
+
+
+def test_entry_position_fixed_when_three_lane_yellow_seen():
+    k = S.SimpleThreeLane()
+    k.start(0.0, 0.0, (0.0, 0.0, 0.0), -1.31)            # 첫 점선을 놓쳐 시작선 1.3 m 전이라고 잘못 잡음
+    narrow = dict(th=0.0, lines=[(0.26, 150, 1.0), (-0.26, 150, 1.0)], n=1000,
+                  ystart={0.26: 0.42, -0.26: 0.42}, short=set())
+    for _ in range(10):
+        k._camera_wide(narrow)                          # 1차선 노란 선(+-0.26): 그대로
+    assert k.s == -1.31
+    u = 0.80
+    wide = dict(th=0.0, lines=[(u, 150, 1.0), (-u, 150, 1.0)], n=1000, ystart={u: 0.42, -u: 0.42}, short=set())
+    for _ in range(S.WIDE_FRAMES):
+        k._camera_wide(wide)
+    assert k.s == S.WIDE_S and '위치 고침' in k.message

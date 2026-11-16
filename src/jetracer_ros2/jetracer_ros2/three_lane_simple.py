@@ -136,6 +136,13 @@ ISLAND_CONFIRM = 3                   # 카메라로 섬을 이만큼 연속 비�
 ISLAND_MIN_VIEW = 0.55               # 섬 앞끝이 이보다 가까우면 카메라 값을 새로 받지 않는다 (카메라 사각)
 ARM_AFTER_M = 1.4                    # M7 시작 후 이만큼 간 뒤부터 진입을 찾는다 (그 전은 코너)
 ENTRY_FRAMES = 3
+# 진입 위치 확인: 1차선 구간(시작선 전)의 바깥 노란 선은 +-0.26, 3차선은 +-0.80. 시작선 전이라고 믿는데 화면 아래부터 +-0.80 노란 선이
+# 보이면 이미 3차선 안이다 (11/16 1116_212316: 시작선 0.3 m 앞에 놓았는데 첫 점선을 못 보고 다음 점선으로 재서 s -1.31 ->
+# 차로를 못 옮기고 가운데 장애물 앞에서 섰다 후진만 되풀이)
+WIDE_U = (0.65, 0.95)                # 3차선 바깥 노란 선으로 볼 옆 위치 [m]
+WIDE_YSTART = 0.50                   # 화면 아래(약 0.42 m)부터 보이는 선만
+WIDE_FRAMES = 5
+WIDE_S = 0.25                        # 그때 고칠 위치 (CHANGE_FROM_S 보다 조금 뒤)
 ENTRY_WAIT_SEC = 2.0                 # 단독 시험(lane3): 켜고 이 시간 안에 못 들어가면 가정하고 시작
 ENTRY_WAIT_M = 1.2                   # 대회(매니저): M7 시작 후 ARM_AFTER_M + 이 거리 안에 못 들어가면 가정하고 시작
 ENTRY_TH_MAX = math.radians(8.0)     # 진입 방향도 이 안으로 자른다 (기본 주행이 1차선을 곧게 따라오는 중)
@@ -216,6 +223,7 @@ class SimpleThreeLane:
         self.read_timeout = False
         self._now = 0.0
         self.message = ''
+        self._wide_n = 0
         self._guard_hit = False
         self.change_from = 1
         self.state = 'KEEP'
@@ -326,6 +334,21 @@ class SimpleThreeLane:
             if acc >= half:
                 break
         self.c += LINE_GAIN * (cc - self.c)
+
+    def _camera_wide(self, obs):
+        """시작선 전이라고 믿는데 3차선 바깥 노란 선(+-0.80)이 화면 아래부터 보이면 위치를 WIDE_S 로 고친다."""
+        if self.s >= WIDE_S or not obs or abs(self.th) > math.radians(15.0):
+            self._wide_n = 0
+            return
+        ystart = obs.get('ystart') or {}
+        wide = any(ratio >= 0.7 and n >= 80 and ystart.get(u, 9.9) <= WIDE_YSTART
+                   and WIDE_U[0] <= abs(self.c + T._shrink(u)) <= WIDE_U[1]
+                   for u, n, ratio in obs['lines'])
+        self._wide_n = self._wide_n + 1 if wide else 0
+        if self._wide_n >= WIDE_FRAMES:
+            self.message = (f'[3차선S] 위치 고침: 시작선 {self.s:+.2f} m 라고 봤는데 3차선 바깥 노란 선이 보임 -> {WIDE_S:+.2f} m')
+            self.s = WIDE_S
+            self._wide_n = 0
 
     def _camera_island(self, obs):
         """카메라로 섬 위치를 잡는다. 섬 앞끝이 보이면 그 위치, 섬 옆을 지날 때 섬 뒤끝이 보이면 (뒤끝 - 섬 길이).
@@ -861,6 +884,7 @@ class SimpleThreeLane:
         self._camera_heading(obs)
         self._camera_lines(obs)
         self._camera_island(obs)
+        self._camera_wide(obs)
         self._camera_walls(obs)
         front = T.LIDAR_MAX
         if scan is not None:
