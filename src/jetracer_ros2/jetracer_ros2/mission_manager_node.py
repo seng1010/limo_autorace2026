@@ -276,7 +276,8 @@ class MissionManagerNode(Node):
 
     def _yolo_callback(self, msg):
         event = msg.data
-        if self._active == 'M5' and event == 'slow_sign':
+        if (self._active == 'M5' and event == 'slow_sign'
+                and not self._m5_section_slow_done):
             self._slow = True
         if event == 'pedestrian':
             # M3 직전(M6 구간)에서 먼저 보일 수 있어서 미션과 상관없이 위치를 기억
@@ -299,6 +300,16 @@ class MissionManagerNode(Node):
         # 서행 구간 속도 제한 (section_node). 0 이하 = 제한 없음. 1초 넘게 안 오면 무시한다.
         self._section_limit = float(msg.data) if msg.data > 0.0 else None
         self._section_limit_ns = self.get_clock().now().nanoseconds
+        if self._active == 'M5' and math.isfinite(msg.data):
+            if msg.data > 0.0:
+                self._m5_section_slow_seen = True
+            elif self._m5_section_slow_seen and not self._m5_section_slow_done:
+                # section_node owns the existing odom/line-based slow zone.
+                # Its explicit end must also release the YOLO sign latch.
+                # An initial -1 or a missing message is NOT a zone completion.
+                self._m5_section_slow_done = True
+                self._slow = False
+                self.get_logger().info('M5 slow zone ended: release sign limit; resume normal lane speed')
 
     def _stop_line_callback(self, msg):
         distance = msg.data
@@ -370,6 +381,8 @@ class MissionManagerNode(Node):
     def _enter_mission(self, mission, initial=False):
         self._mission_enter_ns = self.get_clock().now().nanoseconds
         self._slow = False
+        self._m5_section_slow_seen = False
+        self._m5_section_slow_done = False
         self._blocked = False
         self._traffic = 'unknown'
         self._traffic_ns = 0
