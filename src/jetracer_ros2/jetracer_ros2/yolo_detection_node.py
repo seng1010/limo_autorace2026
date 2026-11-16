@@ -19,6 +19,8 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
+from jetracer_ros2.yolo_event_tracker import StableEventTracker
+
 
 class YoloDetectionNode(Node):
     def __init__(self):
@@ -39,8 +41,7 @@ class YoloDetectionNode(Node):
             self.declare_parameter(name, value)
         self._model = None
         self._last_inference = 0.0
-        self._candidate = ''
-        self._candidate_count = 0
+        self._tracker = StableEventTracker(self.get_parameter('confirm_frames').value)
         self._load_model()
         self.detections_pub = self.create_publisher(String, 'perception/detections', 10)
         self.event_pub = self.create_publisher(String, 'mission/yolo_event', 10)
@@ -125,20 +126,12 @@ class YoloDetectionNode(Node):
         return aliases.get(label, label if label.startswith(('traffic_', 'sign_')) else '')
 
     def _publish_stable_event(self, detections):
-        if not detections:
-            self._candidate = ''
-            self._candidate_count = 0
-            return
-        best = max(detections, key=lambda item: item['confidence'])
-        event = self._semantic_event(best['label'])
-        if not event:
-            return
-        if event == self._candidate:
-            self._candidate_count += 1
-        else:
-            self._candidate = event
-            self._candidate_count = 1
-        if self._candidate_count >= self.get_parameter('confirm_frames').value:
+        """클래스마다 따로 세서, confirm_frames 연속으로 보인 것을 각각 발행한다.
+
+        한 프레임에 여러 종류가 보여도 서로 묻히지 않는다 (예: 보행자 표지판 + 신호등).
+        """
+        events = (self._semantic_event(det['label']) for det in detections)
+        for event in self._tracker.update(events):
             self.event_pub.publish(String(data=event))
 
 

@@ -11,6 +11,9 @@ import math
 WHEELBASE = 0.2   # 앞뒤 바퀴 거리 [m]
 TRACK = 0.172     # 좌우 바퀴 거리 [m]
 # limo_base가 하드웨어로 보내기 전에 이 값으로 최종 클램프한다 (약 28도).
+# [11/14 실차 측정] limo_base.launch.py 의 /cmd_vel 경로는 이 값으로 자른 뒤 2.47 로 나눠 보내서, 차는 최대 11.3도
+# (회전반경 약 1.05m) 밖에 못 꺾었다. race 브랜치는 limo_ackerman_base 드라이버 + 변환 노드(simple_lane bridge)를
+# 쓰며, 그때 실제 최대 조향은 안쪽 바퀴 기준 약 25도 (회전반경 약 0.51m) 이다. 이 값보다 큰 조향 명령은 25도로 잘린다.
 HARDWARE_MAX_INNER_ANGLE = 0.48869
 
 
