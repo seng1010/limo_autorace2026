@@ -83,6 +83,8 @@ class StopLineNode(Node):
                           else '보정 전 (distance_scale_m 선형식)')
             + (', odom 사각지대 추적 ON' if self.use_odom else ''))
 
+        from jetracer_ros2.m8_observers import M8StopLineObserver
+        self.m8_observer = M8StopLineObserver(self, self.model, self.config)
         self.distance_pub = self.create_publisher(Float32, 'mission/stop_line_distance', 10)
         self.detected_pub = self.create_publisher(Bool, 'mission/stop_line_detected', 10)
         self.debug_pub = self.create_publisher(CompressedImage, '/stop_line/debug/compressed', 2)
@@ -105,6 +107,7 @@ class StopLineNode(Node):
         image = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             return
+        self.m8_observer.update(image, msg.header)
         detection = detect_stop_line(image, self.config)
         visual = self.model.distance(detection.row_ratio) if detection else None
         distance = self.tracker.update(visual) if self.use_odom else visual

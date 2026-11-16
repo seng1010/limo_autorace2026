@@ -1685,6 +1685,11 @@ def run_ros(mode, topic, record=False):
             self.drive = mode == 'drive'
             self.calib = mode == 'calib'
             self.pub = self.create_publisher(Twist, topic, 10) if self.drive else None
+            import importlib.util
+            self.m8_observer = None
+            if self.drive and importlib.util.find_spec('jetracer_ros2') is not None:
+                from jetracer_ros2.m8_observers import M8LaneObserver
+                self.m8_observer = M8LaneObserver(self, CAMERA_FORWARD_OFFSET)
             self.K = self.D = None
             self.maps = None
             self.maps_size = None
@@ -1908,6 +1913,8 @@ def run_ros(mode, topic, record=False):
             if self.drive and now - self.t_start < RESET_SEC:
                 cmd = (0.0, 0.0, 'WAIT', '시작 전 조향 초기화')
             self.send(cmd[0], cmd[1])
+            if self.m8_observer is not None:
+                self.m8_observer.update(msg.header.stamp, res, cmd, now - self.t_start < RESET_SEC)
             if self.rec_dir is not None:
                 self.rec_n += 1
                 cv2.imwrite(os.path.join(self.rec_dir, f'{self.rec_n:05d}.jpg'), image,
