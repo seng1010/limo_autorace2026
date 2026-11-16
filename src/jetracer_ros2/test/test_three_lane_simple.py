@@ -478,3 +478,18 @@ def test_entry_position_fixed_when_three_lane_yellow_seen():
     for _ in range(S.WIDE_FRAMES):
         k._camera_wide(wide)
     assert k.s == S.WIDE_S and '위치 고침' in k.message
+
+
+def test_wall_ignores_yellow_line_where_no_yellow_should_be():
+    # 왼쪽 차로(c +0.55)에서 오른쪽 0.28 m 에 '노란 선'이 보임 (그 자리는 흰 점선) -> 그걸 피해 왼쪽으로 꺾으면 안 된다
+    k = core_at(0.55)
+    k.lane = 0
+    obs = dict(th=0.0, lines=[(-0.28, 150, 1.0)], n=1000, ystart={-0.28: 0.42}, short=set(), edges=[])
+    out = k.step_obs(obs, (0.0, 0.0, 0.0), scan_with([]), 0, now=0.0)
+    assert out['wall_text'] == '' and out['steer'] <= 0.05
+    # 진짜 왼쪽 바깥 노란 선(0.20 m 왼쪽, 도로 +0.75)에 다가가면 오른쪽으로 꺾는다
+    k = core_at(0.55, th=-0.35)
+    k.lane = 0
+    obs = dict(th=-0.35, lines=[(0.20, 150, 1.0)], n=1000, ystart={0.20: 0.42}, short=set(), edges=[])
+    out = k.step_obs(obs, (0.0, 0.0, 0.0), scan_with([]), 0, now=0.0)
+    assert out['wall_text'] != '' and out['steer'] < 0.0

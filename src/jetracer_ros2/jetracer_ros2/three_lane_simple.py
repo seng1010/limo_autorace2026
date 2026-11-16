@@ -110,6 +110,8 @@ LOOKAHEAD_CHANGE = 0.40
 HEADING_MAX = math.radians(30.0)     # 옮길 때 도로와 이 이상 틀지 않는다 (40도에서 노란 선을 넘음 - 11/16 실차 1116_235151: 42도)
 ARRIVE_RADIUS = 0.75                 # 바깥 차로로 옮길 때, 이 반지름으로 펴면 목표 차로 가운데에서 곧아지는 각도까지만 튼다 (회전반경 0.51 + 지연)
 ARRIVE_MIN_HEADING = math.radians(10.0)
+WALL_OUTER_MIN = 0.55                # 이 바깥(도로 가운데에서)에 있는 노란 선만 바깥 노란 선으로 보고 벽으로 쓴다
+WALL_TOWARD_MAX_C = 0.45             # 이보다 바깥에 있을 때는 노란 선 쪽으로 꺾는 벽 반응을 쓰지 않는다
 TIGHT_BELOW = 0.90                   # 앞 장애물이 이보다 가까운 채로 옮기기 시작하면 급하게 (가까운 목표점, 큰 각도)
 LOOKAHEAD_TIGHT = 0.36
 HEADING_TIGHT = math.radians(30.0)  # 급할 때도 같게 (45도면 펴는 동안 옆으로 15 cm 더 밀려 노란 선을 넘는다)
@@ -932,7 +934,16 @@ class SimpleThreeLane:
                     way = LANE_CENTER[self.lane] - self.c
                     cross = tuple(u for u, n, ratio in obs['lines']
                                   if ratio >= 0.75 and u * way > 0.0 and abs(self.c + T._shrink(u)) < T.ISLAND_INSIDE)
-                wall = T.yellow_wall(obs['lines'], obs['th'], obs.get('ystart'), skip=cross)
+                # 벽으로 볼 노란 선은 '있을 자리'에 있는 것만: 바깥 노란 선(+-0.80) 근처이거나, 섬 옆에서 섬 테두리(+-0.27).
+                # 그 밖(예: 왼쪽 차로에서 오른쪽에 보이는 '노란 선')을 벽으로 보면 진짜 노란 선 쪽으로 꺾는다
+                # (11/16 실차 1116_000047: 왼쪽 차로에서 오른쪽 '노란 선'을 피해 왼쪽으로 10도씩 꺾다 왼쪽 노란 선을 넘음)
+                near_island = self.island_at - 0.6 <= self.s <= self.island_at + ISLAND_LEN + 0.3
+                odd = tuple(u for u, n, ratio in obs['lines']
+                            if ratio >= 0.75 and not (abs(self.c + T._shrink(u)) >= WALL_OUTER_MIN
+                                                      or (near_island and abs(self.c + T._shrink(u)) <= T.ISLAND_INSIDE + 0.1)))
+                wall = T.yellow_wall(obs['lines'], obs['th'], obs.get('ystart'), skip=cross + odd)
+                if wall is not None and wall[0] * self.c > 0.0 and abs(self.c) > WALL_TOWARD_MAX_C:
+                    wall = None        # 이미 바깥 차로 바깥쪽에 있는데 더 바깥(노란 선 쪽)으로 꺾으라는 벽은 틀린 것
                 if wall is not None:
                     steer, wall_text = wall
         return dict(v=speed, steer=steer, state=self.state, reason=self.reason, wall_text=wall_text)
