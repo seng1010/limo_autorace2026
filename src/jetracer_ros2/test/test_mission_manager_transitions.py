@@ -125,7 +125,61 @@ def step(n, dt=.05, *, line=None, speed=0., light=None, refresh_odom=True):
     n._control_tick()
 
 
-@pytest.mark.parametrize('mission', ['M5', 'M7', 'M2', 'M8', 'M1', 'M4'])
+@pytest.mark.parametrize('mission', ['M5', 'M6'])
+def test_pre_m7_lane_commands_do_not_require_manager_odom(modules, mission):
+    n = owner(modules, mission)
+    n._odom_ns = 0
+    step(n, refresh_odom=False)
+    assert n.cmd_pub.messages[-1].linear.x == .25
+    assert n.cmd_pub.messages[-1].angular.z == .10
+    assert n.m8._m8_phase_sent == 'off'
+    n._speed_limit_callback(NS(data=.13))
+    step(n, refresh_odom=False)
+    cmd = n.cmd_pub.messages[-1]
+    assert cmd.linear.x == .13
+    assert cmd.angular.z / cmd.linear.x == pytest.approx(.10 / .25)
+    assert n._active == mission
+
+
+@pytest.mark.parametrize('mission', ['M5', 'M6', 'M3', 'M7', 'M2', 'M1', 'M4'])
+def test_cone_proposals_cannot_override_unarmed_lane_missions(modules, mission):
+    n = owner(modules, mission, m8_entry_arm_after_m=-1.,
+              m8_entry_arm_near_line_m=.45, m8_entry_precheck_m=.55)
+    lane(n, .22, -.40)
+    before = len(n.cmd_pub.messages)
+    n.m8._store_cone_cmd(proposal(n, .10, .15))  # deliberately opposite steering
+    n.m8._store_exit_lane(proposal(n, .10, .12))
+    assert len(n.cmd_pub.messages) == before  # observers do not own final output
+    n._control_tick()
+    cmd = n.cmd_pub.messages[-1]
+    assert (cmd.linear.x, cmd.angular.z) == (.22, -.40)
+    assert n._active == mission
+
+
+def test_m8_cone_steering_is_not_added_to_or_overwritten_by_lane(modules):
+    n = owner(modules, 'M8')
+    lane(n, .22, -.40)
+    n.m8._store_cone_cmd(proposal(n, .10, .15))
+    for v, w in ((.22, -.40), (.25, .40), (0., 0.)):
+        lane(n, v, w)
+        n._control_tick()
+        cmd = n.cmd_pub.messages[-1]
+        assert (cmd.linear.x, cmd.angular.z) == (.10, .15)
+    n.m8._store_cone_cmd(proposal(n, 0., 0.))
+    lane(n, .22, -.40)
+    n._control_tick()
+    cmd = n.cmd_pub.messages[-1]
+    assert (cmd.linear.x, cmd.angular.z) == (0., 0.)  # no blind lane fallback in cones
+    n._advance('test: leave M8')  # exit geometry is covered by the full handoff simulation
+    assert n._active == 'M1'
+    lane(n, .22, -.40)
+    n.m8._store_cone_cmd(proposal(n, .10, .15))
+    n._control_tick()
+    cmd = n.cmd_pub.messages[-1]
+    assert (cmd.linear.x, cmd.angular.z) == (.22, -.40)
+
+
+@pytest.mark.parametrize('mission', ['M5', 'M3', 'M7', 'M2', 'M8', 'M1', 'M4'])
 def test_estop_blocks_events_callbacks_and_output_until_explicit_clear(modules, mission):
     n = owner(modules, mission)
     event(n, 'ESTOP')
@@ -173,21 +227,98 @@ def test_stale_green_cannot_authorize_arrival(modules):
     assert n._fresh_traffic(n.now) == 'unknown'
 
 
-@pytest.mark.parametrize('mission', ['M1', 'M3'])
-def test_missing_odom_never_confirms_stop_or_completes_wait(modules, mission):
-    n = owner(modules, mission, m3_trigger='line', m1_trigger='light_or_line', m1_skip_lines=0)
+def test_m1_missing_odom_never_confirms_stop_or_completes_wait(modules):
+    n = owner(modules, 'M1', m1_trigger='light_or_line', m1_skip_lines=0)
     for _ in range(10):
         step(n, .1, line=.005, light='red')
-    controller = n._m1 if mission == 'M1' else n._m3
+    controller = n._m1
     assert controller.state == 'hold'
     n.now += 600_000_000  # beyond the configured 0.5-second freshness window
     for _ in range(50):
         step(n, .2, line=.005, light='green', refresh_odom=False)
-    assert n._active == mission and controller.state == 'stopping'
+    assert n._active == 'M1' and controller.state == 'stopping'
     assert n._measured_speed(n.now) is None
     assert n.cmd_pub.messages[-1].linear.x == 0.
     step(n, line=.005, light='red')
     assert controller.state == 'stopping'  # renewed 0.3-second stop confirmation
+
+
+@pytest.mark.parametrize('odom_pattern', ['continuous', 'single_gap', 'repeated_gaps', 'absent'])
+def test_m3_main_dwell_is_not_restarted_by_odom_gaps(modules, odom_pattern):
+    """M3 retains main's command-speed fallback; it is NOT measured-stop proof."""
+    n = owner(modules, 'M3', m3_trigger='line')
+    start = n.now
+    if odom_pattern == 'absent':
+        n._odom_ns = 0
+    first_hold = None
+    for i in range(1, 101):
+        elapsed = i * .05
+        refresh = (odom_pattern == 'continuous'
+                   or odom_pattern == 'single_gap' and not 3.0 <= elapsed < 3.8
+                   or odom_pattern == 'repeated_gaps' and i % 20 == 0)
+        step(n, .05, line=.005, refresh_odom=refresh)
+        if n._m3.state == 'hold':
+            if first_hold is None:
+                first_hold = n._m3.hold_start
+            assert n._m3.hold_start == first_hold
+        if n._m3.state == 'go':
+            break
+        assert n.cmd_pub.messages[-1].linear.x == 0.
+    assert first_hold is not None and n._m3.state == 'go'
+    assert (n.now - start) / 1e9 == pytest.approx(3.9)
+    assert n.now / 1e9 - first_hold >= n._m3.config.hold_sec
+    assert n.cmd_pub.messages[-1].linear.x == .25
+    assert n.cmd_pub.messages[-1].angular.z == .10
+    assert n._active == 'M3'  # go is not completion: still needs measured distance
+    n._odom.s += .51
+    step(n)
+    assert n._active == 'M7' and n.cmd_pub.messages[-1].linear.x == 0.
+    step(n)
+    assert n.cmd_pub.messages[-1].linear.x == .25
+
+
+def test_m3_fallback_is_local_and_fresh_measured_motion_wins(modules):
+    n = owner(modules, 'M3', m3_trigger='line')
+    for _ in range(10):
+        step(n, .1, line=.005, speed=.03)
+    assert n._m3.state == 'stopping'  # zero command does not override fresh motion
+    for _ in range(100):
+        step(n, .05, line=.005, speed=0.)
+        if n._m3.state == 'go':
+            break
+    assert n._m3.state == 'go'
+    n._odom.s += .51
+    step(n)
+    assert n._active == 'M7'
+    step(n, .6, refresh_odom=False)
+    assert n._measured_speed(n.now) is None  # no global command-speed fallback
+
+
+def test_m3_missing_odom_does_not_stop_ordinary_approach(modules):
+    n = owner(modules, 'M3', m3_trigger='line')
+    n._odom_ns = 0
+    for _ in range(10):
+        step(n, .1, line=-1., refresh_odom=False)
+        assert n._m3.state == 'approach'
+        assert n.cmd_pub.messages[-1].linear.x == .25
+        assert n.cmd_pub.messages[-1].angular.z == .10
+
+
+def test_m3_explicit_estop_still_restarts_stop_confirmation(modules):
+    n = owner(modules, 'M3', m3_trigger='line')
+    for _ in range(20):
+        step(n, .1, line=.005)
+    assert n._m3.state == 'hold'
+    event(n, 'ESTOP')
+    for _ in range(50):
+        step(n, .1, line=.005, refresh_odom=False)
+    assert n._m3.state == 'stopping' and n.cmd_pub.messages[-1].linear.x == 0.
+    event(n, 'ESTOP_CLEAR')
+    step(n, .1, line=.005)
+    assert n._m3.state == 'stopping'
+    for _ in range(40):
+        step(n, .1, line=.005)
+    assert n._m3.state == 'go'
 
 
 def test_invalid_or_future_inputs_do_not_create_motion(modules):

@@ -20,7 +20,8 @@ from launch_ros.actions import Node
 #     ros2 run jetracer_ros2 simple_lane drive --topic inference/cmd_vel
 #
 # 3차선(M7):
-#   기본은 단순 버전(three_lane_simple.py). 기존 three_lane.py 로 비교하려면  lane3:=full
+#   기본은 첫 전체주행(4b20bee)의 단순 버전(three_lane_simple.py).
+#   기존 three_lane.py 는 lane3:=full, 새 3차선+갈림길은 lane3:=gap 으로 명시적으로 선택.
 
 
 def generate_launch_description():
@@ -33,7 +34,8 @@ def generate_launch_description():
             description='false: 차선 노드를 이 launch 에서 켜지 않음 (따로 켤 때)'),
         DeclareLaunchArgument(
             'lane3', default_value='simple',
-            description='full: 기존 3차선(three_lane.py) / simple: 단순 버전(three_lane_simple.py)'),
+            choices=['simple', 'full', 'gap'],
+            description='simple: 첫 영상 기준 기본 / full: 기존 3차선 / gap: 새 3차선+갈림길 선택 실행'),
         DeclareLaunchArgument(
             'section', default_value='true',
             description='false: 구간 전환 노드(section_node)를 켜지 않음'),
@@ -57,13 +59,25 @@ def generate_launch_description():
         ),
         Node(
             package='jetracer_ros2',
-            executable='lane3_gap',
+            executable='simple_lane',
             arguments=['drive', '--topic', 'inference/cmd_vel', ['l3', LaunchConfiguration('lane3')]],
             output='screen',
             emulate_tty=True,
             condition=IfCondition(PythonExpression([
                 "'", LaunchConfiguration('lane'), "' == 'true' and '",
-                LaunchConfiguration('team_lane'), "' != 'true'"])),
+                LaunchConfiguration('team_lane'), "' != 'true' and '",
+                LaunchConfiguration('lane3'), "' != 'gap'"])),
+        ),
+        Node(
+            package='jetracer_ros2',
+            executable='lane3_gap',
+            arguments=['drive', '--topic', 'inference/cmd_vel'],
+            output='screen',
+            emulate_tty=True,
+            condition=IfCondition(PythonExpression([
+                "'", LaunchConfiguration('lane'), "' == 'true' and '",
+                LaunchConfiguration('team_lane'), "' != 'true' and '",
+                LaunchConfiguration('lane3'), "' == 'gap'"])),
         ),
         Node(
             package='jetracer_ros2',

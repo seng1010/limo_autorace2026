@@ -390,9 +390,23 @@ class MissionManagerNode(Node):
             self._odom_warned = False
             return self._odom_speed
         if not self._odom_warned:
-            self.get_logger().warn('odom 없음/만료 — 실측 속도 미확인, M1·M3 정지 확인 대기')
+            self.get_logger().warn('odom 없음/만료 — 실측 속도 미확인')
             self._odom_warned = True
         return None
+
+    def _m3_stop_speed(self, now_ns):
+        """M3만 기존 main 정책 복원: odom 공백에는 마지막 출력 속도로 대신한다.
+
+        명령 0은 실측 정지의 증거가 아니다. 이 호환 동작을 M1 신호 출발이나
+        M4 주차 허가에 재사용하지 않는다. ESTOP의 정지 확인 초기화도 유지한다.
+        """
+        if self._odom_fresh(now_ns):
+            self._odom_warned = False
+            return self._odom_speed
+        if not self._odom_warned:
+            self.get_logger().warn('M3 odom 없음/만료 — 기존 main처럼 마지막 명령 속도로 정지 판단을 대신함')
+            self._odom_warned = True
+        return self._last_out_speed
 
     def _reset_stop_confirmation(self):
         if self._active == 'M4':
@@ -443,7 +457,7 @@ class MissionManagerNode(Node):
 
     def _m3_tick(self, now_ns):
         stop_line = self._fresh_stop_line(now_ns)
-        speed = self._measured_speed(now_ns)
+        speed = self._m3_stop_speed(now_ns)
         decision = self._m3.update(now_ns / 1e9, stop_line, speed, self._odom.s,
                                    last_sign_s=self._last_pedestrian_s)
         return self._report(decision, stop_line, speed, 'M3 정지·3초 대기·출발 완료',
@@ -572,7 +586,9 @@ class MissionManagerNode(Node):
             return
         speed_limit = None
         if self._active in ('M1', 'M3'):
-            if not self._odom_fresh(now):
+            # M1은 실측 정지 확인을 유지한다. M3는 기존 main의 명령 속도
+            # 대체를 사용하며 odom 공백만으로 이미 센 횡단보도 대기를 버리지 않는다.
+            if self._active == 'M1' and not self._odom_fresh(now):
                 self._reset_stop_confirmation()
                 self._publish(Twist())
                 self._debug('wait_odom')
