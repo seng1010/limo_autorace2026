@@ -10,7 +10,7 @@ from std_msgs.msg import Bool, Float32, Header, String
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from jetracer_ros2.m8_entry import (
     M8_APPROACH_RISK_TOPIC, M8_COMMAND_TIMEOUT, M8_CONTROL_TIMING_TOPIC,
-    M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
+    M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC, M8_EXIT_LANE_EVIDENCE_TOPIC,
     M8_EXIT_LINE_TOPIC, M8_EXIT_PROGRESS_TOPIC, M8_PHASE_TOPIC, M8_PARTIAL_ENTRY_TOPIC, M8_RECOVERY_COMMAND_TOPIC,
     MIN_M8_SPEED, M8EntryGate, M8ExitGate, M8PartialEntryGate, M8RecoveryBudget,
     m8_entry_policy, m8_phase, select_m8_command)
@@ -47,6 +47,7 @@ class M8Control:
         self._m8_phase_sent = None
         self._m8_exit_handoff_ns = 0
         self._m8_exit_progress = None
+        self._exit_lane_evidence = None
         self._m8_entry = M8EntryGate(p('m8_entry_pass_margin_m'), p('m8_entry_search_limit_m'))
         self._m8_partial = M8PartialEntryGate()
         self._m8_exit = M8ExitGate(p('m8_exit_min_gap_m'), p('m8_exit_pass_margin_m'),
@@ -88,6 +89,19 @@ class M8Control:
         self.node.create_subscription(PointStamped, M8_EXIT_LINE_TOPIC, self._m8_exit_line_callback, 1)
         self.node.create_subscription(PointStamped, M8_EXIT_PROGRESS_TOPIC, self._store_exit_progress, 1)
         self.node.create_subscription(PointStamped, M8_PARTIAL_ENTRY_TOPIC, self._m8_partial_callback, 1)
+        self.node.create_subscription(PointStamped, M8_EXIT_LANE_EVIDENCE_TOPIC, self._store_exit_evidence, 1)
+
+    def _store_exit_evidence(self, msg):
+        if msg.header.frame_id == 'rear_axle':
+            self._exit_lane_evidence = msg
+
+    def _exit_aligned(self, now):
+        msg = self._exit_lane_evidence
+        if msg is None or msg.point.x != 1. or msg.point.y != 1.:
+            return False
+        stamp = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+        return bool(stamp >= self._m8_exit_handoff_ns and
+                    0 <= (now-stamp)/1e9 <= M8_COMMAND_TIMEOUT)
 
     def _m8_partial_callback(self, msg):
         n = self.node
@@ -192,7 +206,7 @@ class M8Control:
         self._cone_cmd = msg.twist.linear.x, msg.twist.angular.z
         if self.node._active == 'M2' and self._m8_entry.started_s is not None and self._cone_cmd[0] > 0:
             self.node._control_tick()
-        elif self.node._active == 'M8' and not self._m8_exit.owns_lane:
+        elif self.node._active == 'M8':
             self._publish_m8_control(self._cone_rx_ns, trigger='cone_rx')
 
 
@@ -323,19 +337,26 @@ class M8Control:
                     if self._exit_lane_stamp_ns > 0 else float('inf'))
         (lv, lw), lane_reason = select_m8_command(
             self._exit_lane_cmd, lane_age, self._m8_operator_stop)
-        exit_state = self._m8_exit.decide(self.node._odom.s, self._odom_fresh(now), lv > 0,
-                                        self._cones_clear(now))
+        aligned = self._exit_aligned(now)
+        # Do not throw away a usable cone route merely because a camera
+        # connector can be drawn. Prefer it until race agrees with the road
+        # identity; use the checked connector if cones no longer offer motion.
+        prefer_cone = v > 0 and not aligned
+        exit_state = self._m8_exit.decide(self.node._odom.s, self._odom_fresh(now), lv > 0 and not prefer_cone,
+                                        self._cones_clear(now), lane_aligned=aligned)
         if exit_state == 'complete':
             self.node._advance('M8 exit passed; LiDAR-checked lane guidance completed')
             return
         if exit_state == 'exit_lane':
             self._set_m8_phase('exit_lane')
             v, omega, source, reason = lv, lw, 'lane', 'verified_exit_lane'
+        elif exit_state == 'wait_exit_lane' and v > 0:
+            source, reason = 'cone', 'exit_unconfirmed_keep_cone'
         elif exit_state in ('wait_exit_lane', 'wait_odom'):
             v, omega, source = 0.0, 0.0, 'stop'
             reason = ('operator_stop' if self._m8_operator_stop else
                       'exit_wait_odom' if exit_state == 'wait_odom' else f'exit_lane:{lane_reason}')
-        exit_input = self._m8_exit.owns_lane
+        exit_input = source == 'lane' or (source == 'stop' and self._m8_exit.owns_lane)
         stamp_ns = self._exit_lane_stamp_ns if exit_input else self._cone_stamp_ns
         rx_ns = self._exit_lane_rx_ns if exit_input else self._cone_rx_ns
         published_ns = self.node.get_clock().now().nanoseconds
@@ -409,6 +430,7 @@ class M8Control:
             self._m8_last_output=''
             self._m8_exit_handoff_ns=0
             self._m8_exit_progress=None
+            self._exit_lane_evidence=None
         else:
             self._set_exit_check(False)
         watch_entry = mission == 'M2' and self._m8_near_line > 0 and self._m8_arm_after != 0

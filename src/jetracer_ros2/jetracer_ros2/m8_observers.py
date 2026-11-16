@@ -166,21 +166,35 @@ def detect_m8_exit_stop_line(image: np.ndarray) -> Optional[StopLineDetection]:
 
 class M8LaneObserver:
     def __init__(self,node,forward_offset):
-        from geometry_msgs.msg import PolygonStamped, TwistStamped
-        from jetracer_ros2.m8_entry import OBSERVED_LANE_TOPIC,M8_LANE_PATH_TOPIC,M8_LANE_HINT_TOPIC
+        from geometry_msgs.msg import PointStamped, PolygonStamped, TwistStamped
+        from std_msgs.msg import String
+        from rclpy.qos import QoSProfile, DurabilityPolicy
+        from jetracer_ros2.m8_entry import (OBSERVED_LANE_TOPIC,M8_LANE_PATH_TOPIC,M8_LANE_HINT_TOPIC,
+                                           M8_EXIT_LANE_EVIDENCE_TOPIC,M8_PHASE_TOPIC)
+        from jetracer_ros2.m8_exit_lane import ExitLaneResolver
         self.node,self.forward_offset=node,forward_offset
         self.command=node.create_publisher(TwistStamped,OBSERVED_LANE_TOPIC,1)
         self.path=node.create_publisher(PolygonStamped,M8_LANE_PATH_TOPIC,1)
         self.hint=node.create_publisher(TwistStamped,M8_LANE_HINT_TOPIC,1)
+        self.evidence=node.create_publisher(PointStamped,M8_EXIT_LANE_EVIDENCE_TOPIC,1)
+        self.phase='off'
+        self.resolver=ExitLaneResolver(forward_offset)
+        node.create_subscription(String,M8_PHASE_TOPIC,self._phase,
+                                 QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
-    def update(self,stamp,result,cmd,resetting=False):
-        from geometry_msgs.msg import Point32,PolygonStamped,TwistStamped
+    def _phase(self,msg):
+        self.phase=msg.data
+        if self.phase not in ('cone','exit_prepare','exit_lane'):
+            self.resolver.reset()
+
+    def update(self,stamp,result,cmd,resetting=False,*,image=None,pose=None,geometry=None):
+        from geometry_msgs.msg import Point32,PointStamped,PolygonStamped,TwistStamped
         from jetracer_ros2.m8_entry import MIN_M8_SPEED,M8_LANE_PATH_FRAME
         from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
         if not any(p.get_subscription_count() for p in (self.command,self.path,self.hint)):
             return
-        observed,path,hint=TwistStamped(),PolygonStamped(),TwistStamped()
-        for message in (observed,path,hint):
+        observed,path,hint,evidence=TwistStamped(),PolygonStamped(),TwistStamped(),PointStamped()
+        for message in (observed,path,hint,evidence):
             message.header.stamp=stamp
             message.header.frame_id=M8_LANE_PATH_FRAME
         if result is not None and not resetting:
@@ -194,6 +208,25 @@ class M8LaneObserver:
                                      for x,y in zip(forward,right)]
                 hint.twist.linear.x=MIN_M8_SPEED
                 hint.twist.angular.z=float(inner_angle_to_omega(result['raw_angle'],MIN_M8_SPEED))
+            if self.phase in ('cone','exit_prepare','exit_lane'):
+                exit_path=self.resolver.update(image,result,geometry,pose,stamp.sec+stamp.nanosec*1e-9)
+                evidence.point.x=float(exit_path['valid'])
+                evidence.point.y=float(exit_path['aligned'] and cmd[2]=='TRACK'
+                                       and abs(cmd[1]-exit_path['angle']) <= math.radians(10.))
+                # x: role-verified live path; y: ordinary race path agrees.
+                if self.phase in ('exit_prepare','exit_lane'):
+                    observed.twist.linear.x=observed.twist.angular.z=0.
+                    path.polygon.points=[]
+                    hint.twist.linear.x=hint.twist.angular.z=0.
+                    if exit_path['valid']:
+                        path.polygon.points=[Point32(x=float(x),y=float(y)) for x,y in exit_path['path']]
+                        hint.twist.linear.x=MIN_M8_SPEED
+                        hint.twist.angular.z=float(inner_angle_to_omega(exit_path['angle'],MIN_M8_SPEED))
+                        # Even when the race path agrees, let the existing
+                        # LiDAR connector check the proposed exit geometry.
+        elif self.phase in ('cone','exit_prepare','exit_lane'):
+            self.resolver.reset()
+        self.evidence.publish(evidence)
         self.command.publish(observed)
         self.path.publish(path)
         self.hint.publish(hint)

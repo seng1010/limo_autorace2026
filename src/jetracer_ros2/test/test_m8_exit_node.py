@@ -44,6 +44,9 @@ def make_node(mod):
     lane=Stamped();lane.header.stamp=NS(sec=10,nanosec=0)
     lane.twist.linear.x=.2;lane.twist.angular.z=.1
     n.exit_lane=lane;n.lane_hint=lane
+    n.exit_evidence=Stamped()
+    n.exit_evidence.header.stamp=NS(sec=10,nanosec=0)
+    n.exit_evidence.point.x=1.
     n.lane_center=(10_000_000_000,[(.3+i*.01,.1) for i in range(20)])
     return n
 
@@ -87,3 +90,14 @@ def test_progress_is_stamped_evidence_not_a_command(node_module):
     assert not n.exit_cmd_pub.messages
     n._publish_exit_progress()
     assert n.exit_progress_pub.messages[-1].point.x==0.
+
+
+@pytest.mark.parametrize('stamp,valid',[(9,1.),(10,0.)])
+def test_no_exit_command_or_recovery_from_unverified_geometry(node_module,monkeypatch,stamp,valid):
+    n=make_node(node_module);n.m8_phase='exit_lane'
+    n.exit_evidence.header.stamp.sec=stamp;n.exit_evidence.point.x=valid
+    monkeypatch.setattr(node_module,'checked_exit_lane',lambda *a,**kw: pytest.fail('unverified command'))
+    monkeypatch.setattr(node_module,'safe_lane_arc',lambda *a: pytest.fail('unverified path'))
+    monkeypatch.setattr(node_module,'lane_forward_recovery',lambda *a,**kw: pytest.fail('unverified recovery'))
+    offer=n._publish_exit(dict(points=np.ones((4,2)),scan=((),np.array([]))),NS(sec=10,nanosec=0))
+    assert offer is None and n.exit_cmd_pub.messages[-1].twist.linear.x==0.

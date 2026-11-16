@@ -599,6 +599,44 @@ def exit_proposal(owner, v=.1, age=0.):
     owner.m8._store_exit_lane(lane)
 
 
+def exit_evidence(owner, aligned=True, age=0.):
+    evidence=Stamped()
+    stamp=owner.now-int(age*1e9)
+    evidence.header.frame_id='rear_axle'
+    evidence.header.stamp=NS(sec=stamp//10**9,nanosec=stamp%10**9)
+    evidence.point.x=1.;evidence.point.y=float(aligned)
+    owner.m8._store_exit_evidence(evidence)
+
+
+def test_observer_changes_only_m8_exit_proposals_not_race_result(owner,monkeypatch):
+    import numpy as np
+    from test_m8_exit_lane import scene
+    from jetracer_ros2.m8_observers import M8LaneObserver
+    class Polygon(Stamped):
+        def __init__(self):
+            super().__init__();self.polygon=NS(points=[])
+    monkeypatch.setattr(sys.modules['geometry_msgs.msg'],'PolygonStamped',Polygon,raising=False)
+    monkeypatch.setattr(sys.modules['geometry_msgs.msg'],'Point32',NS,raising=False)
+    observer=M8LaneObserver(owner,.184)
+    image,r,g=scene();r['raw_angle']=-.1
+    original=r['center'][0].copy()
+    command=(.2,-.1,'TRACK','test')
+    observer.update(NS(sec=10,nanosec=0),r,command,image=image,pose=(0.,0.,0.),geometry=g)
+    assert observer.command.messages[-1].twist.linear.x==.2
+    observer._phase(NS(data='exit_prepare'))
+    for i in range(5):
+        observer.update(NS(sec=10,nanosec=i*33_000_000),r,command,
+                        image=image,pose=(0.,0.,0.),geometry=g)
+    assert observer.evidence.messages[-1].point.x==1.
+    assert observer.evidence.messages[-1].point.y==0.
+    assert observer.command.messages[-1].twist.linear.x==0.
+    assert all(p.y>.30 for p in observer.path.messages[-1].polygon.points)
+    assert np.array_equal(r['center'][0],original)
+    observer._phase(NS(data='off'))
+    observer.update(NS(sec=11,nanosec=0),r,command,image=image,pose=(0.,0.,0.),geometry=g)
+    assert observer.command.messages[-1].twist.linear.x==.2
+
+
 def test_exit_line_keeps_cone_until_a_fresh_checked_lane(owner):
     confirm_exit(owner)
     proposal(owner)
@@ -607,6 +645,9 @@ def test_exit_line_keeps_cone_until_a_fresh_checked_lane(owner):
     assert owner.output[-1]==(.10,-.13)
     exit_proposal(owner, age=.30)
     assert owner.output[-1]==(.10,-.13)
+    exit_proposal(owner)
+    assert owner.output[-1]==(.10,-.13)  # A connector alone cannot displace usable cones.
+    exit_evidence(owner)
     exit_proposal(owner)
     assert owner.output[-1]==(.1,.04)
     assert owner.m8._m8_phase_sent == 'exit_lane'
@@ -617,6 +658,8 @@ def test_exit_line_keeps_cone_until_a_fresh_checked_lane(owner):
     recovery_tick(owner, dt=.30)
     owner.m8.tick(owner.now)
     assert owner.output[-1]==(0.,0.)
+    proposal(owner)
+    assert owner.output[-1]==(.10,-.13)  # Loss of exit evidence returns to fresh checked cones.
 
 
 def progress(owner, clear=True, age=0., frame='rear_axle'):
@@ -642,11 +685,19 @@ def test_lane_alone_cannot_leave_cones_but_measured_passage_can(owner):
     progress(owner)
     assert owner.m8._m8_phase_sent == 'exit_prepare'
     assert owner.output[-1]==(.10,-.13)
+    proposal(owner,v=0.)  # No cone command: use the role-verified connector, not blind hold.
     exit_proposal(owner)
     assert owner.output[-1]==(.1,.04)
     recovery_tick(owner, dt=.1, move=.16)
     progress(owner)
     exit_proposal(owner)
+    assert owner._active=='M8'  # Ordinary lane still needs verified agreement.
+    evidence=Stamped()
+    evidence.header.frame_id='rear_axle'
+    evidence.header.stamp=NS(sec=owner.now//10**9,nanosec=owner.now%10**9)
+    evidence.point.x=evidence.point.y=1.
+    owner.m8._store_exit_evidence(evidence)
+    owner.m8.tick(owner.now)
     assert owner._active=='M1'
 
 
@@ -657,6 +708,7 @@ def test_expired_or_retracted_map_evidence_cannot_start_handoff(owner):
     exit_proposal(owner)
     assert not owner.m8._m8_exit.owns_lane
     assert owner.output[-1]==(.10,-.13)
+    exit_evidence(owner)
     progress(owner)
     assert owner.m8._m8_exit.owns_lane
 

@@ -264,6 +264,10 @@ def test_m8_exit_starts_fresh_traffic_and_m4_starts_lane_approach(modules):
     n.m8._store_exit_lane(proposal(n))
     n.now += 200_000_000
     n._odom_ns, n._odom.s = n.now, 1.31
+    evidence = proposal(n)
+    evidence.header.frame_id = 'rear_axle'
+    evidence.point.x = evidence.point.y = 1.
+    n.m8._store_exit_evidence(evidence)
     n.m8._store_exit_lane(proposal(n))
     assert n._active == 'M1' and n._traffic == 'unknown'
     assert 'mission_traffic_light_node' in n.started
@@ -471,9 +475,17 @@ def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monk
         line_msg.header.frame_id, line_msg.point.x = 'front_axle', .40
         n.m8._m8_exit_line_callback(line_msg)
     assert n.m8._m8_phase_sent == 'exit_prepare'
+    evidence = proposal(n)
+    evidence.header.frame_id = 'rear_axle'
+    evidence.point.x = evidence.point.y = 1.
+    n.m8._store_exit_evidence(evidence)
     n.m8._store_exit_lane(proposal(n))
     n.now += 100_000_000
     n._odom_ns, n._odom.s = n.now, 2.21
+    evidence = proposal(n)
+    evidence.header.frame_id = 'rear_axle'
+    evidence.point.x = evidence.point.y = 1.
+    n.m8._store_exit_evidence(evidence)
     n.m8._store_exit_lane(proposal(n))
     assert n._active == 'M1'
 

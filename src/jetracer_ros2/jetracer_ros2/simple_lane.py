@@ -1914,7 +1914,8 @@ def run_ros(mode, topic, record=False):
                 cmd = (0.0, 0.0, 'WAIT', '시작 전 조향 초기화')
             self.send(cmd[0], cmd[1])
             if self.m8_observer is not None:
-                self.m8_observer.update(msg.header.stamp, res, cmd, now - self.t_start < RESET_SEC)
+                self.m8_observer.update(msg.header.stamp, res, cmd, now - self.t_start < RESET_SEC,
+                                        image=image, pose=pose, geometry=self.engine.geo)
             if self.rec_dir is not None:
                 self.rec_n += 1
                 cv2.imwrite(os.path.join(self.rec_dir, f'{self.rec_n:05d}.jpg'), image,

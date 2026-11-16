@@ -21,7 +21,7 @@ from jetracer_ros2.cone_corridor import (
     lane_forward_recovery, safe_lane_arc)
 from jetracer_ros2.m8_entry import (
     M8_APPROACH_RISK_TOPIC, M8_COMMAND_TIMEOUT, M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC,
-    M8_EXIT_PROGRESS_TOPIC,
+    M8_EXIT_PROGRESS_TOPIC, M8_EXIT_LANE_EVIDENCE_TOPIC,
     M8_LANE_HINT_TOPIC, M8_LANE_PATH_FRAME, M8_LANE_PATH_TOPIC, M8_PHASE_TOPIC,
     M8_PLANNER_TIMING_TOPIC, M8_RECOVERY_COMMAND_TOPIC, MAX_M8_SPEED, MIN_M8_SPEED, OBSERVED_LANE_TOPIC)
 from jetracer_ros2.utils.ackermann_utils import inner_angle_to_omega
@@ -96,6 +96,8 @@ class MissionConeAvoidNode(Node):
         self.m8_phase = 'off'
         self.lane_center = None
         self.lane_hint = None
+        self.exit_evidence = None
+        self.create_subscription(PointStamped, M8_EXIT_LANE_EVIDENCE_TOPIC, self._observe_exit_evidence, 1)
         self.create_subscription(TwistStamped, OBSERVED_LANE_TOPIC, self._observe_lane, 1)
         self.create_subscription(PolygonStamped, M8_LANE_PATH_TOPIC, self._observe_center, 1)
         self.create_subscription(TwistStamped, M8_LANE_HINT_TOPIC, self._observe_hint, 1)
@@ -194,6 +196,10 @@ class MissionConeAvoidNode(Node):
         if not self.exit_check:
             self._publish_exit(force=True)
 
+    def _observe_exit_evidence(self, msg):
+        if msg.header.frame_id == M8_LANE_PATH_FRAME:
+            self.exit_evidence = msg
+
     def _publish_exit(self, result=None, scan_stamp=None, *, force=False):
         if not self.exit_check and not force:
             return
@@ -211,7 +217,16 @@ class MissionConeAvoidNode(Node):
                 return t > 0 and 0 <= (now.nanoseconds-t)/1e9 <= M8_COMMAND_TIMEOUT
 
             lane = self.exit_lane
-            if lane is not None and fresh(lidar) and fresh(_stamp_ns(lane.header.stamp)):
+            exit_mode = self.m8_phase in ('exit_prepare', 'exit_lane')
+            evidence = self.exit_evidence
+            verified_stamp = (_stamp_ns(evidence.header.stamp) if evidence is not None
+                              and evidence.point.x == 1. and fresh(_stamp_ns(evidence.header.stamp)) else 0)
+
+            def authorized(t):
+                return not exit_mode or (verified_stamp > 0 and verified_stamp == t)
+
+            if (lane is not None and fresh(lidar) and fresh(_stamp_ns(lane.header.stamp))
+                    and authorized(_stamp_ns(lane.header.stamp))):
                 requested = lane.twist.linear.x, lane.twist.angular.z
                 stamp = min((scan_stamp, lane.header.stamp), key=_stamp_ns)
                 command = checked_exit_lane(
@@ -227,7 +242,7 @@ class MissionConeAvoidNode(Node):
                 hint = next((m for m in (lane, self.lane_hint) if m is not None
                              and _stamp_ns(m.header.stamp) == geom_stamp
                              and m.twist.linear.x > 0), None)
-                if hint is not None and fresh(geom_stamp):
+                if hint is not None and fresh(geom_stamp) and authorized(geom_stamp):
                     command = safe_lane_arc(result['scan'], result['points'], self.config, points,
                                             (hint.twist.linear.x, hint.twist.angular.z))
                     stamp = min((scan_stamp, hint.header.stamp), key=_stamp_ns)
@@ -237,7 +252,7 @@ class MissionConeAvoidNode(Node):
                 hint = next((m for m in (lane, self.lane_hint) if m is not None
                              and _stamp_ns(m.header.stamp) == geom_stamp
                              and m.twist.linear.x > 0), None)
-                if hint is not None and fresh(geom_stamp):
+                if hint is not None and fresh(geom_stamp) and authorized(geom_stamp):
                     k = lane_forward_recovery(result['scan'], result['points'], self.config,
                         center, (hint.twist.linear.x, hint.twist.angular.z),
                         approach=self.m8_phase == 'approach')

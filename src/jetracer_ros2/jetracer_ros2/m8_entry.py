@@ -12,6 +12,7 @@ M8_RECOVERY_TIMEOUT_NS = 650_000_000
 OBSERVED_LANE_TOPIC = 'mission/lane/observed_cmd_vel'
 M8_LANE_PATH_TOPIC = 'mission/lane/observed_center'
 M8_LANE_HINT_TOPIC = 'mission/lane/geometry_hint'
+M8_EXIT_LANE_EVIDENCE_TOPIC = 'mission/cone/exit_lane_evidence'
 M8_LANE_PATH_FRAME = 'rear_axle'
 M8_PHASE_TOPIC = 'mission/cone/phase'
 M8_EXIT_LINE_TOPIC = 'mission/cone/exit_line'
@@ -274,7 +275,7 @@ class M8ExitGate:
             self.line_s = sorted(q for _, q in self.observations)[1]
             self.observations.clear()
 
-    def decide(self, s, odom_fresh, lane_safe, cones_clear=False):
+    def decide(self, s, odom_fresh, lane_safe, cones_clear=False, *, lane_aligned=True):
         if not odom_fresh or not math.isfinite(s):
             return 'wait_odom'
         if self.entry_line is None and not cones_clear and not self.owns_lane:
@@ -291,5 +292,5 @@ class M8ExitGate:
         self.passed |= crossed
         if self.lane_start_s is None or s < self.lane_start_s:
             self.lane_start_s = s
-        return ('complete' if (crossed or cones_clear) and s-self.lane_start_s >= self.settle_distance
+        return ('complete' if lane_aligned and (crossed or cones_clear) and s-self.lane_start_s >= self.settle_distance
                 else 'exit_lane')
