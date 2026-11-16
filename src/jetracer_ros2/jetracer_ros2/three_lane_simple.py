@@ -732,7 +732,12 @@ class Lane3SimpleSupervisor:
     def see_signs(self, detections):
         if self.fixed_goal or self.mode not in ('armed', 'on'):
             return
-        signs = [d for d in detections if d.get('label') in ('a', 'b') and len(d.get('bbox', ())) == 4]
+        names = {'a': 'a', 'sign_a': 'a', 'a_sign': 'a', 'sign a': 'a', 'b': 'b', 'sign_b': 'b', 'b_sign': 'b', 'sign b': 'b'}
+        signs = []
+        for d in detections:
+            lab = names.get(str(d.get('label', '')).lower().strip())
+            if lab and len(d.get('bbox', ())) == 4:
+                signs.append(dict(d, label=lab))
         if not signs:
             return
         if self.mode == 'on' and abs(self.core.c) > T.SIGN_CENTER_HALF:
