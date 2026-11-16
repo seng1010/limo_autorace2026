@@ -60,8 +60,8 @@ WRONG_SIDE_FROM = 0.20  # 표지판을 알면 반대쪽 바깥 차로는 섬 앞
 PLAN_DIST = 2.2         # 내 차로 앞 장애물이 이 안이면 차로 계획(PLAN)을 세운다
 PLAN_HORIZON = 3.0      # 계획을 보는 거리 [m]
 PLAN_STEP = 0.10
-PLAN_CHANGE_1 = 0.90    # 한 칸 옮기는 데 드는 앞 거리 [m] (실차·시뮬레이션: 40도로 꺾어 0.9~1.1 m)
-PLAN_CHANGE_2 = 1.60    # 두 칸
+PLAN_CHANGE_1 = 1.10    # 한 칸 옮기는 데 드는 앞 거리 [m] (실차·시뮬레이션: 40도로 꺾어 0.9~1.1 m)
+PLAN_CHANGE_2 = 1.90    # 두 칸
 PLAN_FRONT = 0.30       # 차가 그 칸에 있으려면 카메라 투영점 앞 이만큼까지 비어 있어야 한다 (앞범퍼 0.08 + 여유)
 PLAN_BACK = 0.05        # 차로에 머무를 때 뒤로 비어 있어야 하는 거리. 옮겨 가는 차로는 카메라 + SIDE_PASSED 부터만 본다
                         # (옆에 거의 지나친 장애물은 옆 간격만 맞으면 괜찮다 - _side_clear). 지금 차로는 MIN_START 만큼 앞이 비어야 꺾는다
@@ -107,12 +107,12 @@ NO_OBSTACLE = 3.0                    # 빈 거리가 이 이상이면 '아무것
 TIE = 0.30                           # 두 차로 빈 거리가 이 안이면 표지판 쪽(모르면 기본 쪽)을 고른다
 LOOKAHEAD_KEEP = 0.55
 LOOKAHEAD_CHANGE = 0.40
-HEADING_MAX = math.radians(40.0)     # 옮길 때 도로와 이 이상 틀지 않는다
+HEADING_MAX = math.radians(30.0)     # 옮길 때 도로와 이 이상 틀지 않는다 (40도에서 노란 선을 넘음 - 11/16 실차 1116_235151: 42도)
 ARRIVE_RADIUS = 0.75                 # 바깥 차로로 옮길 때, 이 반지름으로 펴면 목표 차로 가운데에서 곧아지는 각도까지만 튼다 (회전반경 0.51 + 지연)
 ARRIVE_MIN_HEADING = math.radians(10.0)
 TIGHT_BELOW = 0.90                   # 앞 장애물이 이보다 가까운 채로 옮기기 시작하면 급하게 (가까운 목표점, 큰 각도)
 LOOKAHEAD_TIGHT = 0.36
-HEADING_TIGHT = math.radians(45.0)
+HEADING_TIGHT = math.radians(30.0)  # 급할 때도 같게 (45도면 펴는 동안 옆으로 15 cm 더 밀려 노란 선을 넘는다)
 ARRIVE_TOL = 0.10                    # 목표 차로 가운데에서 이 안 + 도로와 나란하면 옮기기 끝
 ABORT_BACK = 0.15                    # 옮기기 시작 직후 그 차로가 막히면, 아직 이 안이면 원래 차로로 돌아간다
 # 확정 못 했을 때 쓸 '많이 읽힌 쪽' (guess): 가까이서 읽은 것만 센다. 모델은 멀리서 B 를 A 라고 하는 쪽으로 틀린다
