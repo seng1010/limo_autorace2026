@@ -8,6 +8,7 @@
   4) TURN      : turn_sec 동안 우회전 (b)
   5) ENTER     : enter_sec 동안 주차 칸 진입 (c)
   6) DONE      : 최종 정지
+  
 """
 
 import os
@@ -37,7 +38,7 @@ DEFAULTS = {
     'speed': 0.50,              # 주차 직진 속도 [m/s]
     'turn_speed': 0.50,         # 주차 우회전 속도 [m/s]
     'turn_steer_rad': 0.45,     # 우회전 조향각 크기 [rad]
-    'start_delay_sec': 2.0,     # 실행 후 출발까지 대기 [s]
+    'start_delay_sec': 0.0,     # 실행 후 출발까지 대기 [s]
     'wait_enter': False,        # True면 Enter를 눌러야 출발
 }
 
