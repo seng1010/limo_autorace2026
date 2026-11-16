@@ -282,3 +282,13 @@ def test_island_position_from_its_rear_end_when_passing():
     for _ in range(4):
         k._camera_island(dict(yellow_xy=xy))
     assert k.island_s is not None and abs(k.island_at - true_front) < 0.05
+
+
+def test_change_stuck_short_of_target_replans_when_target_is_blocked():
+    """B 로 옮기다 노란 선 벽 때문에 c -0.41 에서 멈춤 + B 앞 0.6 m 막힘 + 가운데 빔: 다시 계획해 가운데로 (11/16 run19)."""
+    k = core_at(-0.41)
+    k.lane, k.changing, k.change_from = 2, True, 1
+    pts = box(0.6, -0.535 + 0.41)            # B 차로 장애물 (차에서 오른쪽 0.125 m)
+    for _ in range(3):
+        k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
+    assert k.lane == 1

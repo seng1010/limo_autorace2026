@@ -91,7 +91,7 @@ HEADING_MAX = math.radians(40.0)     # 옮길 때 도로와 이 이상 틀지 �
 TIGHT_BELOW = 0.90                   # 앞 장애물이 이보다 가까운 채로 옮기기 시작하면 급하게 (가까운 목표점, 큰 각도)
 LOOKAHEAD_TIGHT = 0.36
 HEADING_TIGHT = math.radians(45.0)
-ARRIVE_TOL = 0.08                    # 목표 차로 가운데에서 이 안 + 도로와 나란하면 옮기기 끝
+ARRIVE_TOL = 0.10                    # 목표 차로 가운데에서 이 안 + 도로와 나란하면 옮기기 끝
 ABORT_BACK = 0.15                    # 옮기기 시작 직후 그 차로가 막히면, 아직 이 안이면 원래 차로로 돌아간다
 PREF_FRAMES = 5                      # '가고 싶은 차로'로 옮기는 조건이 연속 이만큼 맞아야 옮긴다
 TH_GAIN = 0.15                       # 카메라 도로 방향으로 고치는 비율 (한 프레임)
@@ -510,7 +510,12 @@ class SimpleThreeLane:
             self.state, self.reason = 'KEEP', f'3차선 입구 전 (시작선 {self.s:+.2f} m)'
             return V_KEEP if a >= BLOCK_DIST else V_SLOW
         if self.changing:
+            near_target = abs(self.c - LANE_CENTER[cur]) < 0.20
             if abs(self.c - LANE_CENTER[cur]) <= ARRIVE_TOL and abs(self.th) < math.radians(10.0):
+                self.changing = False
+            elif near_target and a < BLOCK_DIST and abs(self.th) < math.radians(15.0):
+                # 거의 다 옮겼는데 이 차로 앞이 막혔다: 옮기기를 끝난 것으로 보고 아래에서 다시 계획한다.
+                # (노란 선 벽 등으로 가운데까지 못 가면 '옮기는 중'에 갇혀 다른 차로를 보지 않고 섰다 후진했다 - 11/16 실차 run19)
                 self.changing = False
             elif (abs(self.c - LANE_CENTER[self.change_from]) < ABORT_BACK
                     and not self._side_clear(cur, min(a, BLOCK_DIST) + SIDE_FRONT) and a < BLOCK_DIST
