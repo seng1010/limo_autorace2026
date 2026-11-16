@@ -269,3 +269,16 @@ def test_plan_avoids_lane_that_is_blocked_further_ahead():
     for _ in range(3):
         k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), 2, now=0.0)
     assert k.changing and k.lane == 0
+
+
+def test_island_position_from_its_rear_end_when_passing():
+    """섬 옆을 지날 때 섬 뒤끝이 앞 1.0 m 에 보이면 섬 앞끝 = s + 1.0 - 섬 길이 (진입 위치 가정이 틀려도 합류 시점이 맞게)."""
+    k = core_at(-0.535)
+    k.s = S.START_TO_ISLAND + 0.30          # 실제 섬 앞끝은 0.4 m 뒤 (s 가 0.4 m 앞서 있음)
+    true_front = k.s - 0.4
+    end_ahead = true_front + S.ISLAND_LEN - k.s
+    f = np.arange(0.45, end_ahead, 0.02)
+    xy = np.stack([np.full(f.size, -0.265), f], 1)     # 가까운 섬 테두리(도로 -0.27): 차(-0.535)에서 왼쪽 0.265 m (오른쪽 + 좌표)
+    for _ in range(4):
+        k._camera_island(dict(yellow_xy=xy))
+    assert k.island_s is not None and abs(k.island_at - true_front) < 0.05

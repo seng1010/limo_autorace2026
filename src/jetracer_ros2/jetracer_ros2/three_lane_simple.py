@@ -108,7 +108,7 @@ REVERSE_M = 0.60                     # 한 번에 후진하는 거리
 REVERSE_MAX_COUNT = 3
 V_REVERSE = 0.10
 ISLAND_LOOK_FROM = 2.3                # 섬 앞끝 도면 위치보다 이만큼 앞에서부터 카메라로 섬을 찾는다
-ISLAND_TRUST = 0.80                  # 카메라로 본 섬 위치가 도면과 이 이상 다르면 버린다
+ISLAND_TRUST = 0.90                  # 카메라로 본 섬 위치가 도면과 이 이상 다르면 버린다
 ISLAND_CONFIRM = 3                   # 카메라로 섬을 이만큼 연속 비슷한 위치에서 봐야 믿는다
 ISLAND_MIN_VIEW = 0.55               # 섬 앞끝이 이보다 가까우면 카메라 값을 새로 받지 않는다 (카메라 사각)
 ARM_AFTER_M = 1.4                    # M7 시작 후 이만큼 간 뒤부터 진입을 찾는다 (그 전은 코너)
@@ -290,27 +290,41 @@ class SimpleThreeLane:
         self.c += LINE_GAIN * (cc - self.c)
 
     def _camera_island(self, obs):
+        """카메라로 섬 위치를 잡는다. 섬 앞끝이 보이면 그 위치, 섬 옆을 지날 때 섬 뒤끝이 보이면 (뒤끝 - 섬 길이).
+        진입 때 시작선 기준 위치를 가정했으면 s 가 0.5 m 넘게 틀릴 수 있어, 합류 시점은 섬 뒤끝으로 다시 맞춘다
+        (11/16 실차 run18: 섬이 끝나기 전에 합류를 시작해 섬 테두리를 밟음)."""
         # 섬은 도면상 시작선 4.36 m. 그보다 한참 앞(1차선 구간)에서는 1차선 노란 선(+-0.26)이 섬처럼 보여
         # 섬을 시작선 근처(-0.6 m)로 잡고 가운데 차로를 막아 출발도 못 했다 (11/16 실차 run15)
-        if not obs or obs.get('yellow_xy') is None or self.s < START_TO_ISLAND - ISLAND_LOOK_FROM:
+        if not obs or obs.get('yellow_xy') is None or len(obs['yellow_xy']) == 0:
             return
-        d = T.island_distance(obs['yellow_xy'], self.c, self.th)
-        if d is None or d < ISLAND_MIN_VIEW:
+        if self.s < START_TO_ISLAND - ISLAND_LOOK_FROM:
             return
-        pos = self.s + d
-        self._isl_seen = [p for p in self._isl_seen[-(ISLAND_CONFIRM - 1):] if abs(p - pos) < 0.30] + [pos]
-        if len(self._isl_seen) >= ISLAND_CONFIRM:
-            est = float(np.median(self._isl_seen))
-            if abs(est - START_TO_ISLAND) > ISLAND_TRUST:
-                return                             # 도면과 너무 다르면 잘못 본 것
-            self.island_s = est if self.island_s is None else min(self.island_s, est)
+        x, f = obs['yellow_xy'][:, 0], obs['yellow_xy'][:, 1]
+        lateral = self.c + (-x * math.cos(self.th) - f * math.sin(self.th))
+        along = -x * math.sin(self.th) + f * math.cos(self.th)
+        sel = (np.abs(lateral) <= T.ISLAND_HALF) & (along > 0.0)
+        if int(sel.sum()) < T.ISLAND_MIN_POINTS:
+            return
+        a = np.sort(along[sel])
+        ests = []
+        near = float(np.percentile(a, 10))
+        if near >= ISLAND_MIN_VIEW:
+            ests.append(self.s + near)                       # 앞끝이 보임
+        gaps = np.nonzero(np.diff(a) > 0.25)[0]             # 섬 뒤로는 0.55 m 비었다가 합류 차로 선이 이어진다
+        end = float(a[gaps[0]]) if gaps.size else float(a[-1])
+        if a[0] < 0.9 and end < 1.6 and (gaps.size or a[-1] < 1.6):
+            ests.append(self.s + end - ISLAND_LEN)          # 뒤끝이 보임
+        for pos in ests:
+            if abs(pos - START_TO_ISLAND) > ISLAND_TRUST:
+                continue                                    # 도면과 너무 다르면 잘못 본 것
+            self._isl_seen = [p for p in self._isl_seen[-(ISLAND_CONFIRM + 2):] if abs(p - pos) < 0.30] + [pos]
+            if len(self._isl_seen) >= ISLAND_CONFIRM:
+                self.island_s = float(np.median(self._isl_seen[-ISLAND_CONFIRM - 2:]))
 
     @property
     def island_at(self):
-        """섬 앞끝 s. 카메라로 봤으면 그 값, 아니면 도면 값 (카메라 값이 도면보다 0.5 m 넘게 멀면 도면 값)."""
-        if self.island_s is None:
-            return START_TO_ISLAND
-        return min(self.island_s, START_TO_ISLAND + 0.5)
+        """섬 앞끝 s. 카메라로 봤으면 그 값(도면과 ISLAND_TRUST 안), 아니면 도면 값."""
+        return START_TO_ISLAND if self.island_s is None else self.island_s
 
     def _scan_to_map(self, scan):
         r = np.asarray(scan[0], dtype=np.float32)
