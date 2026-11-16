@@ -30,6 +30,7 @@ setup(
             'lane_following_node = jetracer_ros2.lane_following_node:main',
             'lane_following_node_ks = jetracer_ros2.lane_following_node_ks:main',
             'simple_lane = jetracer_ros2.simple_lane:main',
+            'lane3_gap = jetracer_ros2.lane3_gap:main',
             'stop_line_node = jetracer_ros2.stop_line_node:main',
             'section_node = jetracer_ros2.section_node:main',
             'yolo_detection_node = jetracer_ros2.yolo_detection_node:main',

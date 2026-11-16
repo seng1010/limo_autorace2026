@@ -57,7 +57,7 @@ def generate_launch_description():
         ),
         Node(
             package='jetracer_ros2',
-            executable='simple_lane',
+            executable='lane3_gap',
             arguments=['drive', '--topic', 'inference/cmd_vel', ['l3', LaunchConfiguration('lane3')]],
             output='screen',
             emulate_tty=True,
