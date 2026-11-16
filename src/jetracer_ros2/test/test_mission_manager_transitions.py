@@ -510,6 +510,15 @@ def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monk
     step(n, line=-1., light='green')
     assert n._active == 'M4'
 
+    # The third course line is the FAR edge of the crosswalk, not parking.
+    for _ in range(3):
+        step(n, line=.20, speed=.15)
+    assert n._parking_exit_s == pytest.approx(n._odom.s+.20)
+    assert n._m4_state == 'approach' and not n.parking_start_pub.messages[-1].data
+    n._odom.s += .35
+    step(n, line=-1., speed=.15)
+    n._odom.s = 7.0  # Fourth line is at s=7.20, beyond the crosswalk end.
+
     # Wire the managed parking node to the actual manager transport callbacks.
     clock = [n.now / 1e9]
     monkeypatch.setattr(modules.parking.time, 'monotonic', lambda: clock[0])
@@ -518,6 +527,7 @@ def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monk
     parking._active_cb(NS(data='M4'))
     state_offset = 0
     for i in range(140):
+        n._odom.s = 7.0 if i < 10 else 7.195
         step(n, line=.20 if i < 10 else .005, speed=.15 if i < 15 else 0.)
         clock[0] = n.now / 1e9
         parking._active_cb(NS(data=n._active))
@@ -534,6 +544,42 @@ def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monk
         if not transitions or transitions[-1] != msg.data:
             transitions.append(msg.data)
     assert transitions == ['M2', 'M8', 'M1', 'M4']
+
+
+def test_crosswalk_end_seen_during_m1_is_not_recounted_as_parking_in_m4(modules):
+    n=owner(modules,'M1')
+    n._m1.state='go';n._m1.go_start_s=0.
+    n._m1._line_detector.last_line_s=.03
+    n._odom.s=.4
+    for _ in range(3):step(n,line=.35,speed=.15,light='green')
+    assert n._parking_exit_s==pytest.approx(.75)
+    n._odom.s=.6
+    step(n,line=.15,speed=.15,light='green')
+    assert n._active=='M4'
+    n._odom.s=.75
+    for _ in range(20):step(n,line=0.,speed=0.)
+    assert n._m4_state=='approach' and not n.parking_start_pub.messages[-1].data
+    n._odom.s=.88
+    step(n,line=-1.,speed=.15)
+    n._odom.s=1.10
+    for _ in range(3):step(n,line=.30,speed=.15)
+    assert n._parking_target_s==pytest.approx(1.40) and n._m4_state=='stopping'
+    n._odom.s=1.395
+    for _ in range(12):step(n,line=.005,speed=0.)
+    assert n._m4_state=='parking' and n.parking_start_pub.messages[-1].data
+
+
+def test_parking_gate_requires_distinct_messages_and_does_not_count_reverse(modules):
+    n=owner(modules,'M1')
+    n._m1.state='go';n._m1.go_start_s=0.;n._m1._line_detector.last_line_s=.03
+    n._odom.s=.4
+    step(n,line=.35,speed=.15,light='green')
+    for _ in range(8):step(n,speed=.15,light='green')
+    assert n._parking_exit_s is None
+    for _ in range(3):step(n,line=.35,speed=-.10,light='green')
+    assert n._parking_exit_s is None
+    step(n,line=.35,speed=.15,light='green')
+    assert n._parking_exit_s==pytest.approx(.75)
 
 
 @pytest.mark.parametrize('old_limit', [0., 2.])

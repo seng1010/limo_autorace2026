@@ -32,6 +32,7 @@ from jetracer_ros2.m3_pedestrian import M3Config, PedestrianStopMission
 from jetracer_ros2.stop_approach import (
     FullStopDetector, StopApproachConfig, StopApproachController)
 from jetracer_ros2.stop_line_detector import OdomPathIntegrator
+from jetracer_ros2.section_logic import LinePassDetector
 
 
 MISSION_ORDER = ('M5', 'M6', 'M3', 'M7', 'M2', 'M8', 'M1', 'M4')
@@ -97,6 +98,7 @@ class MissionManagerNode(Node):
             'm4_line_arm_distance_m': 0.80,
             'm4_stop_offset_m': 0.01,               # 앞바퀴 축이 정지선 가까운 끝 부근에 오도록
             'm4_full_stop_sec': 0.5,                # 주차 시작 허가 전 연속 실측 정지 확인
+            'm4_skip_crosswalk_end': True,         # M1 출발 후 첫 새 선은 횡단보도 끝, 그 다음이 주차선
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -172,6 +174,9 @@ class MissionManagerNode(Node):
         self._m4_full_stop = FullStopDetector(p('full_stop_speed'), p('m4_full_stop_sec'))
         self._m4_state = 'approach'
         self._m4_stop_latched = False
+        self._parking_line_gate = None
+        self._parking_exit_s = self._parking_target_s = None
+        self._parking_line_rx_ns = 0
 
         self.cmd_pub = self.create_publisher(
             Twist, self.get_parameter('output_topic').value, 10)
@@ -331,6 +336,9 @@ class MissionManagerNode(Node):
             self._m3.reset()
         if mission == 'M1':
             self._m1.reset()
+            self._parking_line_gate = None
+            self._parking_exit_s = self._parking_target_s = None
+            self._parking_line_rx_ns = 0
         if mission == 'M4':
             self._m4_state = 'approach'
             self._m4_stop_latched = False
@@ -447,9 +455,48 @@ class MissionManagerNode(Node):
         light = self._fresh_traffic(now_ns)
         decision = self._m1.update(now_ns / 1e9, stop_line, speed, self._odom.s,
                                    light, last_light_s=self._last_light_s)
+        if (decision.state in ('go', 'done', 'passing') and self._odom_fresh(now_ns)
+                and self.get_parameter('m4_skip_crosswalk_end').value):
+            if self._parking_line_gate is None:
+                self._parking_line_gate = LinePassDetector(
+                    max_distance_m=self.get_parameter('m4_line_arm_distance_m').value)
+                # Preserve identity of the signal stop line across M1 -> M4.
+                # go_start_s is a fallback for explicit/simulated starts only.
+                self._parking_line_gate.last_line_s = (
+                    self._m1._line_detector.last_line_s if self._m1._line_detector.last_line_s is not None
+                    else self._m1.go_start_s)
+            self._observe_parking_lines(now_ns, stop_line)
         return self._report(decision, stop_line, speed, 'M1 신호등 통과 완료',
                             'M1 미완료 — M4 인계 금지',
                             extra=f' light={light} lines={self._m1.lines_seen}')
+
+    def _observe_parking_lines(self, now_ns, line):
+        """Count distinct odom-anchored lines, not repeated timer observations.
+
+        Layout after M8: slow-start, signal-stop, crosswalk-end, parking-start.
+        Continue observing during M1 departure so a visible third line cannot
+        be forgotten/relabelled as parking merely by the M4 state transition.
+        """
+        if (self._parking_line_gate is None or not self._odom_fresh(now_ns)
+                or self._odom_speed < -.02 or self._stop_line_ns <= self._parking_line_rx_ns):
+            return
+        self._parking_line_rx_ns = self._stop_line_ns
+        anchor = self._parking_line_gate.update(self._odom.s, line)
+        if anchor is not None:
+            if self._parking_exit_s is None:
+                self._parking_exit_s = anchor
+                self.get_logger().info('횡단보도 끝선 확인: 통과 대상이며 주차 시작 금지')
+            elif self._parking_target_s is None:
+                self._parking_target_s = anchor
+                self.get_logger().info('횡단보도 끝선 다음 주차 시작선 확인')
+
+    def _parking_line_allowed(self, line):
+        if self._parking_line_gate is None:
+            return True  # Standalone start_mission=M4 keeps its existing contract.
+        return bool(self._parking_exit_s is not None and self._parking_target_s is not None
+                    and self._odom.s >= self._parking_exit_s+.02 and line is not None
+                    and abs(self._odom.s+line-self._parking_target_s)
+                        <= self._parking_line_gate.same_line_m)
 
     def _m4_tick(self, now_ns):
         """M3와 같은 거리 감속·실측 정지 확인 후에만 튜닝된 주차 동작에 인계."""
@@ -463,6 +510,14 @@ class MissionManagerNode(Node):
             self._debug('parking_approach wait_odom')
             return 0.0
         line = self._fresh_stop_line(now_ns)
+        self._observe_parking_lines(now_ns, line)
+        if not self._parking_line_allowed(line):
+            if self._m4_state == 'approach':
+                stage = 'crosswalk_end' if self._parking_exit_s is None else 'parking_start'
+                self._debug(f'parking_approach source=lane waiting_{stage} '
+                            f'ignored_exit={self._parking_exit_s} target={self._parking_target_s}')
+                return None
+            line = None  # Once stopping, unrelated/lost geometry cannot start parking.
         if line is not None and line <= self.get_parameter('m4_line_arm_distance_m').value:
             self._m4_state = 'stopping'
         if self._m4_state == 'approach':
