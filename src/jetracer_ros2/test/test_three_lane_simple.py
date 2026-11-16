@@ -75,12 +75,30 @@ def test_no_free_lane_slows_then_stops_then_reverses():
     pts = box(1.0, 0.0) + box(1.0, 0.535) + box(1.0, -0.535)
     out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
     assert out['state'] == 'BLOCKED' and 0.0 < out['v'] <= S.V_SLOW
+    # 너무 가까워서 지금은 못 꺾지만, 물러나면 옆 차로로 갈 수 있다 -> 후진
     k = core_at()
-    pts = box(0.30, 0.0) + box(0.6, 0.535) + box(0.6, -0.535)
+    pts = box(0.30, 0.0)
     out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
     assert out['v'] == 0.0
     out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=S.STUCK_SEC + 0.1)
     assert out['state'] == 'REVERSE' and out['v'] < 0.0 and out['steer'] == 0.0
+    # 세 차로가 모두 막힌 막다른 길: 후진해도 소용없으니 그냥 선다 (같은 길 되풀이 안 함)
+    k = core_at()
+    pts = box(0.30, 0.0) + box(0.6, 0.535) + box(0.6, -0.535)
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
+    out = k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=S.STUCK_SEC + 0.1)
+    assert out['v'] == 0.0 and out['state'] == 'STOP'
+
+
+def test_reverse_stops_before_remembered_obstacle_behind():
+    """뒤에 지나온 장애물이 있으면 그 앞까지만 후진한다."""
+    k = core_at()
+    k.map.add(np.full(6, k.s - S.CAR_REAR - 0.25), np.linspace(-0.08, 0.08, 6))
+    k.map.add(np.full(6, k.s - S.CAR_REAR - 0.25), np.linspace(-0.08, 0.08, 6))
+    pts = box(0.30, 0.0)
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=0.0)
+    k.step_obs(None, (0.0, 0.0, 0.0), scan_with(pts), None, now=S.STUCK_SEC + 0.1)
+    assert not k.reversing or k.reverse_left <= 0.25 - 0.10 + 1e-6
 
 
 def test_center_lane_leaves_before_island_to_sign_side():

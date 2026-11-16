@@ -158,6 +158,14 @@ class RoadMap:
                 best = v if best is None else min(best, v)
         return best
 
+    def last_in_lane(self, lane, s_from, s_to):
+        """차로 lane 에서 s_from ~ s_to 사이 가장 먼(= 큰 s) 장애물. 없으면 None. (후진할 때 바로 뒤 장애물)"""
+        s, lat = self._s, self._lat
+        if not s.size:
+            return None
+        sel = (np.abs(lat - LANE_CENTER[lane]) <= LANE_BAND + 0.05) & (s >= s_from) & (s <= s_to)
+        return float(s[sel].max()) if sel.any() else None
+
     def refresh(self):
         s, lat = self.occupied()
         self._s, self._lat = np.concatenate([s, self.transient[0]]), np.concatenate([lat, self.transient[1]])
@@ -178,6 +186,8 @@ class SimpleThreeLane:
         self.changing = False
         self.tight = False
         self.plan_text = ''
+        self._goal = None
+        self._guard_hit = False
         self.change_from = 1
         self.state = 'KEEP'
         self.reason = ''
@@ -565,11 +575,25 @@ class SimpleThreeLane:
             self.stop_since = now
         if now - self.stop_since < STUCK_SEC or self.reverse_count >= REVERSE_MAX_COUNT:
             return 0.0, False
+        # 뒤로 얼마나 갈 수 있나: 지나오며 기억한 장애물(지도)의 바로 뒤 것까지. 지나온 길 밖은 모르니 지나온 거리까지만
         room = min(REVERSE_M, self.lane_run)
-        behind = self.map.first_in_lane(self.lane, self.s - CAR_REAR - room - 0.05, self.s - CAR_REAR)
+        behind = self.map.last_in_lane(self.lane, self.s - CAR_REAR - REVERSE_M - 0.10, self.s - CAR_REAR)
         if behind is not None:
-            room = min(room, self.s - CAR_REAR - behind - 0.05)
+            room = min(room, self.s - CAR_REAR - behind - 0.10)
         if room < 0.10:
+            return 0.0, False
+        # 후진해서 계획이 나아질 때만 후진한다 (나아지지 않으면 같은 길을 되풀이할 뿐 - 11/16 실차 run17)
+        _, stay0, go0 = self._plan(self._goal)
+        s0 = self.s
+        self.s = s0 - room
+        try:
+            _, stay1, go1 = self._plan(self._goal)
+        finally:
+            self.s = s0
+        a_now = self._free(self.lane)
+        if (not self._guard_hit
+                and max(stay1, go1) - room <= max(a_now + 0.30, max(stay0, go0) + 0.05)):   # 물러나도 지금 막힌 곳을 못 지나간다
+            self.state, self.reason = 'STOP', f'막힌 길 (후진해도 갈 길 없음, 계획 {max(stay0, go0):.1f} m)'
             return 0.0, False
         self.reversing, self.reverse_left = True, room
         self.reverse_count += 1
@@ -594,13 +618,16 @@ class SimpleThreeLane:
             speed = V_SLOW
             self.ahead = [self._free(j) for j in range(3)]
         else:
+            self._goal = goal
             speed = self._decide(goal, front)
         merging = self.s >= self.island_at + MERGE_TURN
         tight = self.changing and self.tight and not merging
         look = MERGE_LOOK if merging else (LOOKAHEAD_TIGHT if tight else (LOOKAHEAD_CHANGE if self.changing else LOOKAHEAD_KEEP))
         steer = T.steer_to_lane(self.c, self.th, self.lane, look)
         steer = T.limit_heading(steer, self.th, MERGE_HEADING if merging else (HEADING_TIGHT if tight else HEADING_MAX))
+        self._guard_hit = front < GUARD_DIST and (speed > 0.0 or self._guard_hit)
         if front < GUARD_DIST and speed > 0.0:
+            # 정면에 물체(옮기다 모서리에 걸림 등): 서고, 오래 서 있으면 조금 물러났다가 같은 판단을 다시 한다
             speed, self.state, self.reason = 0.0, 'STOP', f'정면 {front:.2f} m 에 물체'
         speed, rev = self._recover(speed, now)
         wall_text = ''
