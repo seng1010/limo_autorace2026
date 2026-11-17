@@ -102,6 +102,7 @@ LINE_MIN_PIX = 100              # 선으로 인정하는 최소 픽셀 수 (BEV,
 LINE_MIN_SPAN = 0.15            # 선으로 인정하는 최소 길이 (차에서 거리 기준, m)
 FRAG_MIN_PIX = 15               # 선 끝에 이어 붙일 조각의 최소 픽셀 수
 FRAG_JOIN = 0.10                # 선 끝에서 이 거리(m) 안의 조각은 같은 선으로 이어 붙임 (먼 곳 끊긴 곡선)
+PAINT_MAX_THICKNESS = 0.090     # BEV 도색 두께 상한: 선 각도와 무관한 내부 거리 기준
 
 # --- 차량 / 조향 (성윤 님 코드 값) ---
 WHEELBASE = 0.20
@@ -321,6 +322,15 @@ def _offset(xs, fs, sign, half=HALF_LANE):
     norm = np.hypot(dx, df) + 1e-9
     # 진행 방향 (dx, df) 의 오른쪽 법선 = (df, -dx)
     return xs + sign * half * df / norm, fs - sign * half * dx / norm
+
+
+def _zigzag_shape(xs, fs):
+    """Repeated lateral teeth, not a single corner or ordinary heading error."""
+    if len(xs) < 12 or np.ptp(fs) < .25:
+        return False
+    dx = np.diff(_smooth(xs, 3))
+    signs = np.sign(dx[np.abs(dx) >= .006])
+    return len(signs) >= 4 and np.count_nonzero(np.diff(signs)) >= 3
 
 
 def _fit_circle(x, y):
@@ -569,6 +579,7 @@ class LaneEngine:
         self.in_count = 0
         self.out_count = 0
         self.latch_clear = 0
+        self.straight_release_count = 0
 
     # ---------- 1. 노란색 마스크 (원본에서, 밝기 보정 없음) ----------
     @staticmethod
@@ -586,10 +597,15 @@ class LaneEngine:
         n, labels, stats, _ = cv2.connectedComponentsWithStats(bev, connectivity=8)
         comps = []
         self.frags = []
+        thickness = cv2.distanceTransform(bev, cv2.DIST_L2, 5)
         for i in range(1, n):
             if stats[i, cv2.CC_STAT_AREA] < FRAG_MIN_PIX:
                 continue
             py, px = np.nonzero(labels == i)
+            # Broad painted blocks (speed humps) are not narrow lane ribbons.
+            # Perpendicular thickness, unlike bbox width/angle, preserves bends.
+            if 2.*RES*np.percentile(thickness[py, px], 90) > PAINT_MAX_THICKNESS:
+                continue
             xm, fm = self.geo.px_to_m(px, py)
             d = np.hypot(xm, fm + CAMERA_FORWARD_OFFSET)
             if stats[i, cv2.CC_STAT_AREA] < LINE_MIN_PIX or d.max() - d.min() < LINE_MIN_SPAN:
@@ -707,7 +723,18 @@ class LaneEngine:
         xs, fs = _polyline_by_distance(comp['xm'], comp['fm'])
         if xs is None or len(xs) < 5:
             return None
-        return LaneLine(side, xs, fs, comp['px'], comp['py'], comp['near_x'])
+        zigzag = _zigzag_shape(xs, fs)
+        if zigzag:
+            # Follow the stripe's trend, not each tooth's inward normal.
+            # Only repeated alternating shapes use this fit; ordinary corners
+            # retain the existing ordered polyline and early-turn behavior.
+            order = np.argsort(fs)
+            xs, fs = xs[order], fs[order]
+            trend = np.polynomial.Polynomial.fit(fs, xs, 2 if np.ptp(fs) >= .6 else 1)
+            xs = np.clip(trend(fs), np.min(xs), np.max(xs))
+        line = LaneLine(side, xs, fs, comp['px'], comp['py'], comp['near_x'])
+        line.zigzag = zigzag
+        return line
 
     # ---------- 3. 차로 중심선 ----------
     @staticmethod
@@ -762,6 +789,7 @@ class LaneEngine:
                       raw_angle=0.0, note='', comps=len(comps), lane_width=self.lane_width,
                       ff_angle=0.0, ff_w=0.0, cross=None, tilt=None, wall=None,
                       mem_path=None, mem_angle=None, mem_target=None, mem_err=None, mem_lines=None, mem_turn=0)
+        result['zigzag'] = False
         # 차로 폭 (선에 수직으로 잼. 가로로 재면 곡선에서 실제보다 넓게 나옴: 실차 기록에서 60cm 가 76cm 로 나왔음)
         #  - 양쪽 선이 다 보이면: 지금 잰 폭의 절반씩 띄워 두 선의 한가운데를 중심으로
         #  - 한쪽 선만 보이면: 직선 구간에서 기억한 폭(single_width)의 절반을 띄움
@@ -787,8 +815,9 @@ class LaneEngine:
             cands.append(_offset(right.xs, right.fs, -1, half))
         if cands:
             cx, cf, gap = self._merge(cands)
-            if len(cands) == 2 and gap > 0.15 and not (self.tracked['left'] and self.tracked['right']):
+            if len(cands) == 2 and gap > 0.15:
                 # 두 선이 같은 차로라고 보기 어려움 -> 예상 위치에서 더 먼 쪽 버림
+                # Tracking history cannot make contradictory center paths valid.
                 if picked['left'][0] <= picked['right'][0]:
                     right, cands = None, cands[:1]
                 else:
@@ -866,6 +895,7 @@ class LaneEngine:
                 if tilt is None or abs(ang) > abs(tilt):
                     tilt = ang
             result['tilt'] = tilt
+            result['zigzag'] = any(line is not None and line.zigzag for line in (left, right))
             result.update(valid=True, source=source, center=(cx, cf), target=(tx, tf),
                           lateral=float(cx[0]), raw_angle=raw)
             self.last_valid_t = now
@@ -917,6 +947,13 @@ class LaneEngine:
         if result['valid']:
             self.resume_count = 0
             raw = result['raw_angle']
+            if result.get('zigzag', False):
+                # A tooth's fitted circle must not latch maximum corner steer.
+                self.locked = False
+                self.straight_release_count = 0
+                self.prev_ff = 0.0
+                self.mode, self.in_count, self.out_count = 'STRAIGHT', 0, 0
+                result = dict(result, ff_angle=0.0, ff_w=0.0, tilt=None, cross=None, wall=None)
             ff = result['ff_angle'] * result['ff_w']
             # 커브 판단이 한두 프레임 끊겨도 미리 꺾기가 풀리지 않게, 이전 값을 프레임당 15%씩만 줄임
             if ff * self.prev_ff >= 0 and abs(ff) < abs(self.prev_ff) * 0.85:
@@ -981,8 +1018,14 @@ class LaneEngine:
             else:
                 # 충분히 돌면 고정을 풂. (도는 중에는 경로 추종의 의견을 듣지 않음: 경로는 바깥 선을 따라 늦게 휘어서,
                 #  일찍 꺾은 차를 "안쪽으로 들어왔다"고 보고 반대로 꺾게 만들었음 - 시뮬레이션에서 확인)
-                if self._lock_done(now, math.radians(tune.get('turn_deg', 60))) or not tune.get('latch', 1):
+                straight = (self.mode == 'STRAIGHT' and tilt is not None and abs(tilt) < math.radians(10)
+                            and abs(pp) < math.radians(8) and not ff_strong and cross is None
+                            and (front is None or front > LATCH_CROSS))
+                self.straight_release_count = self.straight_release_count+1 if straight else 0
+                if (self._lock_done(now, math.radians(tune.get('turn_deg', 60)))
+                        or not tune.get('latch', 1) or self.straight_release_count >= 3):
                     self.locked, self.lock_block, self.unlock_t = False, True, now
+                    self.straight_release_count = 0
             if self.locked:
                 floor = min(MAX_STEER, math.radians(tune.get('latch_deg', 25)))
                 raw = self.lock_dir * max(floor, abs(raw) if raw * self.lock_dir > 0 else 0.0)
