@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""T자 주차 (M4) — 빈 칸을 라이다로 찾아 후진으로 넣는다.  [claude 브랜치 전용]
+"""T자 주차 (M4) — 빈 칸을 라이다로 찾아 넣는다. 기본은 전진 주차, PARK_MODE 한 줄로 후진 주차.  [claude 브랜치 전용]
 
 대회장 (도면 2026Track): 차로 오른쪽에 주차 칸 3개(폭 0.50 m, 깊이 0.60 m)가 붙어 있고 그 뒤에 3칸이 더 있다.
   6칸 중 5칸에 LIMO 가 서 있고, 차로에 붙은 3칸 중 빈 한 칸에 넣는다 (어느 칸인지는 당일).
   주차 시작 흰 선에서 첫 칸 왼쪽 끝까지 0.44 m, 칸 가운데는 선에서 0.71 / 1.23 / 1.75 m.
 
-왜 후진인가
-  이 차는 최대로 꺾어도 실제 회전 반경이 약 0.6 m 다 (대회장 bag 자이로로 잼). 차로 가운데에서 90도 돌면 차축이
-  칸 안으로 0.34~0.40 m 들어간다. 앞으로 넣으면 앞 범퍼(차축 + 0.26 m)가 칸 끝 선(0.60 m)에 걸리고,
-  뒤로 넣으면 차체가 0.14 ~ 0.46 m 에 놓여 앞뒤 14 cm 씩 남는다.
+전진 / 후진
+  회전 반경: 조향 25도에서 실제 0.60~0.62 m (대회장 bag 자이로로 잼), 최대 조향(28도)은 0.55 m 쯤으로 추정.
+  전진(기본): 다 돌았을 때 앞 범퍼가 칸 끝 선(0.60 m)의 몇 cm 앞에 선다. 여유가 작지만 라이다가 칸 안을 본다.
+  후진: 차체가 칸 깊이 0.14 ~ 0.46 m 에 놓여 여유는 크지만 뒤를 못 본다. 3번 칸은 차 앞이 차로 끝 선을 넘는다.
 
 순서 (매니저가 흰 선 앞 완전 정지를 확인하고 mission/parking/start 를 주면 시작)
   1) SETTLE  : 서서 자이로 0점 + 라이다로 오른쪽 LIMO 들을 보고 빈 칸을 고른다
-  2) FORWARD : 곧게 전진 (자이로로 방향 유지). 지나가며 빈 칸 위치를 계속 고친다. 빈 칸 가운데 + 회전 반경만큼 지나가서 정지
-  3) ARC     : 오른쪽으로 꺾고 후진. 자이로 방향 + odom 거리로 원 위에 있는지 보며 조향을 고친다. 90도 돌면
-  4) BACK    : 곧게 후진해서 깊이를 맞춘다
+  2) FORWARD : 곧게 전진 (자이로로 방향 유지). 지나가며 빈 칸 위치를 계속 고친다
+  전진 주차  3) ARCF  : 빈 칸 가운데의 반경만큼 앞에서 오른쪽으로 꺾어 들어간다 (자이로 + odom 으로 원을 따라감)
+             4) ENTER : 얕으면 곧게 조금 더. 정면이 가까우면 거기서 끝
+  후진 주차  3) ARC   : 빈 칸을 반경만큼 지나가 서고, 오른쪽으로 꺾어 후진
+             4) BACK  : 곧게 후진해서 깊이를 맞춘다
   5) DONE    : 정지, mission/parking/state = complete
 
 기존 주차 노드(parking_line_detection)와 토픽이 같다. 매니저는 M4 에서 이 노드를 켠다 (mission_manager_node MISSION_PROCESSES).
@@ -27,7 +29,7 @@ import time
 
 import numpy as np
 
-VERSION = 'claude-park1'
+VERSION = 'claude-park2'
 
 # ---- 차 ----
 WHEELBASE, TRACK = 0.2, 0.172
@@ -47,6 +49,18 @@ BLOCK_SHIFT = 0.25           # 정지 위치가 틀려도: 칸 전체가 앞뒤�
 DEFAULT_SLOT = 2             # 라이다로 못 고르면 이 칸 (1, 2, 3). 맞추기: 당일 칸을 알면 이 값을 그 칸으로 바꿔 두면 안전
 
 # ---- 동작 ----
+PARK_MODE = 'forward'        # 'forward' = 전진 주차 (기본) / 'reverse' = 후진 주차. 이 한 줄만 바꾸면 된다
+# 전진 주차: 빈 칸 앞에서 오른쪽으로 최대한 꺾어 들어간다. 라이다가 칸 안(양옆 LIMO, 뒤 칸 LIMO)을 본다.
+#   들어간 깊이는 회전 반경으로 정해진다: 다 돌았을 때 앞 범퍼 깊이 = 반경 - (차로 가운데에서 왼쪽으로 붙은 거리). 칸 깊이는 0.60 m
+F_R = 0.56                   # 전진 원의 반경 [m] (최대 조향의 실제 반경 추정 0.55). 맞추기: 다 못 돌고 칸 오른쪽 선에 붙으면 ↑ (더 일찍 꺾는다)
+F_BIAS = 0.03                # 칸 가운데보다 이만큼 오른쪽(+)/왼쪽(-)에 서도록
+F_Y_SHIFT = 0.07             # 전진하면서 시작 위치보다 왼쪽으로 이만큼 붙는다. 앞 범퍼가 칸 끝 선에 걸리면 ↑ (최대 0.10), 차 앞 왼쪽이 차로 윗선을 밟으면 ↓
+F_ARC_DONE = math.radians(87.0)
+F_MAX_DEPTH = 0.52           # 돌던 중이라도 앞 모서리가 이 깊이에 닿으면 그 자리에서 끝낸다 (칸 끝 선 0.60. 마지막 10여 도는 거의 깊이만 늘어난다)
+                             #   맞추기: 앞이 끝 선에 걸리면 ↓, 뒤가 입구 선에 걸리면 ↑
+F_FRONT_DEPTH = 0.46         # 다 돌고도 앞 범퍼가 이 깊이보다 얕으면 곧게 더 들어간다
+F_FRONT_STOP = 0.14          # 정면(뒤 칸 LIMO 등)이 앞 범퍼에서 이 거리 안이면 거기서 끝낸다
+# 후진 주차 (PARK_MODE = 'reverse'): 뒤는 라이다가 못 본다. 자이로 + odom 만으로 들어간다
 SETTLE_SEC = 1.0
 V_FWD, V_REV = 0.15, 0.10
 PARK_R = 0.62                # 후진 원의 반경 [m]. 실제 최소 반경(약 0.56~0.60)보다 조금 크게 잡아야 양쪽으로 고칠 여유가 있다
@@ -107,6 +121,9 @@ def pick_slot(px, py):
     return empty, SLOT_X[empty - 1] + shift, bool(score >= 10 and score - other >= 6)
 
 
+MOVING = ('FORWARD', 'PAUSE', 'ARC', 'BACK', 'ARCF', 'ENTER')
+
+
 class ParkPlanner:
     """ROS 없이 도는 본체. 좌표: 시작할 때 뒤 차축이 원점, 차 앞이 +x, 왼쪽이 +y."""
 
@@ -132,14 +149,14 @@ class ParkPlanner:
         if self.state == 'SETTLE':
             self._gyro_n += 1
             self._gyro_sum += wz
-        elif self.state in ('FORWARD', 'PAUSE', 'ARC', 'BACK') and self._gyro_t is not None:
+        elif self.state in MOVING and self._gyro_t is not None:
             dt = t - self._gyro_t
             if 0.0 < dt < 0.2:
                 self.th += (wz - self.bias) * dt
         self._gyro_t = t
 
     def feed_odom(self, ox, oy, oyaw, v, t):
-        if self._odom is not None and self.state in ('FORWARD', 'PAUSE', 'ARC', 'BACK'):
+        if self._odom is not None and self.state in MOVING:
             px, py, pyaw = self._odom
             d = math.hypot(ox - px, oy - py)
             if d < 0.2:
@@ -167,7 +184,7 @@ class ParkPlanner:
     def start(self, now):
         self.__init__(self.default_slot, self.log)
         self.state, self.t0 = 'SETTLE', now
-        self.log(f'[주차G] {VERSION} 시작: 서서 빈 칸을 찾는다')
+        self.log(f"[주차G] {VERSION} 시작 ({'전진' if PARK_MODE == 'forward' else '후진'} 주차): 서서 빈 칸을 찾는다")
 
     def _set(self, state, now, text=''):
         self.state, self.t0 = state, now
@@ -205,14 +222,51 @@ class ParkPlanner:
         if st == 'FORWARD':
             if self.x < self.slot[1] - 0.25:
                 self._update_slot()                      # 빈 칸을 지나치기 전까지 계속 고친다
-            goal = min(self.slot[1] - END_BIAS + PARK_R, X_MAX)
             blocked = self.front is not None and self.front < FRONT_GUARD
+            if PARK_MODE == 'forward':
+                goal = self.slot[1] + F_BIAS - F_R - 0.03            # 조향이 따라오는 시간만큼 3 cm 먼저
+                if self.x >= goal or blocked:
+                    r = F_R
+                    self.c = (self.x + r * math.sin(self.th), self.y - r * math.cos(self.th), r)
+                    self._set('ARCF', now, f'(x {self.x:.2f} m, 옆 {self.y:+.2f} m, 반경 {r:.2f} m)')
+                    return 0.12, steer_for(-1.0 / r)
+                th_d = max(-0.10, min(0.10, K_Y * (F_Y_SHIFT - self.y)))
+                return (V_FWD if goal - self.x > 0.15 else 0.12), steer_for(K_TH * (th_d - self.th))
+            goal = min(self.slot[1] - END_BIAS + PARK_R, X_MAX)
             if self.x >= goal - 0.02 or blocked:
                 self._set('PAUSE', now, f"(x {self.x:.2f} m{', 정면 막힘' if blocked else ''})")
                 return 0.0, 0.0
             th_d = max(-0.10, min(0.10, K_Y * (Y_SHIFT - self.y)))
             v = V_FWD if goal - self.x > 0.15 else 0.10
             return v, steer_for(K_TH * (th_d - self.th))
+        if st == 'ARCF':
+            if self.front is not None and self.front < 0.06:
+                self._set('DONE', now, '(정면이 6 cm 안으로 막혀 그 자리에서 정지)')
+                return 0.0, 0.0
+            c_, s_ = math.cos(self.th), math.sin(self.th)
+            deep = max(-(self.y + FRONT * s_ + b * c_) for b in (HALF_W, -HALF_W)) - SLOT_TOP      # 앞 두 모서리 중 깊은 쪽
+            if deep >= F_MAX_DEPTH:
+                self.done_msg = (f'끝: 칸 가운데에서 옆으로 {self.x - self.slot[1]:+.2f} m, 앞 모서리 깊이 {deep:.2f} m, '
+                                 f'방향 {math.degrees(-self.th):.0f}도 (자기 추정)')
+                self._set('DONE', now, self.done_msg)
+                return 0.0, 0.0
+            if self.th <= -F_ARC_DONE:
+                self._set('ENTER', now, f'(칸 가운데에서 옆으로 {self.x - self.slot[1]:+.2f} m, 앞 범퍼 깊이 {-self.y - SLOT_TOP + FRONT:.2f} m)')
+                return 0.0, 0.0
+            cx, cy, r = self.c
+            phi = math.atan2(self.y - cy, self.x - cx)
+            er = math.hypot(self.x - cx, self.y - cy) - r
+            eh = ((self.th - (phi - math.pi / 2) + math.pi) % (2 * math.pi)) - math.pi
+            return 0.12, steer_for(min(-0.2, -(1.0 / r) - K_E * er - K_H * eh))
+        if st == 'ENTER':
+            front_depth = -self.y - SLOT_TOP + FRONT
+            near = self.front is not None and self.front < F_FRONT_STOP
+            if front_depth >= F_FRONT_DEPTH or near:
+                self.done_msg = (f'끝: 칸 가운데에서 옆으로 {self.x - self.slot[1]:+.2f} m, 앞 범퍼 깊이 {front_depth:.2f} m, '
+                                 f"방향 {math.degrees(-self.th):.0f}도 (자기 추정){', 정면 가까움' if near else ''}")
+                self._set('DONE', now, self.done_msg)
+                return 0.0, 0.0
+            return 0.10, steer_for(max(-1.0, min(1.0, K_TH * (-math.pi / 2 - self.th))))
         if st == 'PAUSE':
             if now - self.t0 >= 0.6:
                 r = max(0.56, min(0.85, self.x - (self.slot[1] - END_BIAS)))
