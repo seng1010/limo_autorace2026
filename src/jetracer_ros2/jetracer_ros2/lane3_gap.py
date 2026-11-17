@@ -78,6 +78,8 @@ STUCK_SEC = 1.5
 REVERSE_M = 0.50
 REVERSE_MAX = 3
 V_REVERSE = 0.10
+REVERSE_RESUME_FREE = 0.50   # 정지 한계 30 cm보다 여유 있는 전진 경로가 생기면 후진 조기 종료
+REVERSE_RESUME_FRAMES = 3
 # 켜고 끄기
 ARM_AFTER_M = 1.4        # 매니저: M7 시작 후 이만큼 간 뒤부터 (그 전은 코너)
 ENTRY_FRAMES = 3         # 흰 점선이 연속 이만큼 보이면 시작
@@ -182,6 +184,10 @@ class GapCore:
         # 막힘
         self.stop_since = None
         self.rev_left = 0.0
+        self.resume_hits = 0
+        self.resume_target = None
+        self.resume_stamp = None
+        self.reverse_settle_until = 0.0
         self.rev_count = 0
         self.back_room = 0.4
         self.s_stuck = -9.0
@@ -463,15 +469,16 @@ class GapCore:
         l0c = float(self._look(g_line, c0x, c0y).min()) - BODY_R - M_LINE
         self.clr = (o0, l0c + M_LINE)                             # 지금 차체 옆 여유: 장애물 / 노란 선
 
-        # 후진 중
-        if self.rev_left > 0.0:
-            bx = np.concatenate([np.array(BODY_OFF) - CAM - b for b in (0.06, 0.12, 0.18)])
-            behind = float(self._look(g_obs, bx, np.zeros(bx.size)).min()) - BODY_R
-            if behind < 0.03 or self.back_room <= 0.02:
-                self.rev_left = 0.0
-            else:
-                self.v, self.steer = -V_REVERSE, 0.0
-                return self._out('REVERSE', f'후진 {self.rev_left:.2f} m 남음', 0.0, 0.0, to_isl)
+        # 후진 중에도 아래의 동일한 전진 경로·충돌검사를 수행한다.
+        # 센서 단절 시 후진 명령을 유지하거나 빈 지도를 탈출 경로로 믿지 않는다.
+        if self.rev_left > 0.0 and scan is None:
+            self.resume_hits = 0
+            self.v, self.steer = 0.0, 0.0
+            return self._out('BLOCKED', '후진 중 라이다 끊김', 0.0, 0.0, to_isl)
+        if now < self.reverse_settle_until:
+            self.v, self.steer = 0.0, 0.0
+            return self._out('REVERSE_STOP', '후진 종료 후 방향 전환 대기', 0.0, 0.0, to_isl)
+        prior_target = self.tgt
 
         # 후보 줄마다 갈 수 있는 거리
         prev = pref if self.tgt is None else self.tgt - self.latP
@@ -516,6 +523,35 @@ class GapCore:
         if tight or fk < 0.8:
             v = V_SLOW
         state = 'KEEP' if abs(dk) < 0.10 else 'CHANGE'
+        # 정상 전진과 후진 중 재탐색이 같은 실제 조향 전방 검사를 공유한다.
+        stop = ''
+        if fk < STOP_FREE:
+            stop = f'갈 길 없음 ({level}, 차체 옆 여유 장애물 {min(o0, 9):.2f} / 노란 선 {min(l0c + M_LINE, 9):.2f} m)'
+        else:
+            gx, gy = self._arc(self.steer)
+            g = (self._look(g_obs, gx, gy) - BODY_R).min(1)
+            if (g < min(0.02, o0 - 0.02)).any():
+                stop = f'정면 {GUARD_DIST:.2f} m 안에 장애물'
+        if self.rev_left > 0.0:
+            target = self.tgt
+            stable = (not stop and fk >= REVERSE_RESUME_FREE
+                      and (self.resume_target is None or abs(target-self.resume_target) <= .15))
+            continuous = (self.resume_stamp is not None and 0 < now-self.resume_stamp <= .25)
+            self.resume_hits = (self.resume_hits+1 if continuous else 1) if stable else 0
+            self.resume_target, self.resume_stamp = target, now
+            bx = np.concatenate([np.array(BODY_OFF) - CAM - b for b in (0.06, 0.12, 0.18)])
+            behind = float(self._look(g_obs, bx, np.zeros(bx.size)).min()) - BODY_R
+            if self.resume_hits >= REVERSE_RESUME_FRAMES or behind < .03 or self.back_room <= .02:
+                why = '전진 경로 확보' if self.resume_hits >= REVERSE_RESUME_FRAMES else '후방 여유 부족'
+                self.rev_left = 0.0
+                self.resume_hits = 0
+                self.reverse_settle_until = now + .15
+                self.v, self.steer = 0.0, 0.0
+                self.message = f'[3차선G] {why} -> 후진 종료, 정지 후 새 프레임으로 전진 재평가'
+                return self._out('REVERSE_STOP', why, dk, fk, to_isl)
+            self.tgt = prior_target  # 시험한 전진 목표를 후진 중의 확정 목표로 저장하지 않음
+            self.v, self.steer = -V_REVERSE, 0.0
+            return self._out('REVERSE', f'후진 {self.rev_left:.2f} m 남음 / 전진 후보 {fk:.2f} m', dk, fk, to_isl)
         # 섬 앞에서 서서 읽기
         if self.isl is not None and self.goal is None and to_isl <= READ_STOP:
             if self.read_since is None:
@@ -527,15 +563,6 @@ class GapCore:
                                 f"(읽힌 횟수 A {a} / B {b})")
             self.v = 0.0
             return self._out('READ', f'섬 {to_isl:.2f} m 앞에서 서서 표지판 읽는 중', dk, fk, to_isl)
-        # 정지 조건
-        stop = ''
-        if fk < STOP_FREE:
-            stop = f'갈 길 없음 ({level}, 차체 옆 여유 장애물 {min(o0, 9):.2f} / 노란 선 {min(l0c + M_LINE, 9):.2f} m)'
-        else:
-            gx, gy = self._arc(self.steer)
-            g = (self._look(g_obs, gx, gy) - BODY_R).min(1)
-            if (g < min(0.02, o0 - 0.02)).any():     # 이미 옆에 붙어 있는 것(지나치는 중)은 더 가까워질 때만
-                stop = f'정면 {GUARD_DIST:.2f} m 안에 장애물'
         if stop:
             self.v = 0.0
             if self.stop_since is None:
@@ -554,6 +581,8 @@ class GapCore:
                 self.s_stuck = max(self.s_stuck, self.sP)
                 self.rev_count += 1
                 self.rev_left = min(REVERSE_M, self.back_room)
+                self.resume_hits = 0
+                self.resume_target = self.resume_stamp = None
                 self.stop_since = None
                 self.tgt = None
                 self.message = f'[3차선G] 막힘 -> 후진 {self.rev_left:.2f} m ({self.rev_count}번째)'
