@@ -562,6 +562,7 @@ class LaneEngine:
         self.prev_center = 0.0          # F_REF 근처 차로 중심 (오른쪽 +, m)
         self.prev_lines = {'left': None, 'right': None}   # 지난 프레임 선 점열 (x, f)
         self.prev_path = None           # 지난 프레임 중심 점열 (x, f)
+        self.prev_path_width = LANE_WIDTH  # 그 중심 점열을 만들 때 실제로 적용한 폭
         self.lane_width = LANE_WIDTH    # 양쪽 선이 다 보일 때 실제로 잰 폭으로 계속 갱신 (선 고르기에 사용)
         self.single_width = LANE_WIDTH  # 직선 구간에서만 기억하는 폭 (한쪽 선만 보일 때 중심 잡기에 사용)
         self.last_valid_t = None
@@ -618,13 +619,15 @@ class LaneEngine:
 
     def _expected(self, c, sign):
         """지난 중심선(없으면 차 중심)에서 반폭 떨어진 예상 위치와의 차이."""
+        width = self.lane_width
         if self.prev_path is not None:
             cx, cf = self.prev_path
             order = np.argsort(cf)
             center = float(np.interp(c['near_f'], cf[order], cx[order]))
+            width = self.prev_path_width
         else:
             center = 0.0
-        return abs(c['near_x'] - (center + sign * self.lane_width / 2.0))
+        return abs(c['near_x'] - (center + sign * width / 2.0))
 
     def _track_error(self, c, side):
         """지난 프레임 같은 쪽 선과의 거리 (중앙값, m). 기록 없으면 None."""
@@ -851,6 +854,7 @@ class LaneEngine:
             ref = float(cx[j]) if abs(cf[j] - F_REF) < 0.15 else float(cx[0])
             self.prev_center = float(np.clip(0.6 * self.prev_center + 0.4 * ref, -0.35, 0.35))
             self.prev_path = (cx, cf)
+            self.prev_path_width = 2.0 * half
             self.prev_lines = {'left': None if left is None else (left.xs, left.fs),
                                'right': None if right is None else (right.xs, right.fs)}
             result['lane_width'] = 2.0 * half

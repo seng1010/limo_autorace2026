@@ -106,3 +106,15 @@ def test_alternating_single_and_rejected_pair_has_no_width_or_target_jump(monkey
         assert r['lane_width'] == .43
         targets.append(r['target'])
     np.testing.assert_allclose(targets, np.tile(targets[0], (len(targets), 1)))
+
+
+@pytest.mark.parametrize('side,sign', [('left', -1), ('right', 1)])
+def test_boundary_prediction_uses_width_that_created_previous_center(monkeypatch, side, sign):
+    e = S.LaneEngine()
+    e.lane_width, e.single_width = .36, .43
+    r = observe(monkeypatch, e, side=side, separation=.70)
+    assert r['source'] == side + '_only'
+    assert e._expected(dict(near_x=sign*.35, near_f=.8), sign) == pytest.approx(0., abs=1e-7)
+    # A newly measured width must not retroactively change the previous path's geometry.
+    e.lane_width = .50
+    assert e._expected(dict(near_x=sign*.35, near_f=.8), sign) == pytest.approx(0., abs=1e-7)
