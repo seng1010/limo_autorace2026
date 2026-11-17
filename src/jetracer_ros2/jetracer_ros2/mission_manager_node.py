@@ -43,7 +43,7 @@ DYNAMIC_NODE = {
     # 장애물 하나를 지나면 M7 을 끝내고, 막히면 차를 세워서 7대 구간에는 맞지 않아 켜지 않는다 (11/15)
     'M8': 'mission_cone_avoid_node',
     'M1': 'mission_traffic_light_node',
-    'M4': 'parking_line_detection_managed',
+    'M4': 'claude_parking_managed',   # claude 브랜치: 빈 칸을 라이다로 찾아 후진 주차 (기존 시간제 주차로 되돌리려면 'parking_line_detection_managed')
 }
 
 

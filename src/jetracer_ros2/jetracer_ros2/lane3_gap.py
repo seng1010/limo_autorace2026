@@ -17,6 +17,13 @@
   python3 lane3_gap.py drive --topic inference/cmd_vel     매니저와 함께 (simple_lane 대신 이걸 켠다. mission/active = M7 에서 켜짐)
   인자는 simple_lane.py 와 같다. 이 파일은 simple_lane 을 불러서 3차선 부분만 바꿔 끼운다.
 
+버전 claude-v6 (11/18): 실차에서 확인된 11/17 버전(LIMO 의 ~/lane3_gap_ok_1117.py) + 송도·대회장 bag 에서 나온 문제 수정.
+  다른 팀원(다른 도구)의 lane3 수정과 섞지 않은 독립 버전. 터미널 "[3차선G] claude-v6 시작" 으로 구분한다.
+  바뀐 것: 표지판 오인 차단(SIGN_EST_MAX_H, SIGN_GATE_*) / 흰 점선으로 방향(THW_*) / 입구 사선에서 안 섬(ENTRY_SOFT_M) /
+          후진하면서 차 펴기(REV_STEER_*) / 뒤에 둔 차 기억(MEM_KEEP) / 최대 거리는 앞으로 간 거리로 /
+          끝까지 막히면 선은 무시하고 장애물만 피해 빠져나감(DEAD_*) / 방지턱 구간 코너 조향 끔(M5_LATCH_OFF) /
+          기본 주행 코너: 바깥 선이 정면에서 사라질 때까지 고정 조향 유지(CORNER_HOLD, HOLD_*)
+
 터미널 줄:  3차선G <상태> 목표 +0.32 m, 갈 수 있는 거리 1.8 (좌 2.2 중 0.9 우 0.4) 표지판 A 섬 1.6 m | 사유
 """
 
@@ -28,6 +35,8 @@ from collections import deque
 
 import cv2
 import numpy as np
+
+VERSION = 'claude-v6'
 
 try:
     import three_lane as T               # 같은 폴더의 파일 (LineFitter, SignVote 만 빌려 쓴다)
@@ -82,7 +91,32 @@ V_REVERSE = 0.10
 ARM_AFTER_M = 1.4        # 매니저: M7 시작 후 이만큼 간 뒤부터 (그 전은 코너)
 ENTRY_FRAMES = 3         # 흰 점선이 연속 이만큼 보이면 시작
 ENTRY_WAIT_M = 1.2       # 그래도 못 보면 ARM_AFTER_M + 이 거리에서 그냥 시작
-MAX_ON_M = 9.0           # 이만큼 넘게 가면 끝낸다
+# --- 11/18: 송도 bag(1117_053209)과 대회장 bag(1117_194426)으로 넣은 것 ---
+SIGN_EST_MAX_H = 60.0    # 섬 위치는 상자 높이가 이 값 이하(약 0.9 m 보다 멀리)일 때 본 것으로만 처음 잡는다.
+                         #   대회장: 장애물 LIMO 를 높이 128 px 짜리 'a' 로 3번 연속 잘못 봐서 0.3 m 앞에 섬을 세우고 A 로 확정했다.
+                         #   진짜 표지판은 멀리서 작게 보이기 시작해 커진다. 갑자기 크게 나타나는 것은 표지판이 아니다.
+SIGN_GATE_DEG = 15.0     # 섬이 잡힌 뒤에는 그 방향에서 이 각도 안에 보이는 상자만 표지판으로 쓴다 (판정 투표 포함).
+SIGN_GATE_BIG_M = 1.5    #   큰 상자(SIGN_EST_MAX_H 초과)는 섬이 이 거리 안일 때만. (거리로는 안 거른다: 섬 거리는 앞차에 가려 1 m 씩 틀릴 수 있다)
+ENTRY_SOFT_M = 1.0       # 시작 후 이 거리까지는: 노란 선 때문에만 막혔고 앞에 장애물이 없으면 서지 않고 기본 주행 명령을 그대로 쓴다
+                         #   (입구의 45도 사선을 벽으로 보고 후진을 반복했다 - 송도·대회장 둘 다)
+REV_STEER_GAIN = 1.2     # 후진할 때 차를 도로와 나란히 펴는 조향 (도로 기준 방향 x 이 값). 곧게만 후진하면 같은 자리로 되돌아왔다
+REV_STEER_MAX = math.radians(20.0)
+DEAD_SEC = 3.0           # 후진을 다 쓰고도(또는 뒤가 막혀 후진을 못 하고) 이만큼 서 있으면: 노란 선·가상 벽은 무시하고
+DEAD_M_OBS = 0.02        #   장애물만 이 여유로 피해 빠져나간다 (선 -1점이 그 자리에 계속 서 있는 것보다 낫다)
+DEAD_RUN_M = 0.60        #   그렇게 이 거리만큼 나아가면 다시 원래 규칙
+# --- 코너 (기본 주행의 코너 고정 조향을 더 오래 잡아 준다. simple_lane.py 는 고치지 않고 여기서 덧씌운다) ---
+# 대회장 bag(자이로로 잼): 코너 고정 조향은 odom 으로 turn_deg(60도) 돌면 풀리는데 실제로는 50도쯤이다 (odom 이 1.2배 더 돈다).
+#   풀린 순간에도 바깥 선이 정면 0.6~1.0 m 에서 38~48도 기울어 가로지르고 있었고, 그 뒤 차선 추종은 10도만 꺾어서
+#   남은 30~40도를 도는 데 7초가 걸렸다 = 코너 바깥으로 밀림. 송도 bag 도 같다.
+# -> turn_deg 만큼 돈 뒤에도 '바깥 선이 아직 정면을 기울어 가로지르는 동안'은 고정 조향을 유지한다.
+CORNER_HOLD = True       # False 면 끔 (기본 주행 원래대로)
+HOLD_TILT = math.radians(17.0)    # 선 기울기가 이 이상 남아 있고
+HOLD_CROSS = 1.20                 #   바깥 선이 정면 이 거리 [m] 안에서 가로지르면 계속 꺾는다. 코너에서 아직 밀리면 HOLD_TILT ↓, 안쪽으로 말리면 ↑
+HOLD_EXTRA = math.radians(35.0)   # 그래도 turn_deg 에 odom 으로 이만큼 더 돌면 푼다 (실제 약 29도)
+M5_LATCH_OFF = (0.5, 5.6)    # M5 시작 후 이 거리 [m] 구간에서는 기본 주행의 코너 고정 조향을 끈다 (방지턱)
+                             #   대회장: 방지턱의 노란 줄무늬에 올라선 순간 최대 조향이 4초 걸려 차로를 벗어났다 (출발 후 3.8 m).
+                             #   첫 코너는 출발 후 약 7.4 m 라 이 구간에는 코너가 없다. 방지턱을 옮기면 이 값을 고칠 것
+MAX_ON_M = 9.0           # 시작한 곳에서 앞으로 이만큼 넘게 나아가면 끝낸다 (후진으로 오간 거리는 세지 않는다)
 NO_SIGN_EXIT_M = 3.0     # 표지판 상자를 한 번도 못 봤을 때(YOLO 꺼짐): 이만큼 간 뒤 양쪽 노란 선이 계속 보이면 갈림길 차로로 본다
 NO_SIGN_FORK_M = 2.2     # 그때 latch 를 꺼 두는 거리
 
@@ -105,8 +139,9 @@ NB = len(BODY_OFF)
 RES = 0.02
 GX0, GX1, GY0, GY1 = -0.80, 3.40, -1.40, 1.40
 NX, NY = int((GX1 - GX0) / RES), int((GY1 - GY0) / RES)
-MEM_STEP, MEM_KEEP = 0.05, 26          # 지나친 점 기억: 5 cm 마다, 1.3 m 치
-TH_GAIN, TH_ACCEPT = 0.30, math.radians(20.0)
+MEM_STEP, MEM_KEEP = 0.05, 40          # 지나친 점 기억: 앞으로 5 cm 갈 때마다, 2 m 치 (후진으로 오간 거리는 세지 않는다 - 세면 뒤에 둔 차를 잊고 후진한다)
+TH_GAIN, TH_ACCEPT = 0.30, math.radians(12.0)     # 선 맞추기(노란 선 포함)로 본 방향: 가끔 크게 튄다 -> 좁게만 받는다
+THW_GAIN, THW_ACCEPT = 0.40, math.radians(25.0)   # 흰 점선 조각으로 본 방향: 사선·섬에 안 흔들린다 -> 우선
 HINT_COST = 0.10                       # 차로 가운데(보이는 선으로 짐작)가 아닌 줄에 붙는 벌점 [m]
 KEEP_BONUS = 0.20                      # 가던 줄을 유지하는 쪽으로 주는 덤 [m]
 SIDE_BIAS = 0.04                       # 똑같으면 표지판 쪽(모르면 DEFAULT_SIDE)
@@ -124,6 +159,36 @@ def make_fitter():
         g2b = np.array([[1 / T.RES, 0, T.XW / T.RES], [0, -1 / T.RES, T.F1 / T.RES], [0, 0, 1.0]])
         fit.i2b = g2b @ i2g
     return fit
+
+
+def white_heading(mask):
+    """BEV 흰 마스크에서 점선 조각들의 방향(도로 방향, 차 정면 기준 왼쪽 +)의 중앙값. 조각이 2개 미만이면 None.
+    흰 점선은 3차선에서 늘 도로와 나란하다. 노란 선은 입구 사선·섬·합류에서 꺾여 있어 선 맞추기를 속인다."""
+    if mask is None:
+        return None
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask)
+    angs = []
+    for k in range(1, n):
+        x, y, w, h, a = st[k]
+        if a < 20 or h < 10:
+            continue
+        ys, xs = np.nonzero(lab[y:y + h, x:x + w] == k)
+        pts = np.column_stack([xs, ys]).astype(np.float32)
+        (_, _), (rw, rh), _ = cv2.minAreaRect(pts)
+        long_, short_ = max(rw, rh), min(rw, rh)
+        if long_ < 10 or short_ > 10 or long_ < 2.2 * max(short_, 1.0):
+            continue
+        vx, vy = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).ravel()[:2]
+        if vy > 0:
+            vx, vy = -vx, -vy
+        th = math.atan2(-vx, -vy)
+        if abs(th) <= math.radians(50):
+            angs.append(th)
+    if len(angs) < 2:
+        return None
+    a = np.array(angs)
+    ok = a[np.abs(a - np.median(a)) <= math.radians(8)]
+    return float(np.median(ok)) if len(ok) >= 2 else None
 
 
 def _shrink(u):
@@ -162,6 +227,7 @@ class GapCore:
         self.s = self.lat = 0.0      # 뒤 차축: 켠 뒤 도로 방향으로 간 거리 / 옆으로 움직인 거리 (odom, 짧게만 믿는다)
         self.pose = None
         self.travel = 0.0
+        self.fwd = 0.0
         self.tgt = None              # 가고 있는 줄의 옆 위치 (self.lat 과 같은 기준)
         self.steer = 0.0
         self.v = 0.0
@@ -171,7 +237,9 @@ class GapCore:
         # 갈림길
         self.isl = None              # (섬 앞끝 s, 섬 가운데 lat)
         self._isl_est = deque(maxlen=7)
-        self.sign_obs = None         # (방향[왼쪽 +], 높이, 받은 시각)
+        self.sign_q = deque(maxlen=8)   # YOLO 표지판 상자: (이름, 방향[왼쪽 +], 높이, 받은 시각)
+        self.sign_ok = []            # 이번 프레임에 표지판으로 인정된 것: (이름, 높이)
+        self._th_bad = 0
         self.guess = {0: 0, 2: 0}
         self.goal = None
         self.read_since = None
@@ -187,6 +255,7 @@ class GapCore:
         self.s_stuck = -9.0
         self.message = ''
         self.give_up = False
+        self.dead_at = None          # 마지막 수단(선 무시)을 켠 자리
         self.sign_txt = ''
         self.clr = (9.0, 9.0)
         self.free3 = (0.0, 0.0, 0.0)
@@ -224,6 +293,7 @@ class GapCore:
         self.lat += ds * math.sin(pm)
         self.psi += dyaw
         self.travel += abs(ds)
+        self.fwd += max(ds, 0.0)
         if ds < 0:
             self.rev_left -= abs(ds)
             self.back_room = max(0.0, self.back_room + ds)
@@ -231,7 +301,21 @@ class GapCore:
             self.back_room = min(1.0, self.back_room + ds)
 
     def _camera_heading(self, obs):
-        if not obs or obs.get('n', 0) < 300:
+        if not obs:
+            return
+        thw = obs.get('thw')
+        if thw is not None:
+            d = -thw - self.psi
+            if abs(d) <= THW_ACCEPT:
+                self.psi += THW_GAIN * d
+                self._th_bad = 0
+            else:
+                self._th_bad += 1
+                if self._th_bad >= 5:                 # 흰 점선이 계속 다른 방향을 가리킨다 -> 내 방향이 틀린 것
+                    self.psi = -thw
+                    self._th_bad = 0                  # 기억해 둔 점은 그대로 둔다: 이제 차 뒤쪽 확인(후진)에만 쓰여서, 지우면 뒤 차를 잊는다
+            return
+        if obs.get('n', 0) < 300:
             return
         d = -obs['th'] - self.psi
         if abs(d) <= TH_ACCEPT:
@@ -299,33 +383,51 @@ class GapCore:
         return hints
 
     def _sign_update(self, lidar, now):
-        """YOLO 표지판 상자 -> 섬 앞끝 위치. 거리는 그 방향 라이다 값이 상자 높이로 본 거리와 비슷하면 라이다 값을 쓴다."""
-        if self.sign_obs is None or now - self.sign_obs[2] > 0.4:
-            return
-        bearing, h, _ = self.sign_obs
-        self.sign_obs = None
-        self.sign_txt = f' sg{math.degrees(bearing):+.0f}/{h:.0f}'
-        if h < SIGN_SEE_H:
-            return
-        dist = SIGN_K / h
-        if lidar is not None:
-            r, a = lidar
-            near = r[np.abs(a - bearing) < math.radians(5.0)]
-            near = near[(near > 0.65 * dist) & (near < 1.35 * dist)]
-            if near.size >= 2:
-                dist = float(np.sort(near)[1]) + LIDAR_AHEAD
-        if dist > 3.2:
-            return
-        s, lat = self._car_to_road(dist * math.cos(bearing), dist * math.sin(bearing))
-        self._isl_est.append((float(s), float(lat), now))
-        est = np.array([e for e in self._isl_est if now - e[2] <= SIGN_NEED_SEC])
-        if len(est) < SIGN_NEED_N or np.ptp(est[:, 1]) > 0.30 or np.ptp(est[:, 0]) > 0.60:
-            return                                            # 한두 번 보인 것, 자리가 흩어진 것은 표지판이 아니다
-        new = (float(np.median(est[:, 0])), float(np.median(est[:, 1])))
-        if self.isl is None:
-            self.message = f'[3차선G] 표지판(섬) 보임: 앞 {new[0] - self.sP:.2f} m, 옆 {new[1] - self.latP:+.2f} m'
-        if self.isl is None or new[0] - self.sP > 0.5:        # 아주 가까우면 상자가 잘려 틀리므로 그 전 값을 쓴다
-            self.isl = new
+        """YOLO 표지판 상자 -> 섬 앞끝 위치 + 판정에 쓸 상자 고르기.
+        거리는 그 방향 라이다 값이 상자 높이로 본 거리와 비슷하면 라이다 값을 쓴다."""
+        self.sign_ok = []
+        while self.sign_q:
+            label, bearing, h, t = self.sign_q.popleft()
+            if now - t > 0.4:
+                continue
+            self.sign_txt = f' sg{math.degrees(bearing):+.0f}/{h:.0f}'
+            if h < SIGN_SEE_H:
+                continue
+            dist = SIGN_K / h
+            if lidar is not None:
+                r, a = lidar
+                near = r[np.abs(a - bearing) < math.radians(5.0)]
+                near = near[(near > 0.65 * dist) & (near < 1.35 * dist)]
+                if near.size >= 2:
+                    dist = float(np.sort(near)[1]) + LIDAR_AHEAD
+            if dist > 3.2:
+                continue
+            s, lat = self._car_to_road(dist * math.cos(bearing), dist * math.sin(bearing))
+            s, lat = float(s), float(lat)
+            if self.isl is not None:
+                # 섬이 잡힌 뒤: 그 자리 근처에 보이는 상자만 표지판이다 (장애물 LIMO 등을 잘못 본 것은 버린다)
+                ix, iy = self._road_to_car(np.array([self.isl[0]]), np.array([self.isl[1]]))
+                ix, iy = float(ix[0]), float(iy[0])
+                off = abs(bearing - math.atan2(iy, max(ix, 0.05)))
+                if off > math.radians(SIGN_GATE_DEG) or (h > SIGN_EST_MAX_H and math.hypot(ix, iy) > SIGN_GATE_BIG_M):
+                    self.sign_txt += 'x'
+                    continue
+                self.sign_ok.append((label, h))
+                if h > SIGN_EST_MAX_H:
+                    continue                                  # 가까이서는 상자가 잘려 위치가 틀리므로 자리는 안 고친다
+            elif h > SIGN_EST_MAX_H:
+                self.sign_txt += 'x'
+                continue                                      # 처음부터 크게 보이는 것은 표지판이 아니다
+            self._isl_est.append((s, lat, now))
+            est = np.array([e for e in self._isl_est if now - e[2] <= SIGN_NEED_SEC])
+            if len(est) < SIGN_NEED_N or np.ptp(est[:, 1]) > 0.30 or np.ptp(est[:, 0]) > 0.60:
+                continue                                      # 한두 번 보인 것, 자리가 흩어진 것은 표지판이 아니다
+            new = (float(np.median(est[:, 0])), float(np.median(est[:, 1])))
+            if self.isl is None:
+                self.message = f'[3차선G] 표지판(섬) 보임: 앞 {new[0] - self.sP:.2f} m, 옆 {new[1] - self.latP:+.2f} m'
+                self.sign_ok.append((label, h))
+            if self.isl is None or new[0] - self.sP > 0.5:    # 아주 가까우면 상자가 잘려 틀리므로 그 전 값을 쓴다
+                self.isl = new
 
     # ----- 격자 -----
     @staticmethod
@@ -372,7 +474,7 @@ class GapCore:
     def _free(self, g_obs, g_line, cx, cy, m_obs, g0):
         """경로마다 여유를 지키며 갈 수 있는 거리. 지금 이미 여유 안쪽이면(g0 < 0) 더 나빠지지 않는 경로는 허용."""
         g = np.minimum(self._look(g_obs, cx, cy) - BODY_R - m_obs, self._look(g_line, cx, cy) - BODY_R - M_LINE).min(2)
-        bad = g < min(0.0, g0 - 0.02)
+        bad = g < min(0.0, g0) - 0.02                # 여유 경계에 딱 걸린 채 지나갈 때 2 cm 흔들림으로 서지 않게
         first = np.where(bad.any(1), bad.argmax(1), N_STEP)
         return first * STEP
 
@@ -393,8 +495,8 @@ class GapCore:
         # 지나친 점 기억 (라이다는 뒤를, 카메라는 0.42 m 안을 못 본다).
         # odom 방향은 꺾을 때 실제보다 훨씬 많이 돈다 (11/17 실차: 실제 28도에 49도) -> odom 좌표가 아니라
         # 카메라로 고친 방향(psi)으로 센 도로 좌표(s, lat)에 기억한다
-        if self.travel - self.mem_at >= MEM_STEP:
-            self.mem_at = self.travel
+        if self.fwd - self.mem_at >= MEM_STEP:
+            self.mem_at = self.fwd
             near_o, near_y = lx < 0.9, yrx < 0.9
             self.mem.append((np.stack(self._car_to_road(lx[near_o], ly[near_o]), 1),
                              np.stack(self._car_to_road(yrx[near_y], yry[near_y]), 1)))
@@ -404,7 +506,12 @@ class GapCore:
                 if not len(w):
                     continue
                 mx_, my_ = self._road_to_car(w[:, 0], w[:, 1])
-                keep = mx_ < (0.15 if kind == 0 else 0.45)
+                if kind == 0:
+                    # 라이다가 지금 직접 보는 곳(좌우 105도 안)은 지금 값만 믿는다. 기억은 그 바깥(차 뒤쪽)에만 쓴다.
+                    # 기억은 방향 추정 오차만큼 몇 cm 밀려서, 옆을 스치듯 지날 때 없는 벽을 만들어 세웠다 (대회장 163~169초)
+                    keep = (mx_ < 0.15) & (np.abs(np.arctan2(my_, mx_ - LIDAR_AHEAD)) > math.radians(105.0))
+                else:
+                    keep = mx_ < 0.45
                 # 차체가 지금 있는 자리의 점은 있을 수 없다 (기억이 밀린 것) -> 버린다
                 keep &= ~((mx_ > -CAM - 0.08) & (mx_ < -CAM + 0.28) & (np.abs(my_) < 0.13))
                 if kind == 0 and scan is not None:
@@ -470,7 +577,17 @@ class GapCore:
             if behind < 0.03 or self.back_room <= 0.02:
                 self.rev_left = 0.0
             else:
-                self.v, self.steer = -V_REVERSE, 0.0
+                # 물러나면서 차를 도로와 나란히 편다 (도로보다 오른쪽을 보고 있으면 오른쪽으로 꺾고 후진 -> 차 앞이 왼쪽으로 돈다).
+                # 그 호를 따라 차체가 장애물·노란 선에 더 가까워지면 곧게 물러난다
+                rs = float(np.clip(REV_STEER_GAIN * self.psi, -REV_STEER_MAX, REV_STEER_MAX))
+                if abs(rs) > math.radians(2.0):
+                    rx, ry = self._arc_rev(rs)
+                    if ((self._look(g_obs, rx, ry) - BODY_R).min() < min(0.03, o0 - 0.01)
+                            or (self._look(g_line, rx, ry) - BODY_R - M_LINE).min() < min(0.0, l0c - 0.02)):
+                        rs = 0.0
+                else:
+                    rs = 0.0
+                self.v, self.steer = -V_REVERSE, rs
                 return self._out('REVERSE', f'후진 {self.rev_left:.2f} m 남음', 0.0, 0.0, to_isl)
 
         # 후보 줄마다 갈 수 있는 거리
@@ -490,6 +607,11 @@ class GapCore:
                 free2 = self._free(g_obs, g_line, cx2, cy2, M_OBS, min(o0 - M_OBS, l0c))
                 if free2.max() > free.max() + 0.10:
                     free, tight, level = free2, True, '급하게'
+                if self.dead_at is not None and free.max() < MIN_GO:
+                    no_line = np.full_like(g_line, 9.0)
+                    free3 = self._free(g_obs, no_line, cx2, cy2, DEAD_M_OBS, o0 - DEAD_M_OBS)
+                    if free3.max() > free.max():
+                        free, tight, level = free3, True, '선 무시'
         best = float(free.max())
         ok = free >= min(N_STEP * STEP - 0.05, best - TIE)
         cost = np.abs(d - pref)
@@ -536,6 +658,16 @@ class GapCore:
             g = (self._look(g_obs, gx, gy) - BODY_R).min(1)
             if (g < min(0.02, o0 - 0.02)).any():     # 이미 옆에 붙어 있는 것(지나치는 중)은 더 가까워질 때만
                 stop = f'정면 {GUARD_DIST:.2f} m 안에 장애물'
+        if (stop.startswith('갈 길 없음') and self.sP < ENTRY_SOFT_M and self.rev_count == 0 and o0 >= 0.15
+                and self.isl is None):
+            fx, fy = self._arc(0.0, 0.80)
+            if (self._look(g_obs, fx, fy) - BODY_R).min() >= 0.10:
+                # 입구: 장애물은 없고 노란 선(사선)만 걸린다 -> 서지 않고 기본 주행(노란 선 사이 주행)에 이 프레임을 맡긴다
+                self.v = V_SLOW
+                self.stop_since = None
+                out = self._out('ENTRY', '입구: 노란 선만 걸림 -> 기본 주행 명령', dk, fk, to_isl)
+                out['pass'] = True
+                return out
         if stop:
             self.v = 0.0
             if self.stop_since is None:
@@ -548,6 +680,10 @@ class GapCore:
                 if now - self.block_since >= FORK_WAIT_SEC:
                     self.wall_off = True
                     self.message = '[3차선G] 표지판 쪽이 계속 막힘 -> 반대쪽도 허용'
+            if (self.dead_at is None and now - self.stop_since >= DEAD_SEC
+                    and (self.rev_count >= REVERSE_MAX or self.back_room <= 0.15)):
+                self.dead_at = self.sP
+                self.message = '[3차선G] 후진으로도 안 풀림 -> 노란 선은 무시하고 장애물만 피해서 빠져나감'
             if now - self.stop_since >= STUCK_SEC and self.rev_count < REVERSE_MAX and self.back_room > 0.15:
                 if self.sP > self.s_stuck + 0.8:
                     self.rev_count = 0
@@ -559,14 +695,28 @@ class GapCore:
                 self.message = f'[3차선G] 막힘 -> 후진 {self.rev_left:.2f} m ({self.rev_count}번째)'
             return self._out('BLOCKED', stop, dk, fk, to_isl)
         self.stop_since = self.block_since = None
+        if self.dead_at is not None and self.sP > self.dead_at + DEAD_RUN_M:
+            self.dead_at = None
         self.v = v
         if self.isl is not None and self.side_taken is None and to_isl < -0.5:
             self.side_taken = 0 if self.latP > self.isl[1] else 2
         return self._out(state, f'{reason} {level}'.strip(), dk, fk, to_isl)
 
-    def _arc(self, steer):
+    def _arc_rev(self, steer, dist=0.20):
+        """지금 조향으로 dist 만큼 후진할 때 차체 원 가운데들: (걸음, 원 개수)."""
+        n = int(dist / STEP)
+        ax, ay, h = -CAM, 0.0, 0.0
+        dh = 0.0 if abs(steer) < 1e-3 else -math.copysign(STEP / float(_radius(steer)), steer)
+        gx, gy = np.zeros((n, NB)), np.zeros((n, NB))
+        for i in range(n):
+            ax, ay, h = ax - STEP * math.cos(h + dh / 2), ay - STEP * math.sin(h + dh / 2), h + dh
+            for j, off in enumerate(BODY_OFF):
+                gx[i, j], gy[i, j] = ax + off * math.cos(h), ay + off * math.sin(h)
+        return gx, gy
+
+    def _arc(self, steer, dist=GUARD_DIST):
         """지금 조향대로 GUARD_DIST 까지 갈 때 차체 원 가운데들: (걸음, 원 개수)."""
-        n = int(GUARD_DIST / STEP)
+        n = int(dist / STEP)
         ax, ay, h = -CAM, 0.0, 0.0
         dh = 0.0 if abs(steer) < 1e-3 else math.copysign(STEP / float(_radius(steer)), steer)
         gx, gy = np.zeros((n, NB)), np.zeros((n, NB))
@@ -606,17 +756,24 @@ class GapSupervisor:
         self._fork_end = 0.0
         self.message = ''
         self.side_taken = None
-        self.route_complete = False
-        self._fork_observed = False
+        self._mission = ''
+        self._odo = 0.0              # odom 누적 거리 (미션과 무관하게 계속 센다)
+        self._m5_at = -99.0
+        self.route_complete = False  # 갈림길 차로에 실제로 들어가 합류까지 끝냄 (매니저가 M2 -> M8 넘길 때 읽는다)
+        self._entered = False
 
     def _reset(self):
-        self.route_complete = self._fork_observed = False
+        self.route_complete = self._entered = False
         self.core = GapCore()
         self.vote.reset()
         self.arm_travel = 0.0
         self._white = self._both = 0
 
     def set_mission(self, name):
+        if name != self._mission:
+            self._mission = name
+            if name == 'M5':
+                self._m5_at = self._odo
         if self.forced:
             return
         if name == 'M7':
@@ -627,7 +784,7 @@ class GapSupervisor:
             self.mode = 'off'
 
     def see_signs(self, detections, now=None):
-        if self.mode not in ('armed', 'on'):
+        if self.mode != 'on':
             return
         signs = []
         for det in detections:
@@ -639,25 +796,34 @@ class GapSupervisor:
         _, label, box = max(signs)
         height = box[3] - box[1]
         frac = (box[0] + box[2]) / 2.0 / YOLO_IMG_W
-        self.core.sign_obs = (-math.atan((frac - 0.5) * BEAR_K), height, time.monotonic() if now is None else now)
+        # 여기서는 받아 두기만 한다. 표지판으로 인정할지는 위치를 아는 _sign_update 가 정하고, 판정은 step_obs 에서 한다
+        self.core.sign_q.append((label, -math.atan((frac - 0.5) * BEAR_K), height, time.monotonic() if now is None else now))
+
+    def _vote_signs(self):
         if self.fixed_goal is not None:
             return
-        if height >= GUESS_MIN_H:
-            self.core.guess[0 if label == 'a' else 2] += 1
-        decided = self.vote.add(label, height)
-        if decided is not None:
-            self.core.goal = decided
-            self.message = f"[3차선G] 표지판 {'A(왼쪽)' if decided == 0 else 'B(오른쪽)'} 확정 (상자 높이 {height:.0f} px)"
+        for label, height in self.core.sign_ok:
+            if height >= GUESS_MIN_H:
+                self.core.guess[0 if label == 'a' else 2] += 1
+            decided = self.vote.add(label, height)
+            if decided is not None and decided != self.core.goal:
+                self.core.goal = decided
+                self.message = f"[3차선G] 표지판 {'A(왼쪽)' if decided == 0 else 'B(오른쪽)'} 확정 (상자 높이 {height:.0f} px)"
+        self.core.sign_ok = []
 
     @property
     def latch_off(self):
         """True 면 기본 주행의 코너 고정 조향을 끈다 (3차선 입구 사선, 섬 뒤 합류의 꺾인 선을 코너로 보지 않게)."""
-        return self.mode == 'fork' or (self.mode in ('armed', 'on') and (self.forced or self.arm_travel >= ARM_AFTER_M))
+        if self.mode == 'fork' or (self.mode in ('armed', 'on') and (self.forced or self.arm_travel >= ARM_AFTER_M)):
+            return True
+        return self._mission == 'M5' and M5_LATCH_OFF[0] <= self._odo - self._m5_at <= M5_LATCH_OFF[1]      # 방지턱
 
     def step(self, image, pose, scan, both_yellow, tune=None):
         if self.mode in ('armed', 'on') and (self.forced or self.arm_travel >= ARM_AFTER_M - 0.05):
             prior = -self.core.psi if self.mode == 'on' else None
             obs = self.fitter.fit(image, prior, tune)
+            if obs:
+                obs['thw'] = white_heading(getattr(self.fitter, 'white', None))
         else:
             obs = None
         return self.step_obs(obs, pose, scan, both_yellow, time.monotonic())
@@ -668,6 +834,7 @@ class GapSupervisor:
             step = math.hypot(pose[0] - self._pose[0], pose[1] - self._pose[1])
             if step < 0.5:
                 self.arm_travel += step
+                self._odo += step
         if pose is not None:
             self._pose = pose
         if self.mode in ('off', 'done'):
@@ -675,7 +842,7 @@ class GapSupervisor:
         if self.mode == 'fork':                 # 갈림길 차로 ~ 합류: 기본 주행이 몰고, latch 만 꺼 둔다
             self.core._advance(pose, now)
             if self.core.sP >= self._fork_end:
-                self.route_complete = self._fork_observed
+                self.route_complete = self._entered
                 self.mode, self.message = 'done', '[3차선G] 합류 끝 -> 기본 주행 (코너 조향 다시 켬)'
             return None
         if self.mode == 'armed':
@@ -689,13 +856,21 @@ class GapSupervisor:
             elif scan is None:
                 return dict(v=0.0, steer=0.0, state='LANE3', reason='3차선G: 라이다(/scan) 기다리는 중', note='L3G wait scan')
             self.mode = 'on'
-            self.core.start(-obs['th'] if obs else 0.0, pose)
-            self.message = f"[3차선G] 시작 (도로 방향 {math.degrees(-self.core.psi):+.0f}도)"
+            # 시작 방향: 흰 점선으로 본 값이 있으면 그것. 없으면 선 맞추기 값은 작을 때만 믿는다 (입구 사선에 속아 -20도로 시작한 적 있음)
+            if obs and obs.get('thw') is not None:
+                psi0 = -obs['thw']
+            elif obs and abs(obs['th']) <= TH_ACCEPT:
+                psi0 = -obs['th']
+            else:
+                psi0 = 0.0
+            self.core.start(psi0, pose)
+            self.message = f"[3차선G] {VERSION} 시작 (도로 방향 {math.degrees(-self.core.psi):+.0f}도)"
         core = self.core
         if scan is None and core.v > 0.0:
             core.v = 0.0
             return dict(v=0.0, steer=core.steer, state='LANE3', reason='3차선G: 라이다가 끊김 -> 정지', note='L3G no scan')
         out = core.step_obs(obs, pose, scan, self.fixed_goal, now)
+        self._vote_signs()
         if core.message and not self.message:
             self.message, core.message = core.message, ''
         self.side_taken = core.side_taken
@@ -715,19 +890,52 @@ class GapSupervisor:
             if self._both >= 8:
                 done = '양쪽 노란 선이 계속 보임 (표지판 상자는 못 봄)'
             self._fork_end = core.sP + NO_SIGN_FORK_M
-        if core.travel >= MAX_ON_M:
+        if core.sP >= MAX_ON_M:
+            # 앞으로 나아간 거리로만 센다. 후진으로 오간 거리까지 세면 섬 앞에서 '최대 거리'에 걸려
+            # 틀어진 자세로 기본 주행에 넘어가고 코너 조향이 바로 켜져 섬을 밟았다 (송도 169초, 대회장 225초)
             done, self._fork_end = '최대 거리', core.sP
         if done:
-            self._fork_observed = (core.isl is not None and not core.give_up
-                                   and core.sP-core.isl[0] >= HANDOVER_IN
-                                   and core.travel < MAX_ON_M)
+            self._entered = core.isl is not None and core.sP - core.isl[0] >= HANDOVER_IN and not core.give_up
             self.mode = 'fork'
             side = core.side_taken if core.isl is None else (0 if core.latP > core.isl[1] else 2)
             self.side_taken = side
             self.message = (f"[3차선G] {done}: {({0: 'A(왼쪽)', 2: 'B(오른쪽)', None: '?'})[side]} -> 기본 주행에 넘김 "
                             f'(합류 끝까지 코너 조향 끔)')
             return None
+        if out.get('pass'):
+            return None                 # 이 프레임은 기본 주행 명령을 그대로 쓴다 (입구)
         return out
+
+
+def _patch_corner(SL):
+    """simple_lane.LaneEngine 의 코너 고정 조향을 '바깥 선이 정면에서 사라질 때까지' 이어 준다 (원본 파일은 그대로)."""
+    Eng = SL.LaneEngine
+    orig_command, orig_done = Eng.command, Eng._lock_done
+    max_sec = getattr(SL, 'LOCK_MAX_SEC', 5.0)
+
+    def command(self, result, tune, now, camera_ok=True):
+        self._g_res = result
+        return orig_command(self, result, tune, now, camera_ok)
+
+    def _lock_done(self, now, yaw_limit):
+        if not orig_done(self, now, yaw_limit):
+            return False
+        hold = False
+        r = getattr(self, '_g_res', None)
+        if (CORNER_HOLD and r and r.get('valid') and yaw_limit < math.radians(95.0)      # 95도 이상 = 선이 안 보일 때 쓰는 한도: 그대로 둔다
+                and now - self.lock_t <= max_sec and self.yaw is not None and self.lock_yaw is not None
+                and abs(self.yaw - self.lock_yaw) < yaw_limit + HOLD_EXTRA):
+            tilt, cross = r.get('tilt'), r.get('cross')
+            hold = (tilt is not None and abs(tilt) >= HOLD_TILT and (tilt > 0) == (self.lock_dir < 0)
+                    and cross is not None and cross[1] < HOLD_CROSS and (cross[0] == 'left') == (self.lock_dir < 0))
+        if hold and not getattr(self, '_g_hold', False):
+            print(f"\n[코너G] 고정 조향 연장 (선 기울기 {math.degrees(abs(tilt)):.0f}도, 바깥 선 정면 {cross[1]:.2f} m)")
+        if not hold and getattr(self, '_g_hold', False) and self.yaw is not None and self.lock_yaw is not None:
+            print(f"\n[코너G] 연장 끝 (odom 으로 {math.degrees(abs(self.yaw - self.lock_yaw)):.0f}도 돎)")
+        self._g_hold = hold
+        return not hold
+
+    Eng.command, Eng._lock_done = command, _lock_done
 
 
 def main():
@@ -736,9 +944,10 @@ def main():
     except ImportError:
         from jetracer_ros2 import simple_lane as SL
     SL._three_lane = types.SimpleNamespace(Lane3Supervisor=GapSupervisor)
+    _patch_corner(SL)
     if 'l3simple' in sys.argv:
         sys.argv.remove('l3simple')
-    print('[3차선G] lane3_gap.py: 3차선 + 갈림길을 위치 안 세는 방식으로 돌립니다 (simple_lane 은 그대로)')
+    print(f'[3차선G] lane3_gap.py {VERSION}: 3차선 + 갈림길 + 방지턱 + 코너 고정 조향 연장 (simple_lane.py 파일은 그대로)')
     SL.main()
 
 
