@@ -100,6 +100,10 @@ ARC_MIN = 0.25                  # 목표점은 보이는 경로 시작점에서 
 # --- 선 덩어리 ---
 LINE_MIN_PIX = 100              # 선으로 인정하는 최소 픽셀 수 (BEV, 5mm 격자)
 LINE_MIN_SPAN = 0.15            # 선으로 인정하는 최소 길이 (차에서 거리 기준, m)
+THICK_MAX = 0.08               # 노란 덩어리의 줄(BEV 가로 한 줄)마다 폭의 중앙값이 이보다 넓으면 차선이 아니라 과속방지턱 줄무늬
+                                # (11/17 경기장 기록: 차선 1.5~4.5 cm, 방지턱 노랑·검정 사선 줄무늬 11~15 cm. 줄무늬를 선으로 잡아
+                                #  사선을 코너로 보고 오른쪽 고정 조향 -> 방지턱 뒤에서 차로를 벗어남)
+BUMP_HOLD_SEC = 2.0             # 방지턱 줄무늬를 본 뒤 이 시간 동안은 곡선 모드·코너 고정 조향을 켜지 않는다
 FRAG_MIN_PIX = 15               # 선 끝에 이어 붙일 조각의 최소 픽셀 수
 FRAG_JOIN = 0.10                # 선 끝에서 이 거리(m) 안의 조각은 같은 선으로 이어 붙임 (먼 곳 끊긴 곡선)
 
@@ -347,6 +351,16 @@ def _line_tilt(line):
     return math.atan2(line.xs[k] - line.xs[0], line.fs[k] - line.fs[0])
 
 
+def _row_width(py, xm):
+    """BEV 덩어리의 가로 폭 [m]: 줄(py)마다 (가장 오른쪽 - 가장 왼쪽)의 중앙값. 차선은 2~4 cm."""
+    order = np.argsort(py, kind='stable')
+    py, xm = py[order], xm[order]
+    cut = np.flatnonzero(np.diff(py)) + 1
+    lo = np.minimum.reduceat(xm, np.r_[0, cut])
+    hi = np.maximum.reduceat(xm, np.r_[0, cut])
+    return float(np.median(hi - lo)) + RES
+
+
 def _perp_width(left, right):
     """두 선 사이의 수직 거리 (m). 곡선에서 가로로 재면 실제보다 넓게 나와서 선에 수직으로 잰다. 못 재면 None"""
     d = np.sqrt((left.xs[:, None] - right.xs[None, :]) ** 2 + (left.fs[:, None] - right.fs[None, :]) ** 2)
@@ -557,6 +571,8 @@ class LaneEngine:
         self.last_valid_t = None
         self.angle = 0.0                # 평활된 조향각 (왼쪽 +)
         self.frags = []
+        self.thick = []
+        self.bump_t = None              # 마지막으로 방지턱 줄무늬를 본 시각
         self.tracked = {'left': False, 'right': False}
         self.stopped = False
         self.resume_count = 0
@@ -586,11 +602,15 @@ class LaneEngine:
         n, labels, stats, _ = cv2.connectedComponentsWithStats(bev, connectivity=8)
         comps = []
         self.frags = []
+        self.thick = []
         for i in range(1, n):
             if stats[i, cv2.CC_STAT_AREA] < FRAG_MIN_PIX:
                 continue
             py, px = np.nonzero(labels == i)
             xm, fm = self.geo.px_to_m(px, py)
+            if stats[i, cv2.CC_STAT_AREA] >= LINE_MIN_PIX and _row_width(py, xm) > THICK_MAX:
+                self.thick.append(dict(xm=xm, fm=fm))          # 방지턱 줄무늬: 선으로 쓰지 않는다
+                continue
             d = np.hypot(xm, fm + CAMERA_FORWARD_OFFSET)
             if stats[i, cv2.CC_STAT_AREA] < LINE_MIN_PIX or d.max() - d.min() < LINE_MIN_SPAN:
                 self.frags.append(dict(xm=xm, fm=fm, px=px, py=py, d=d))
@@ -753,6 +773,8 @@ class LaneEngine:
             self.prev_path = None
             self.prev_center = 0.0
         comps = self._components(bev)
+        if self.thick:
+            self.bump_t = now
         picked = self._pick_lines(comps)
         left = self._make_line(picked['left'][1], 'left') if picked['left'] else None
         right = self._make_line(picked['right'][1], 'right') if picked['right'] else None
@@ -932,9 +954,13 @@ class LaneEngine:
             # 경로 추종(PP)이 커브 방향과 반대로 PP_DISAGREE 이상 꺾으라고 하면 곡선 모드를 믿지 않음
             # (실차 영상: 지그재그 구간에서 차가 오른쪽 선 위에 있는데 곡선 모드가 오른쪽 27도를 강제한 적 있음)
             pp = result['raw_angle']
+            bump = self.bump_t is not None and now - self.bump_t <= BUMP_HOLD_SEC
+            if bump and (self.mode == 'CURVE' or self.locked):
+                # 방지턱 줄무늬 근처: 곡선이 아니다 (사선 줄무늬를 커브로 본 것) -> 곡선 모드·고정 조향을 끈다
+                self.mode, self.in_count, self.locked = 'STRAIGHT', 0, False
             if self.mode != 'CURVE':
                 cand = ff_dir if ff_dir else tilt_dir
-                evidence = (ff_strong or (tilt is not None and abs(tilt) >= in_deg)) and not (
+                evidence = (not bump) and (ff_strong or (tilt is not None and abs(tilt) >= in_deg)) and not (
                     pp * cand < 0 and abs(pp) >= PP_DISAGREE)
                 self.in_count = self.in_count + 1 if evidence else 0
                 if self.in_count >= 2:
