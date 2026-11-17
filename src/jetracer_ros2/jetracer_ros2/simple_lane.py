@@ -795,19 +795,17 @@ class LaneEngine:
         #  - 한쪽 선만 보이면: 직선 구간에서 기억한 폭(single_width)의 절반을 띄움
         #    (곡선 입구는 폭이 벌어지는데, 그 폭을 기억한 채 바깥 선만 보고 돌면 중심이 안쪽으로 치우쳐 안쪽 선을 밟음)
         half = self.single_width / 2.0
+        candidate_width = self.lane_width
+        learn_width = False
         if left is not None and right is not None:
             w = _perp_width(left, right)
             both_tracked = self.tracked['left'] and self.tracked['right']
             if w is not None and WIDTH_MIN <= w <= WIDTH_MAX and (
                     both_tracked or abs(w - self.lane_width) <= WIDTH_TOL):
-                self.lane_width = 0.5 * self.lane_width + 0.5 * w
-                half = self.lane_width / 2.0
-                tl_, tr_ = _line_tilt(left), _line_tilt(right)
-                # 두 선이 곧고 서로 나란할 때만 (커브 입구는 기울기가 작아도 두 선이 벌어지고 있어서 제외)
-                if max(abs(tl_), abs(tr_)) < STRAIGHT_TILT and abs(tl_ - tr_) < PARALLEL_TILT:
-                    self.single_width = 0.8 * self.single_width + 0.2 * w
-            else:
-                half = self.lane_width / 2.0
+                # 경로 검증에 쓸 후보값만 계산. 탈락할 차선 조합으로 폭 기억을 오염시키지 않는다.
+                candidate_width = 0.5 * self.lane_width + 0.5 * w
+                learn_width = True
+            half = candidate_width / 2.0
         cands = []
         if left is not None:
             cands.append(_offset(left.xs, left.fs, +1, half))
@@ -815,16 +813,28 @@ class LaneEngine:
             cands.append(_offset(right.xs, right.fs, -1, half))
         if cands:
             cx, cf, gap = self._merge(cands)
-            if len(cands) == 2 and gap > 0.15:
+            if len(cands) == 2 and (not math.isfinite(gap) or gap > 0.15):
                 # 두 선이 같은 차로라고 보기 어려움 -> 예상 위치에서 더 먼 쪽 버림
                 # Tracking history cannot make contradictory center paths valid.
                 if picked['left'][0] <= picked['right'][0]:
-                    right, cands = None, cands[:1]
+                    right = None
+                    survivor, sign = left, +1
                 else:
-                    left, cands = None, cands[1:]
+                    left = None
+                    survivor, sign = right, -1
+                # 처음부터 한쪽만 보였든 두 선 중 하나를 버렸든 같은 신뢰 폭으로 다시 생성한다.
+                half = self.single_width / 2.0
+                cands = [_offset(survivor.xs, survivor.fs, sign, half)]
                 cx, cf, _ = self._merge(cands)
                 result['note'] = f'좌우 불일치 {gap * 100:.0f}cm -> 한쪽 버림'
                 result.update(left=left, right=right)
+            elif len(cands) == 2 and learn_width:
+                # 측정 범위와 양쪽 중심 후보 일치 검사를 모두 통과한 경우에만 저장한다.
+                self.lane_width = candidate_width
+                tl_, tr_ = _line_tilt(left), _line_tilt(right)
+                # 두 선이 곧고 서로 나란할 때만 한쪽 차선용 폭을 기억한다.
+                if max(abs(tl_), abs(tr_)) < STRAIGHT_TILT and abs(tl_ - tr_) < PARALLEL_TILT:
+                    self.single_width = 0.8 * self.single_width + 0.2 * w
             source = 'both' if left is not None and right is not None else (
                 'left_only' if left is not None else 'right_only')
             dist = np.hypot(cx, cf + CAMERA_FORWARD_OFFSET)
