@@ -84,7 +84,7 @@ REVERSE_RESUME_FRAMES = 3
 ARM_AFTER_M = 1.4        # 매니저: M7 시작 후 이만큼 간 뒤부터 (그 전은 코너)
 ENTRY_FRAMES = 3         # 흰 점선이 연속 이만큼 보이면 시작
 ENTRY_WAIT_M = 1.2       # 그래도 못 보면 ARM_AFTER_M + 이 거리에서 그냥 시작
-MAX_ON_M = 9.0           # 이만큼 넘게 가면 끝낸다
+MAX_ON_M = 9.0           # 시작 도로축 기준 전방 진척 한도 (후진 왕복 거리는 포함하지 않음)
 NO_SIGN_EXIT_M = 3.0     # 표지판 상자를 한 번도 못 봤을 때(YOLO 꺼짐): 이만큼 간 뒤 양쪽 노란 선이 계속 보이면 갈림길 차로로 본다
 NO_SIGN_FORK_M = 2.2     # 그때 latch 를 꺼 두는 거리
 
@@ -740,16 +740,20 @@ class GapSupervisor:
                 done = '갈림길 차로 안에서 길이 안 나옴'
             self._fork_end = core.isl[0] + EXIT_AFTER
         else:
-            self._both = self._both + 1 if (both_yellow and core.travel >= NO_SIGN_EXIT_M) else 0
+            self._both = self._both + 1 if (both_yellow and core.sP >= NO_SIGN_EXIT_M) else 0
             if self._both >= 8:
                 done = '양쪽 노란 선이 계속 보임 (표지판 상자는 못 봄)'
             self._fork_end = core.sP + NO_SIGN_FORK_M
-        if core.travel >= MAX_ON_M:
-            done, self._fork_end = '최대 거리', core.sP
+        # Reverse retries add travel without advancing through the course.
+        # Counting them here prematurely re-enabled corner latch beside the island.
+        if core.sP >= MAX_ON_M:
+            done = '최대 전방 진척'
+            if core.isl is None:
+                self._fork_end = core.sP
         if done:
             self._fork_observed = (core.isl is not None and not core.give_up
                                    and core.sP-core.isl[0] >= HANDOVER_IN
-                                   and core.travel < MAX_ON_M)
+                                   and core.sP < MAX_ON_M)
             self.mode = 'fork'
             side = core.side_taken if core.isl is None else (0 if core.latP > core.isl[1] else 2)
             self.side_taken = side
