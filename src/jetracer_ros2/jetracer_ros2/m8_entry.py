@@ -43,8 +43,8 @@ def m8_entry_policy(gate_state, armed, odom_fresh, cone_safe, lane_safe):
     return 'guarded_lane' if gate_state == 'approach' and lane_safe else 'stop'
 
 
-def _observe_line(observations, s, distance, now):
-    if distance is None or not .04 <= distance <= .60 or not all(map(math.isfinite, (s, now))):
+def _observe_line(observations, s, distance, now, max_distance=.60):
+    if distance is None or not .04 <= distance <= max_distance or not all(map(math.isfinite, (s, now))):
         observations.clear()
         return None
     line = s + distance
@@ -215,7 +215,11 @@ class M8PartialEntryGate:
         if not math.isfinite(stamp) or (self.last_stamp is not None and stamp <= self.last_stamp):
             return False
         self.last_stamp = stamp
-        line = _observe_line(self.observations, s, distance, stamp)
+        # Partial tape is often visible briefly on the outside of a turn.
+        # Keep the three-frame/8 cm consistency test; allow its early metric
+        # cue up to 70 cm instead of waiting until the junction is clipped.
+        # Full stop-line gates and other missions retain their original range.
+        line = _observe_line(self.observations, s, distance, stamp, max_distance=.70)
         if line is not None:
             self.confirmed = (line, s, stamp)
             return True

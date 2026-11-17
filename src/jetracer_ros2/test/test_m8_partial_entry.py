@@ -85,3 +85,30 @@ def test_recent_cue_survives_one_missed_image_but_cannot_renew_itself():
     g.observe(.03,-1.,10.12)
     assert g.anchor(.04,10.2)==pytest.approx(.45)
     assert g.anchor(.04,10.9) is None
+
+
+def test_early_oblique_tape_center_can_be_above_old_near_row():
+    # Visible outside end is lower than the projected image-center crossing.
+    im=tape(center=(530.,325.), shape=(280.,20.), angle=15.)
+    full,partial=detect_m8_entry_candidates(im,.58)
+    assert full is None
+    assert partial is not None and .58 <= partial.row_ratio < .65
+
+
+def test_early_partial_still_needs_three_metric_consistent_frames():
+    g=M8PartialEntryGate()
+    assert not g.observe(0.,.66,10.)
+    assert not g.observe(.01,.65,10.04)
+    assert g.observe(.02,.64,10.08)
+    assert g.anchor(.03,10.12)==pytest.approx(.66)
+
+
+def test_early_range_is_not_unbounded_and_full_line_range_unchanged():
+    from jetracer_ros2.m8_entry import M8EntryGate
+    partial=M8PartialEntryGate()
+    full=M8EntryGate(.02,.50);full.arm(0.)
+    for i in range(4):
+        partial.observe(0.,.71,10.+i*.04)
+        full.observe(0.,.65,10.+i*.04)
+    assert partial.anchor(0.,10.2) is None
+    assert full.line_s is None

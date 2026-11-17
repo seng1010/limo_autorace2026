@@ -109,7 +109,12 @@ def _detect_partial_entry(contours, hls, top, height, width):
         row = (top+cy+(width/2-cx)*math.tan(radians)+thick/(2*math.cos(radians)))/height
         # Stay within the useful near-ground image band, including when the
         # far end is clipped. Never project below the image or to the horizon.
-        if not .65 <= row <= .98:
+        # During a turn the visible tape end enters the ROI before its
+        # extrapolated center reaches row .65. Waiting for that near row can
+        # leave only one usable frame before the yellow junction disappears.
+        # This is an observation cue only: metric distance, temporal agreement
+        # and an independently checked cone command still gate ownership.
+        if not .58 <= row <= .98:
             continue
         if best is None or row > best.row_ratio:
             best = StopLineDetection(row, (x, top+y, w, h))

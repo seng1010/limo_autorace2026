@@ -453,6 +453,21 @@ def test_partial_alone_keeps_race_then_fresh_safe_cone_transfers(owner):
     assert owner.m8._m8_exit.entry_line==pytest.approx(.4)
 
 
+def test_early_partial_transfers_only_with_fresh_checked_cone(owner):
+    partial_watch(owner)
+    for _ in range(3):
+        owner.now += 40_000_000
+        owner._odom_ns = owner.now
+        partial_cue(owner, distance=.65)
+    # Early observation alone does not alter the race lane command.
+    assert owner.m8.tick(owner.now) is False
+    assert owner.output == [] and owner._active == 'M2'
+    proposal(owner, age=0.)
+    assert owner.m8.tick(owner.now)
+    assert owner._active == 'M8' and owner.output[-1] == (.1, -.13)
+    assert owner.m8._m8_exit.entry_line == pytest.approx(.65)
+
+
 @pytest.mark.parametrize('age,speed',[(.26,.1),(.1,0.),(.1,.09)])
 def test_partial_does_not_authorize_stale_stopped_or_unexecutable_cone(owner,age,speed):
     partial_watch(owner)
