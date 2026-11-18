@@ -75,6 +75,9 @@ class MissionManagerNode(Node):
             # 이 미션 전에는 YOLO 이벤트를 무시 (M5 방지턱 서행은 section_node 정지선/거리로만,
             # M3 는 m3_trigger: sign_or_line 이라 표지판 없이 정지선으로 선다). YOLO 노드는 처음부터 켜서 예열.
             'yolo_from_mission': 'M7',
+            # 안전장치: M2 가 시작된 뒤 이 거리 [m] 를 가도록 콘 구간(M8)으로 안 넘어가면 강제로 M8 로 넘김.
+            # 음수 = 끄기. M2 -> M8 이 정상으로 넘어갈 때 로그에 'M2 주행 X.XX m' 이 찍히니 그 값 + 여유로 설정
+            'm2_force_m8_after_m': -1.0,
             # True: M5 서행 구간(section_node)에서 차선을 안 보고 서행 속도로 직진, 서행이 끝나면 차선 추종
             # False(기본): 차선 추종은 그대로, 서행 구간에서 속도만 낮춤
             'm5_slow_straight': False,
@@ -145,6 +148,7 @@ class MissionManagerNode(Node):
         self._parking_cmd = Twist()
         self._last_cmd_ns = {'lane': 0, 'cone': 0, 'parking': 0}
         self._section_limit = None        # section_node 가 내는 서행 속도 (mission/speed_limit)
+        self._m2_start_s = None           # M2 시작 odom 위치 (m2_force_m8_after_m 안전장치)
         self._section_limit_ns = 0
         self._slow = False
         self._blocked = False
@@ -398,6 +402,8 @@ class MissionManagerNode(Node):
         if target_index <= self._index:
             return
         previous = self._active
+        if previous == 'M2' and self._m2_start_s is not None:
+            reason += f' (M2 주행 {self._odom.s - self._m2_start_s:.2f} m)'
         self._leave_mission(previous)
         self._index = target_index
         self._active = target
@@ -406,6 +412,7 @@ class MissionManagerNode(Node):
 
     def _enter_mission(self, mission, initial=False):
         self._mission_enter_ns = self.get_clock().now().nanoseconds
+        self._m2_start_s = None
         self._slow = False
         self._m5_section_slow_seen = False
         self._m5_section_slow_done = False
@@ -653,6 +660,8 @@ class MissionManagerNode(Node):
             self._publish(Twist())
             self._debug('operator_stop')
             return
+        if self._m2_force_m8(now):
+            return
         if self.m8.tick(now):
             return
         if self._active not in ('M1', 'M3', 'M4'):
@@ -712,6 +721,20 @@ class MissionManagerNode(Node):
                 target = min(target, self._section_limit)
             command = self._limit_speed(command, target)
         self._publish(command)
+
+    def _m2_force_m8(self, now):
+        """M2 에서 m2_force_m8_after_m 이상 갔는데 아직 M8 이 아니면 M8 로 넘긴다."""
+        limit = self.get_parameter('m2_force_m8_after_m').value
+        if self._active != 'M2' or limit < 0.0 or not self._odom_fresh(now):
+            return False
+        if self._m2_start_s is None:
+            self._m2_start_s = self._odom.s
+            return False
+        if self._odom.s - self._m2_start_s < limit:
+            return False
+        self.get_logger().warn(f'M2 거리 안전장치: 콘 구간 인계가 없어 {limit:.2f} m 에서 M8 로 강제 전환')
+        self._transition_to('M8', 'M2 distance fallback')
+        return True
 
     @staticmethod
     def _limit_speed(command, limit):
