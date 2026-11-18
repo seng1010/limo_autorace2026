@@ -39,6 +39,7 @@ setup(
             'mission_obstacle_avoid_node = jetracer_ros2.mission_obstacle_avoid_node:main',
             'mission_cone_avoid_node = jetracer_ros2.mission_cone_avoid_node:main',
             'mission_parking_node = jetracer_ros2.mission_parking_node:main',
+            'parking_line_detection = jetracer_ros2.parking_line_detection:main',
             'parking_line_detection_managed = jetracer_ros2.parking_line_detection:managed_main',
             'debug_autorace_node = jetracer_ros2.debug_autorace_node:main',
         ],

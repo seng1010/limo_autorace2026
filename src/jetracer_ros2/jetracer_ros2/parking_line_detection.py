@@ -74,6 +74,7 @@ DEFAULTS = {
     'managed_mode': False,     # True: 접근은 매니저 소유, 시작 신호 뒤 STOP_WAIT부터 실행
     # --- 빈 칸 탐색 (정지선 0 m 기준 실측: docs 참고) ---
     'slot_scan_enabled': True,  # False: 탐색 없이 기존 2번 칸 시퀀스
+    'scan_only': False,         # True: 칸 판정까지만 하고 그 자리에 정지 (주차 안 함, 판정 시험용)
     'scan_topic': '/scan',
     'odom_topic': '/odom',
     'lidar_front_deg': 0.0,
@@ -351,6 +352,11 @@ class ParkingMissionNode(Node):
                     self.stop()
                     self._choose_slot(result, now, f'판정 @ {d:+.3f}m' if result else
                                       f'{d:.2f}m 까지 빈 칸 없음 - 기본 칸')
+                    if bool(self.p['scan_only']):
+                        self.get_logger().info(
+                            f'scan_only: 판정 결과 {result if result else "없음"}번 칸, 정지')
+                        self._set_state('DONE', now)
+                        return
                     self._set_state('RETURN', now)
                     return
             self._publish_cmd(float(self.p['scan_speed']), 0.0)
