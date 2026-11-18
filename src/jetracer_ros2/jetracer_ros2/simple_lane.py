@@ -103,6 +103,7 @@ LINE_MIN_SPAN = 0.15            # 선으로 인정하는 최소 길이 (차에�
 THICK_MAX = 0.08               # 노란 덩어리의 줄(BEV 가로 한 줄)마다 폭의 중앙값이 이보다 넓으면 차선이 아니라 과속방지턱 줄무늬
                                 # (11/17 경기장 기록: 차선 1.5~4.5 cm, 방지턱 노랑·검정 사선 줄무늬 11~15 cm. 줄무늬를 선으로 잡아
                                 #  사선을 코너로 보고 오른쪽 고정 조향 -> 방지턱 뒤에서 차로를 벗어남)
+THICK_NEAR_F = 0.90             # 두께는 차 앞 이 거리 안의 부분으로만 잰다 (먼 곳은 BEV 가 늘어나 두껍게 나옴)
 BUMP_HOLD_SEC = 2.0             # 방지턱 줄무늬를 본 뒤 이 시간 동안은 곡선 모드·코너 고정 조향을 켜지 않는다
 FRAG_MIN_PIX = 15               # 선 끝에 이어 붙일 조각의 최소 픽셀 수
 FRAG_JOIN = 0.10                # 선 끝에서 이 거리(m) 안의 조각은 같은 선으로 이어 붙임 (먼 곳 끊긴 곡선)
@@ -163,6 +164,11 @@ STRAIGHT_TILT = math.radians(12.0)   # 선 기울기가 이보다 작을 때만 
 # odom 기준으로 turn_deg 만큼 돌면 풀어서 다시 차선을 따라감. 도는 중에 선이 안 보여도 멈추지 않음.
 # (실차 기록: 경로만 따라가면 최대 조향에 도달하는 시점이 정면 0.54m 로 늦어 바깥 선까지 밀렸고, 선을 놓치자 63도 돈 곳에서 멈췄음)
 LOCK_BLIND_YAW = math.radians(100.0) # 선이 안 보이는 채로는 이만큼까지만 돌고 정지
+# M5 의 코너(트랙 오른쪽 위, 90도, 지나면 바로 M6 지그재그): 코너 고정 조향을 IMU 로 이만큼 돌 때까지 유지
+# (11/17 경기장 기록 115.4~118.7초: odom 60도에서 풀었는데 실제(IMU)는 50도 -> 30도 넘게 덜 돌아 왼쪽 지그재그 선 쪽으로 감.
+#  다른 코너는 지금 값(turn_deg, odom)으로 맞춰 둔 것이라 그대로 둔다)
+M5_TURN_DEG = 85.0
+M5_LOCK_MAX_SEC = 7.0                # 90도 가까이 돌려면 0.18 m/s 로 약 4.5초 걸린다
 LOCK_MAX_SEC = 5.0                   # 고정 조향 최대 시간 (odom 이 멈추거나 없어도 이 시간이 지나면 끝냄)
 CAMERA_TIMEOUT = 0.3            # 영상이 이 시간 넘게 안 오면 정지
 RESET_SEC = 1.5                 # drive 시작 후 이 시간 동안은 정지·직진 명령만 보내 조향 초기화
@@ -351,14 +357,19 @@ def _line_tilt(line):
     return math.atan2(line.xs[k] - line.xs[0], line.fs[k] - line.fs[0])
 
 
-def _row_width(py, xm):
-    """BEV 덩어리의 가로 폭 [m]: 줄(py)마다 (가장 오른쪽 - 가장 왼쪽)의 중앙값. 차선은 2~4 cm."""
-    order = np.argsort(py, kind='stable')
-    py, xm = py[order], xm[order]
-    cut = np.flatnonzero(np.diff(py)) + 1
-    lo = np.minimum.reduceat(xm, np.r_[0, cut])
-    hi = np.maximum.reduceat(xm, np.r_[0, cut])
-    return float(np.median(hi - lo)) + RES
+def _thickness(labels, i, stat, near_row=0):
+    """BEV 덩어리 i 의 두께 [m]: 안에 들어가는 가장 큰 원의 지름 (거리 변환 최댓값 x 2).
+    선이 어느 방향으로 기울었든, 휘었든 선 폭 그대로 나온다 (차선 2~4 cm, 방지턱 줄무늬 11~15 cm).
+    (가로 줄마다 폭을 재면 크게 기운 선 - 급한 코너의 바깥 선 - 은 폭이 몇 배로 나와 차선을 줄무늬로 볼 수 있다)
+    near_row: 이 BEV 줄보다 가까운(아래) 부분만 잰다. 먼 곳은 BEV 가 앞뒤로 늘어나 가는 선도 두껍게 나온다
+    (11/17 기록 113~115초: 1.2 m 앞을 가로지르는 코너 바깥 선이 9 cm 로 재짐)"""
+    x, y, w, h = (int(stat[k]) for k in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP, cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT))
+    y0 = max(y, int(near_row))
+    if y0 >= y + h:
+        return 0.0
+    m = (labels[y0:y + h, x:x + w] == i).astype(np.uint8)
+    d = cv2.distanceTransform(np.pad(m, 1), cv2.DIST_L2, 3)
+    return 2.0 * float(d.max()) * RES
 
 
 def _perp_width(left, right):
@@ -557,6 +568,9 @@ class LaneEngine:
         self.mem = LineMemory()
         self.blind_t = None             # 선이 안 보여 기억만으로 달리기 시작한 시각
         self.yaw = None                 # /odom 방향 (rad, 연속값). 없으면 None
+        self.imu_yaw = None             # /imu 자이로를 쌓은 방향 (rad). 노드가 넣어 줌. 없으면 None
+        self.lock_imu_yaw = None
+        self.turn_deg_override = None   # 값이 있으면 코너 고정 조향을 IMU 로 이만큼(도) 돌 때까지 (M5 코너)
         self.locked = False             # 코너 고정 조향 중인지
         self.lock_dir = 0
         self.lock_yaw = None
@@ -573,6 +587,7 @@ class LaneEngine:
         self.frags = []
         self.thick = []
         self.bump_t = None              # 마지막으로 방지턱 줄무늬를 본 시각
+        self.bump_enabled = False       # M5(과속방지턱 구간)에서만 켠다 (mission/active). 다른 구간의 기본 주행은 그대로
         self.tracked = {'left': False, 'right': False}
         self.stopped = False
         self.resume_count = 0
@@ -603,12 +618,21 @@ class LaneEngine:
         comps = []
         self.frags = []
         self.thick = []
+        # 방지턱 줄무늬: 가까운 곳(THICK_NEAR_F 안)에서 THICK_MAX 보다 두꺼운 덩어리가 두 개 이상 (줄무늬는 늘 여러 줄)
+        # 하나뿐이면 차선이 겹치거나 붙은 것일 수 있어 그대로 둔다 (11/17 기록 95~97초: 갈라지는 차선 한 덩어리 9 cm)
+        stripes = set()
+        if self.bump_enabled:
+            near_row = self.geo.m_to_px(0.0, THICK_NEAR_F)[1]
+            stripes = {i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] >= LINE_MIN_PIX // 2
+                       and _thickness(labels, i, stats[i], near_row) > THICK_MAX}
+            if len(stripes) < 2:
+                stripes = set()
         for i in range(1, n):
             if stats[i, cv2.CC_STAT_AREA] < FRAG_MIN_PIX:
                 continue
             py, px = np.nonzero(labels == i)
             xm, fm = self.geo.px_to_m(px, py)
-            if stats[i, cv2.CC_STAT_AREA] >= LINE_MIN_PIX and _row_width(py, xm) > THICK_MAX:
+            if i in stripes:
                 self.thick.append(dict(xm=xm, fm=fm))          # 방지턱 줄무늬: 선으로 쓰지 않는다
                 continue
             d = np.hypot(xm, fm + CAMERA_FORWARD_OFFSET)
@@ -915,6 +939,10 @@ class LaneEngine:
         """코너 고정 조향을 시작한 뒤 yaw_limit 만큼 돌았는지 (odom 이 없으면 속도로 추정).
         어떤 경우든 LOCK_MAX_SEC 를 넘기면 끝낸다 (실차 기록: 주행 코드를 켠 채 차를 들어 옮기자 odom 이 멈춰서
         고정 조향이 12초 동안 안 풀렸음)."""
+        if self.turn_deg_override is not None and self.imu_yaw is not None and self.lock_imu_yaw is not None:
+            if now - self.lock_t > M5_LOCK_MAX_SEC:
+                return True
+            return abs(self.imu_yaw - self.lock_imu_yaw) >= math.radians(self.turn_deg_override)
         if now - self.lock_t > LOCK_MAX_SEC:
             return True
         if self.yaw is not None and self.lock_yaw is not None:
@@ -954,7 +982,7 @@ class LaneEngine:
             # 경로 추종(PP)이 커브 방향과 반대로 PP_DISAGREE 이상 꺾으라고 하면 곡선 모드를 믿지 않음
             # (실차 영상: 지그재그 구간에서 차가 오른쪽 선 위에 있는데 곡선 모드가 오른쪽 27도를 강제한 적 있음)
             pp = result['raw_angle']
-            bump = self.bump_t is not None and now - self.bump_t <= BUMP_HOLD_SEC
+            bump = self.bump_enabled and self.bump_t is not None and now - self.bump_t <= BUMP_HOLD_SEC
             if bump and (self.mode == 'CURVE' or self.locked):
                 # 방지턱 줄무늬 근처: 곡선이 아니다 (사선 줄무늬를 커브로 본 것) -> 곡선 모드·고정 조향을 끈다
                 self.mode, self.in_count, self.locked = 'STRAIGHT', 0, False
@@ -1004,6 +1032,7 @@ class LaneEngine:
                         and front is not None and front <= tune.get('turn_in_cm', 75) / 100.0
                         and not (raw * self.curve_dir < 0 and abs(raw) >= PP_DISAGREE)):
                     self.locked, self.lock_dir, self.lock_yaw, self.lock_t = True, self.curve_dir, self.yaw, now
+                    self.lock_imu_yaw = self.imu_yaw
             else:
                 # 충분히 돌면 고정을 풂. (도는 중에는 경로 추종의 의견을 듣지 않음: 경로는 바깥 선을 따라 늦게 휘어서,
                 #  일찍 꺾은 차를 "안쪽으로 들어왔다"고 보고 반대로 꺾게 만들었음 - 시뮬레이션에서 확인)
@@ -1697,7 +1726,7 @@ def run_ros(mode, topic, record=False):
     from geometry_msgs.msg import Twist
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
-    from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
+    from sensor_msgs.msg import CameraInfo, CompressedImage, Imu, LaserScan
     from std_msgs.msg import String
     from collections import deque
     from nav_msgs.msg import Odometry
@@ -1774,6 +1803,8 @@ def run_ros(mode, topic, record=False):
             self.odom_seen = {}
             for name in (ODOM_TOPIC, '/limo/odom' if ODOM_TOPIC == '/odom' else '/odom'):
                 self.create_subscription(Odometry, name, lambda m, n=name: self.on_odom(m, n), qos_profile_sensor_data)
+            self.imu_stamp = None
+            self.create_subscription(Imu, '/imu', self.on_imu, qos_profile_sensor_data)
             if self.lane3 is not None:
                 self.create_subscription(LaserScan, SCAN_TOPIC, self.on_scan, qos_profile_sensor_data)
                 self.create_subscription(String, 'mission/active', self.on_mission, 10)
@@ -1802,7 +1833,21 @@ def run_ros(mode, topic, record=False):
             self.scan = (np.asarray(msg.ranges, dtype=np.float32), msg.angle_min, msg.angle_increment, msg.range_min)
             self.scan_t = time.monotonic()
 
+        def on_imu(self, msg):
+            # 자이로 z 를 쌓는다 (코너 고정 조향을 얼마나 돌았나 재는 용도. 4~5초 동안의 차이만 쓰므로 영점은 무시)
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if stamp <= 0.0:
+                stamp = time.monotonic()
+            if self.imu_stamp is not None and 0.0 < stamp - self.imu_stamp <= 0.1:
+                self.engine.imu_yaw = (self.engine.imu_yaw or 0.0) + msg.angular_velocity.z * (stamp - self.imu_stamp)
+            elif self.engine.imu_yaw is None:
+                self.engine.imu_yaw = 0.0
+            self.imu_stamp = stamp
+
         def on_mission(self, msg):
+            m5 = msg.data.strip() == 'M5'
+            self.engine.bump_enabled = m5                          # 방지턱 줄무늬 거르기는 M5 에서만
+            self.engine.turn_deg_override = M5_TURN_DEG if m5 else None   # M5 코너는 IMU 로 85도까지 돈다
             self.lane3.set_mission(msg.data.strip())
             if self.fork_reporter is not None:
                 self.fork_reporter.set_mission(msg.data.strip())
