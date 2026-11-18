@@ -138,10 +138,7 @@ def test_pre_m7_lane_commands_do_not_require_manager_odom(modules, mission):
     step(n, refresh_odom=False)
     cmd = n.cmd_pub.messages[-1]
     assert cmd.linear.x == .13
-    if mission == 'M5':
-        assert cmd.angular.z == 0.   # M5 서행 구간은 차선 무시하고 직진 (m5_slow_straight)
-    else:
-        assert cmd.angular.z / cmd.linear.x == pytest.approx(.10 / .25)
+    assert cmd.angular.z / cmd.linear.x == pytest.approx(.10 / .25)
     assert n._active == mission
 
 

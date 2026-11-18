@@ -96,7 +96,7 @@ def test_bad_yolo_from_mission_is_rejected(modules):
 
 
 def test_m5_slow_zone_drives_straight_then_resumes_lane(modules):
-    n = owner(modules, 'M5')
+    n = owner(modules, 'M5', m5_slow_straight=True)
     n._speed_limit_callback(NS(data=.15))       # 서행 구간 시작
     step(n)
     cmd = n.cmd_pub.messages[-1]
@@ -107,11 +107,15 @@ def test_m5_slow_zone_drives_straight_then_resumes_lane(modules):
     assert cmd.linear.x == pytest.approx(.25) and cmd.angular.z != 0.   # 다시 차선 추종
 
 
-def test_m5_slow_straight_can_be_disabled(modules):
-    n = owner(modules, 'M5', m5_slow_straight=False)
-    n._speed_limit_callback(NS(data=.15))
+def test_m5_slow_zone_keeps_lane_following_by_default(modules):
+    n = owner(modules, 'M5')
+    n._speed_limit_callback(NS(data=.15))       # 서행 구간: 속도만 낮추고 차선 조향 유지
     step(n)
-    assert n.cmd_pub.messages[-1].angular.z != 0.
+    cmd = n.cmd_pub.messages[-1]
+    assert cmd.linear.x == pytest.approx(.15) and cmd.angular.z != 0.
+    n._speed_limit_callback(NS(data=-1.))       # 서행 끝 -> 원래 속도
+    step(n)
+    assert n.cmd_pub.messages[-1].linear.x == pytest.approx(.25)
 
 
 def test_slow_straight_is_m5_only(modules):
