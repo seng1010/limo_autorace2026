@@ -64,7 +64,8 @@ def modules(monkeypatch):
         'rclpy.node': dict(Node=Node),
         'rclpy.executors': dict(ExternalShutdownException=type('Shutdown', (Exception,), {})),
         'rclpy.qos': dict(DurabilityPolicy=NS(TRANSIENT_LOCAL=1),
-                         QoSProfile=lambda **kwargs: kwargs),
+                         QoSProfile=lambda **kwargs: kwargs, qos_profile_sensor_data=10),
+        'sensor_msgs.msg': dict(LaserScan=NS),
         'geometry_msgs.msg': dict(Twist=Twist, PointStamped=Stamped, TwistStamped=Stamped),
         'nav_msgs.msg': dict(Odometry=NS),
         'std_msgs.msg': dict(Bool=NS, String=NS, Float32=NS, Header=NS),
@@ -464,7 +465,7 @@ def test_manager_and_parking_exchange_real_callbacks_to_completion(modules, monk
     n = owner(modules, 'M4')
     clock = [n.now / 1e9]
     monkeypatch.setattr(modules.parking.time, 'monotonic', lambda: clock[0])
-    Node.overrides = {'managed_mode': True}
+    Node.overrides = {'managed_mode': True, 'slot_scan_enabled': False}
     p = modules.parking.ParkingMissionNode()
     offsets = [0, 0, 0, 0]
     def forward(pub, callback, slot):
@@ -492,7 +493,7 @@ def test_manager_and_parking_exchange_real_callbacks_to_completion(modules, monk
 def test_managed_parking_cannot_run_without_current_authority(modules, monkeypatch, failure):
     clock = [0.]
     monkeypatch.setattr(modules.parking.time, 'monotonic', lambda: clock[0])
-    Node.overrides = {'managed_mode': True}
+    Node.overrides = {'managed_mode': True, 'slot_scan_enabled': False}
     p = modules.parking.ParkingMissionNode()
     p._state, p._state_start = 'PARKING', 0.
     p._start_cb(NS(data=True))
@@ -512,7 +513,7 @@ def test_managed_parking_cannot_run_without_current_authority(modules, monkeypat
 def test_managed_parking_interface_preserves_phases_and_pauses_elapsed_time(modules, monkeypatch):
     clock = [0.]
     monkeypatch.setattr(modules.parking.time, 'monotonic', lambda: clock[0])
-    Node.overrides = {'managed_mode': True}
+    Node.overrides = {'managed_mode': True, 'slot_scan_enabled': False}
     p = modules.parking.ParkingMissionNode()
     original = list(p.parking_phases)
     assert original == [('forward', 1.7, .50, 0.), ('turn', 1.8, .50, -.45),
@@ -661,7 +662,7 @@ def test_curve_approach_through_m8_traffic_light_and_final_parking(modules, monk
     # Wire the managed parking node to the actual manager transport callbacks.
     clock = [n.now / 1e9]
     monkeypatch.setattr(modules.parking.time, 'monotonic', lambda: clock[0])
-    Node.overrides = {'managed_mode': True}
+    Node.overrides = {'managed_mode': True, 'slot_scan_enabled': False}
     parking = modules.parking.ParkingMissionNode()
     parking._active_cb(NS(data='M4'))
     state_offset = 0

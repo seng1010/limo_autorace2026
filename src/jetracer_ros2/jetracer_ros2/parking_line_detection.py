@@ -4,7 +4,10 @@
   1) APPROACH  : 정지선이 목표 거리(stop_distance_m) 이내로 올 때까지 직진 접근
                  (정지선이 아직 안 보이면 approach_speed 로 탐색 주행)
   2) STOP_WAIT : 정지선 도달 후 settle_sec 동안 완전 정지 (차체 흔들림 안정화)
-  3) FORWARD   : forward_sec 동안 직진 (a)
+  2-1) SCAN    : scan_speed 로 직진하며 우측 LiDAR(P30)+odom 으로 빈 칸(1/2/3) 판정
+  2-2) RETURN  : 정지선(odom 0 m)까지 직진 후진 -> 판정된 칸에 맞춰 forward 시간 선택
+                 (slot_scan_enabled=false 면 2-1/2-2 생략, 기존처럼 2번 칸 기준)
+  3) FORWARD   : forward_sec 동안 직진 (a)  [1번/3번 칸은 slot1_*/slot3_* 값 사용]
   4) TURN      : turn_sec 동안 우회전 (b)
   5) ENTER     : enter_sec 동안 주차 칸 진입 (c)
   6) DONE      : 최종 정지
@@ -16,31 +19,67 @@ import re
 import sys
 import time
 
+import math
+
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32, String
 
+from jetracer_ros2.parking_logic import BaySlotClassifier, scan_sector_percentile
 from jetracer_ros2.utils.ackermann_utils import HARDWARE_MAX_INNER_ANGLE, inner_angle_to_omega
 
 TICK_SEC = 0.05  # 20 Hz
 
 DEFAULTS = {
+    # ===== 칸별 주차 시간 (실차에서 안 맞으면 여기만 조정) =====
+    # 2번 칸 = 기존에 맞춰 둔 값. 정지선에서 speed(0.5 m/s)로 forward_sec 만큼 직진.
+    # 칸 간격 실측 ~0.47 m (차1 중심 0.58 m, 차2 1.04 m, 차3 1.52 m)
+    #   -> 0.47 m / 0.5 m/s = 0.94 s 를 2번 칸 forward 에서 빼고(1번) 더함(3번).
+    # 1번 칸: 정지선에서 ~0.47 m 덜 감
+    'slot1_forward_sec': 0.76,  # a: 1.7 - 0.94
+    'slot1_turn_sec': 1.8,      # b
+    'slot1_enter_sec': 0.1,     # c
+    # 2번 칸 (기존 값 그대로)
+    'forward_sec': 1.7,         # a: 정지선에서 직진 시간 [s]
+    'turn_sec': 1.8,            # b: 우회전 시간 [s]
+    'enter_sec': 0.1,           # c: 칸 안으로 직진 시간 [s]
+    # 3번 칸: 정지선에서 ~0.47 m 더 감
+    'slot3_forward_sec': 2.64,  # a: 1.7 + 0.94
+    'slot3_turn_sec': 1.8,      # b
+    'slot3_enter_sec': 0.1,     # c
+    # ==========================================================
     'output_topic': '/cmd_vel',
     'approach_speed': 0.25,     # 정지선 접근 속도 [m/s] (너무 빠르면 정지선 지나침)
     'stop_distance_m': 0.05,    # 정지선 멈춤 기준 거리 [m] (0.05m = 5cm 앞)
     'settle_sec': 1.0,          # 정지선 도착 후 주차 시작 전 대기 시간 [s]
-    'forward_sec': 1.7,         # a: 정지선에서 직진 시간 [s]
-    'turn_sec': 1.8,            # b: 우회전 시간 [s]
-    'enter_sec': 0.1,           # c: 칸 안으로 직진 시간 [s]
     'speed': 0.50,              # 주차 직진 속도 [m/s]
     'turn_speed': 0.50,         # 주차 우회전 속도 [m/s]
     'turn_steer_rad': 0.45,     # 우회전 조향각 크기 [rad]
     'start_delay_sec': 0.0,     # 실행 후 출발까지 대기 [s]
     'wait_enter': False,        # True면 Enter를 눌러야 출발
     'managed_mode': False,     # True: 접근은 매니저 소유, 시작 신호 뒤 STOP_WAIT부터 실행
+    # --- 빈 칸 탐색 (정지선 0 m 기준 실측: docs 참고) ---
+    'slot_scan_enabled': True,  # False: 탐색 없이 기존 2번 칸 시퀀스
+    'scan_topic': '/scan',
+    'odom_topic': '/odom',
+    'lidar_front_deg': 0.0,
+    'right_angle_min_deg': -105.0,
+    'right_angle_max_deg': -75.0,
+    'scan_speed': 0.10,          # 탐색 직진 속도 [m/s] (실측과 같은 0.10 권장)
+    'return_speed': 0.15,        # 정지선 복귀 후진 속도 크기 [m/s]
+    'open_min_range_m': 1.0,     # P30 >= 이 값이면 열림 (막힘 실측 0.46~0.90, 열림 1.9~5.2)
+    'slot1_open_until_m': 0.65,  # 처음 열림이 여기까지 이어지면 1번 칸 (차1은 0.41~0.47 에서 시작)
+    'slot2_max_open_start_m': 0.95,  # 차 뒤 열림 시작이 이보다 앞이면 2번(0.70~0.74), 뒤면 3번(1.16)
+    'scan_give_up_m': 1.80,      # 여기까지 판정 못 하면 fallback_slot
+    'fallback_slot': 2,
+    'sensor_timeout_sec': 0.5,   # odom/scan 이 이보다 오래되면 정지 후 대기
+    'sensor_fallback_sec': 3.0,  # 센서 없이 이만큼 지나면 fallback_slot 으로 진행
 }
 
 
@@ -62,18 +101,38 @@ class ParkingMissionNode(Node):
         self.settle_sec = float(p['settle_sec'])
         self.start_delay = float(p['start_delay_sec'])
         self.managed = bool(p['managed_mode'])
+        self.p = p
+        self.slot_scan_enabled = bool(p['slot_scan_enabled'])
+        self.classifier = BaySlotClassifier(
+            open_min_range_m=float(p['open_min_range_m']),
+            slot1_open_until_m=float(p['slot1_open_until_m']),
+            slot2_max_open_start_m=float(p['slot2_max_open_start_m']),
+            give_up_m=float(p['scan_give_up_m']))
+        self.slot = None
+        self._odom_pose = None      # (x, y, yaw)
+        self._odom_at = None
+        self._scan_p30 = None
+        self._scan_at = None
+        self._scan_seq = 0
+        self._scan_seen_seq = 0
+        self._origin = None         # 정지선 위치 (x, y, yaw)
+        self._stale_since = None
         self._enabled = False
         self._enable_at = None
         self._active_mission = ''
         self._active_at = None
         self._pause_since = None
 
-        # 정지선 정지 이후 실행할 주차 단계들
-        self.parking_phases = [
-            ('forward', float(p['forward_sec']), float(p['speed']), 0.0),
-            ('turn', float(p['turn_sec']), float(p['turn_speed']), -steer),
-            ('enter', float(p['enter_sec']), float(p['speed']), 0.0),
-        ]
+        # 칸별 (forward, turn, enter) 시간 [s]. 2번 칸 = 기존 forward/turn/enter_sec
+        self.phase_sec_by_slot = {
+            1: (p['slot1_forward_sec'], p['slot1_turn_sec'], p['slot1_enter_sec']),
+            2: (p['forward_sec'], p['turn_sec'], p['enter_sec']),
+            3: (p['slot3_forward_sec'], p['slot3_turn_sec'], p['slot3_enter_sec']),
+        }
+        self._steer = steer
+
+        # 정지선 정지 이후 실행할 주차 단계들 (칸 판정 후 _set_slot_phases 로 교체)
+        self._set_slot_phases(2)
 
         # 상태 변수
         self.stop_line_detected = False
@@ -97,6 +156,10 @@ class ParkingMissionNode(Node):
             Bool, 'mission/stop_line_detected', self._detected_cb, 10)
         self.create_subscription(
             Float32, 'mission/stop_line_distance', self._distance_cb, 10)
+        if self.slot_scan_enabled:
+            self.create_subscription(Odometry, p['odom_topic'], self._odom_cb, 20)
+            self.create_subscription(
+                LaserScan, p['scan_topic'], self._scan_cb, qos_profile_sensor_data)
 
         self.timer = self.create_timer(TICK_SEC, self._tick)
         self.get_logger().info(
@@ -108,6 +171,65 @@ class ParkingMissionNode(Node):
 
     def _distance_cb(self, msg: Float32):
         self.stop_line_distance = msg.data
+
+    def _odom_cb(self, msg: Odometry):
+        pose = msg.pose.pose
+        q = pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self._odom_pose = (pose.position.x, pose.position.y, yaw)
+        self._odom_at = time.monotonic()
+
+    def _scan_cb(self, scan: LaserScan):
+        self._scan_p30 = scan_sector_percentile(
+            scan, float(self.p['right_angle_min_deg']), float(self.p['right_angle_max_deg']),
+            percentile=30.0, front_angle_deg=float(self.p['lidar_front_deg']))
+        self._scan_at = time.monotonic()
+        self._scan_seq += 1
+
+    def _travel(self):
+        """정지선(_origin)부터 처음 방향 기준 전진 거리 [m] (후진이면 감소)."""
+        x0, y0, yaw0 = self._origin
+        x, y, _ = self._odom_pose
+        return (x - x0) * math.cos(yaw0) + (y - y0) * math.sin(yaw0)
+
+    def _sensors_fresh(self, now, need_scan):
+        timeout = float(self.p['sensor_timeout_sec'])
+        ok = self._odom_at is not None and now - self._odom_at <= timeout
+        if need_scan:
+            ok = ok and self._scan_at is not None and now - self._scan_at <= timeout
+        if ok:
+            self._stale_since = None
+        elif self._stale_since is None:
+            self._stale_since = now
+            self.get_logger().warn('odom/scan 없음 - 정지 후 대기')
+        return ok
+
+    def _sensor_gave_up(self, now):
+        return (self._stale_since is not None
+                and now - self._stale_since >= float(self.p['sensor_fallback_sec']))
+
+    def _set_slot_phases(self, slot):
+        forward, turn, enter = (float(v) for v in self.phase_sec_by_slot[slot])
+        speed, turn_speed = float(self.p['speed']), float(self.p['turn_speed'])
+        self.parking_phases = [
+            ('forward', forward, speed, 0.0),
+            ('turn', turn, turn_speed, -self._steer),
+            ('enter', enter, speed, 0.0),
+        ]
+
+    def _choose_slot(self, slot, now, reason):
+        if slot not in (1, 2, 3):
+            slot = int(self.p['fallback_slot'])
+        self.slot = slot
+        self._set_slot_phases(slot)
+        f, t, e = (ph[1] for ph in self.parking_phases)
+        self.get_logger().info(
+            f'>>> {slot}번 칸 주차 ({reason}): forward {f:.2f}s / turn {t:.2f}s / enter {e:.2f}s')
+
+    def _start_parking(self, now):
+        self._phase_index = 0
+        self._set_state('PARKING', now)
+        self.get_logger().info(f'주차 시작 -> {self.parking_phases[0][0]}')
 
     def _start_cb(self, msg):
         self._enabled = bool(msg.data)
@@ -195,9 +317,58 @@ class ParkingMissionNode(Node):
         if self._state == 'STOP_WAIT':
             self.stop()
             if now - self._state_start >= self.settle_sec:
-                self._phase_index = 0
-                self._set_state('PARKING', now)
-                self.get_logger().info(f'주차 시작 -> {self.parking_phases[0][0]}')
+                if not self.slot_scan_enabled:
+                    self._start_parking(now)
+                elif self._sensors_fresh(now, need_scan=True):
+                    self._origin = self._odom_pose
+                    self.classifier.reset()
+                    self._scan_seen_seq = self._scan_seq
+                    self._set_state('SCAN', now)
+                elif self._sensor_gave_up(now):
+                    self._choose_slot(None, now, '센서 없음 - 기본 칸')
+                    self._start_parking(now)
+            return
+
+        # 2-1. 빈 칸 탐색: 천천히 직진하며 판정
+        if self._state == 'SCAN':
+            if not self._sensors_fresh(now, need_scan=True):
+                self.stop()
+                if self._sensor_gave_up(now):
+                    self._choose_slot(None, now, '센서 끊김 - 기본 칸')
+                    self._set_state('RETURN', now)
+                return
+            d = self._travel()
+            if self._scan_seq != self._scan_seen_seq:
+                self._scan_seen_seq = self._scan_seq
+                result = self.classifier.update(d, self._scan_p30)
+                if result is not None:
+                    self.stop()
+                    self._choose_slot(result, now, f'판정 @ {d:+.3f}m' if result else
+                                      f'{d:.2f}m 까지 빈 칸 없음 - 기본 칸')
+                    self._set_state('RETURN', now)
+                    return
+            self._publish_cmd(float(self.p['scan_speed']), 0.0)
+            return
+
+        # 2-2. 정지선(0 m)까지 직진 후진 -> 기존 시퀀스와 같은 출발점
+        if self._state == 'RETURN':
+            if not self._sensors_fresh(now, need_scan=False):
+                self.stop()
+                if self._sensor_gave_up(now):
+                    self.get_logger().warn('odom 끊김 - 현재 위치에서 주차 시작')
+                    self._start_parking(now)
+                return
+            if self._travel() <= 0.0:
+                self.stop()
+                self._set_state('RETURN_WAIT', now)
+                return
+            self._publish_cmd(-abs(float(self.p['return_speed'])), 0.0)
+            return
+
+        if self._state == 'RETURN_WAIT':
+            self.stop()
+            if now - self._state_start >= self.settle_sec:
+                self._start_parking(now)
             return
 
         # 3. 기존 T자 주차 시퀀스 (forward -> turn -> enter)
