@@ -37,6 +37,14 @@ from jetracer_ros2.utils.ackermann_utils import HARDWARE_MAX_INNER_ANGLE, inner_
 TICK_SEC = 0.05  # 20 Hz
 
 DEFAULTS = {
+    # ===== 빈 칸 판별 (정지선 0 m 기준 odom 누적 거리) =====
+    'slot_ignore_until_m': 0.45,    # 정지선 직후 여기까지는 항상 열려 보여서 무시
+    'slot_min_open_m': 0.30,        # 이만큼 연속으로 열려야 빈칸 확정 (차 사이 틈 0.01~0.06 m 무시)
+    # 확정 거리 실측: 1번 0.75 m / 2번 0.995~1.04 m / 3번 1.46 m -> 경계는 그 중간값
+    'slot1_max_confirm_m': 0.87,    # 확정 거리 < 0.87 m -> 1번 칸
+    'slot2_max_confirm_m': 1.25,    # 확정 거리 < 1.25 m -> 2번 칸, 그 이상 -> 3번 칸
+    'scan_give_up_m': 2.00,         # 여기까지 확정 못 하면 fallback_slot
+    'open_min_range_m': 1.0,        # 우측 P30 >= 이 값이면 열림 (막힘 0.46~0.90, 열림 1.9~5.2)
     # ===== 칸별 주차 시간 (실차에서 안 맞으면 여기만 조정) =====
     # 2번 칸 = 기존에 맞춰 둔 값. 정지선에서 speed(0.5 m/s)로 forward_sec 만큼 직진.
     # 칸 간격 실측 ~0.47 m (차1 중심 0.58 m, 차2 1.04 m, 차3 1.52 m)
@@ -73,10 +81,6 @@ DEFAULTS = {
     'right_angle_max_deg': -75.0,
     'scan_speed': 0.10,          # 탐색 직진 속도 [m/s] (실측과 같은 0.10 권장)
     'return_speed': 0.15,        # 정지선 복귀 후진 속도 크기 [m/s]
-    'open_min_range_m': 1.0,     # P30 >= 이 값이면 열림 (막힘 실측 0.46~0.90, 열림 1.9~5.2)
-    'slot1_open_until_m': 0.65,  # 처음 열림이 여기까지 이어지면 1번 칸 (차1은 0.41~0.47 에서 시작)
-    'slot2_max_open_start_m': 0.95,  # 차 뒤 열림 시작이 이보다 앞이면 2번(0.70~0.74), 뒤면 3번(1.16)
-    'scan_give_up_m': 1.80,      # 여기까지 판정 못 하면 fallback_slot
     'fallback_slot': 2,
     'sensor_timeout_sec': 0.5,   # odom/scan 이 이보다 오래되면 정지 후 대기
     'sensor_fallback_sec': 3.0,  # 센서 없이 이만큼 지나면 fallback_slot 으로 진행
@@ -105,8 +109,10 @@ class ParkingMissionNode(Node):
         self.slot_scan_enabled = bool(p['slot_scan_enabled'])
         self.classifier = BaySlotClassifier(
             open_min_range_m=float(p['open_min_range_m']),
-            slot1_open_until_m=float(p['slot1_open_until_m']),
-            slot2_max_open_start_m=float(p['slot2_max_open_start_m']),
+            ignore_until_m=float(p['slot_ignore_until_m']),
+            min_open_m=float(p['slot_min_open_m']),
+            slot1_max_confirm_m=float(p['slot1_max_confirm_m']),
+            slot2_max_confirm_m=float(p['slot2_max_confirm_m']),
             give_up_m=float(p['scan_give_up_m']))
         self.slot = None
         self._odom_pose = None      # (x, y, yaw)

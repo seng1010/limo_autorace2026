@@ -125,55 +125,48 @@ class EmptyBayConfirmation:
 class BaySlotClassifier:
     """정지선(0 m)부터 직진하며 우측 P30과 odom 거리로 빈 칸 번호(1/2/3)를 판정.
 
-    실측(정지선 기준, 0.10 m/s, 우측 -105..-75deg P30):
-      1번 빈칸: 정지선부터 열린 구간이 ~0.93 m 까지 이어짐 (차1이 없음)
-      2번 빈칸: 0.41~0.47 m 에서 막힘(차1) -> 0.70~0.74 m 에서 다시 열림 (폭 ~0.63 m)
-      3번 빈칸: 0.41 m 에서 막힘(차1+차2, 사이 틈 <=0.06 m) -> 1.16 m 에서 열림
+    1) 정지선 직후 ignore_until_m(0.45 m)까지는 항상 열려 보이므로 무시
+    2) 그 뒤 P30 >= open_min_range_m 가 min_open_m(0.30 m) 이상 연속이면 빈칸 확정
+       (차 사이 틈 0.01~0.06 m 는 여기서 걸러짐)
+    3) 확정 시점의 정지선 기준 거리로 칸 판별
+       실측 확정 지점: 1번 0.75 m / 2번 0.995~1.04 m / 3번 1.46 m
+       -> < slot1_max_confirm_m(0.87): 1번, < slot2_max_confirm_m(1.25): 2번, 그 외 3번
     """
 
-    def __init__(self, open_min_range_m=1.0, min_block_m=0.10, min_open_m=0.15,
-                 slot1_open_until_m=0.65, slot2_max_open_start_m=0.95,
-                 give_up_m=1.80):
+    def __init__(self, open_min_range_m=1.0, ignore_until_m=0.45, min_open_m=0.30,
+                 slot1_max_confirm_m=0.87, slot2_max_confirm_m=1.25, give_up_m=2.0):
         self.open_min_range = float(open_min_range_m)
-        self.min_block = float(min_block_m)
+        self.ignore_until = float(ignore_until_m)
         self.min_open = float(min_open_m)
-        self.slot1_open_until = float(slot1_open_until_m)
-        self.slot2_max_open_start = float(slot2_max_open_start_m)
+        self.slot1_max_confirm = float(slot1_max_confirm_m)
+        self.slot2_max_confirm = float(slot2_max_confirm_m)
         self.give_up = float(give_up_m)
         self.reset()
 
     def reset(self):
-        self.blocked_seen = False   # 차1(또는 차1+차2) 막힘 확정 여부
-        self.block_start = None     # 막힘 후보 시작 거리
-        self.open_start = None      # 막힘 이후 열림 후보 시작 거리
+        self.open_start = None   # 현재 열린 구간 시작 거리
+        self.confirm_at = None   # 빈칸 확정 거리
         self.result = None
 
     def update(self, distance_m, p30):
         """Return 1/2/3 when decided, 0 when nothing found before give_up, else None."""
         if self.result is not None:
             return self.result
-        if p30 is not None and math.isfinite(p30):
-            is_open = p30 >= self.open_min_range
-            if not self.blocked_seen:
-                if is_open:
-                    self.block_start = None   # 짧은 막힘은 잡음
-                    if distance_m >= self.slot1_open_until:
+        if (distance_m >= self.ignore_until and p30 is not None and math.isfinite(p30)):
+            if p30 >= self.open_min_range:
+                if self.open_start is None:
+                    self.open_start = distance_m
+                if distance_m - self.open_start >= self.min_open:
+                    self.confirm_at = distance_m
+                    if distance_m < self.slot1_max_confirm:
                         self.result = 1
-                        return self.result
-                else:
-                    if self.block_start is None:
-                        self.block_start = distance_m
-                    if distance_m - self.block_start >= self.min_block:
-                        self.blocked_seen = True
+                    elif distance_m < self.slot2_max_confirm:
+                        self.result = 2
+                    else:
+                        self.result = 3
+                    return self.result
             else:
-                if is_open:
-                    if self.open_start is None:
-                        self.open_start = distance_m
-                    if distance_m - self.open_start >= self.min_open:
-                        self.result = 2 if self.open_start < self.slot2_max_open_start else 3
-                        return self.result
-                else:
-                    self.open_start = None    # 차 사이 짧은 틈(<=0.06 m)은 무시
+                self.open_start = None
         if distance_m >= self.give_up:
             self.result = 0
         return self.result

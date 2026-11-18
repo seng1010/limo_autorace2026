@@ -135,5 +135,20 @@ def test_measured_logs_pick_the_empty_slot(name):
 
 
 def test_no_opening_after_cars_gives_up():
-    result, _ = _replay([(0.0, 0.43, OPEN), (0.43, 2.0, BLOCKED)])
+    result, _ = _replay([(0.0, 0.43, OPEN), (0.43, 2.1, BLOCKED)])
     assert result == 0
+
+
+@pytest.mark.parametrize('name, low, high', [
+    ('slot1', 0.74, 0.76), ('slot2_run1', 0.98, 1.01),
+    ('slot2_run2', 1.03, 1.05), ('slot3', 1.45, 1.47)])
+def test_confirm_distance_matches_measurement(name, low, high):
+    _, decided_at = _replay(LOGS[name][1])
+    assert low <= decided_at <= high
+
+
+def test_short_gap_between_cars_is_not_a_bay():
+    # 0.25 m 틈 (< 0.30 m) 은 빈칸이 아님 -> 뒤의 진짜 빈칸(3번)으로 판정
+    result, _ = _replay([(0.0, 0.45, OPEN), (0.45, 0.80, BLOCKED), (0.80, 1.05, OPEN),
+                         (1.05, 1.16, BLOCKED), (1.16, 1.9, OPEN)])
+    assert result == 3
