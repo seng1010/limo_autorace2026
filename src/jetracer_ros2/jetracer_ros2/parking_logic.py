@@ -133,7 +133,7 @@ class BaySlotClassifier:
        -> < slot1_max_confirm_m(0.87): 1번, < slot2_max_confirm_m(1.25): 2번, 그 외 3번
     """
 
-    def __init__(self, open_min_range_m=1.0, ignore_until_m=0.45, min_open_m=0.30,
+    def __init__(self, open_min_range_m=0.80, ignore_until_m=0.45, min_open_m=0.30,
                  slot1_max_confirm_m=0.87, slot2_max_confirm_m=1.25, give_up_m=2.0):
         self.open_min_range = float(open_min_range_m)
         self.ignore_until = float(ignore_until_m)

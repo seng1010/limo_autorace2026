@@ -152,3 +152,14 @@ def test_short_gap_between_cars_is_not_a_bay():
     result, _ = _replay([(0.0, 0.45, OPEN), (0.45, 0.80, BLOCKED), (0.80, 1.05, OPEN),
                          (1.05, 1.16, BLOCKED), (1.16, 1.9, OPEN)])
     assert result == 3
+
+
+@pytest.mark.parametrize('name', sorted(LOGS))
+def test_bay_with_limo_parked_behind_still_counts_as_empty(name):
+    # 빈칸 뒤에 LIMO 가 서 있어 P30 이 0.85~0.95 m 로만 나오고,
+    # 경계에서 차 쪽 잠깐 값(0.85 m, 0.30 m 미만 구간)이 있어도 같은 칸으로 판정
+    expected, segments = LOGS[name]
+    behind = [(a, b, 0.95 if v == OPEN else v) for a, b, v in segments]
+    assert _replay(behind)[0] == expected
+    edge = [(a, b, 0.85 if v == OPEN else v) for a, b, v in segments]
+    assert _replay(edge)[0] == expected
