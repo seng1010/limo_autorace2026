@@ -134,3 +134,31 @@ def test_line_before_window_does_not_start_slow():
     log = drive(SectionTracker(rules), manager(('M5',)), lines=(0.3,), total_m=3.0)
     slow = {s: out.slow for s, _, out in log}
     assert not slow[0.5] and not slow[1.5] and slow[1.8]
+
+
+# ---- M5 서행: line 모드 (정지선에 앞바퀴가 닿으면 서행) / 못 보면 거리 서행 ----
+M5_LINE = SectionRule(line_after_m=8.6, timeout_m=9.6, slow_line_after_m=0.8,
+                      slow_line_len_m=0.15, slow_from_m=1.45, slow_to_m=1.60)
+
+
+def _slow_map(rules, lines, total_m=3.0):
+    log = drive(SectionTracker(rules), manager(('M5', 'M6')), lines=lines, total_m=total_m)
+    return {s: out.slow for s, _, out in log}
+
+
+def test_line_mode_slows_from_the_line_for_its_length():
+    slow = _slow_map({'M5': M5_LINE}, lines=(1.52,))
+    assert not slow[1.0] and not slow[1.5]        # 선이 보여도 닿기 전에는 원래 속도
+    assert slow[1.53] and slow[1.66]              # 앞바퀴가 1.52 선에 닿은 뒤 0.15 m
+    assert not slow[1.68] and not slow[2.5]       # 그 뒤 원래 속도 (거리 서행은 안 겹침)
+
+
+def test_line_mode_falls_back_to_distance_when_line_missed():
+    slow = _slow_map({'M5': M5_LINE}, lines=())
+    assert not slow[1.44] and slow[1.46] and slow[1.59] and not slow[1.61]
+
+
+def test_distance_mode_ignores_lines():
+    rule = SectionRule(line_after_m=8.6, timeout_m=9.6, slow_from_m=1.45, slow_to_m=1.60)
+    slow = _slow_map({'M5': rule}, lines=(1.2,))
+    assert not slow[1.25] and slow[1.46] and slow[1.59] and not slow[1.61]

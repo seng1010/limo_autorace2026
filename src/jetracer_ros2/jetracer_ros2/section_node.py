@@ -41,6 +41,7 @@ class SectionNode(Node):
             'line_refractory_m': 0.30,
             'stop_line_timeout_sec': 0.5,
             'event_period_sec': 0.5,
+            'm5_slow_mode': 'line',   # line: 정지선에 닿으면 서행 (못 보면 거리로 대신) / distance: 거리로만
         }
         for mission in RULE_MISSIONS:
             for field in SectionRule.__dataclass_fields__:
@@ -52,6 +53,12 @@ class SectionNode(Node):
         rules = {mission: SectionRule(**{field: float(p(f'{mission.lower()}_{field}'))
                                          for field in SectionRule.__dataclass_fields__})
                  for mission in RULE_MISSIONS}
+        mode = str(p('m5_slow_mode')).strip().lower()
+        if mode not in ('line', 'distance'):
+            raise ValueError("m5_slow_mode 는 'line' 또는 'distance'")
+        if mode == 'distance':
+            rules['M5'].slow_line_after_m = -1.0      # 선은 안 보고 slow_from~slow_to 거리로만 서행
+        self.get_logger().info(f'M5 서행 방식: {mode}')
         self.tracker = SectionTracker(rules, LinePassDetector(
             min_frames=p('line_min_frames'), refractory_m=p('line_refractory_m')))
         for mission, rule in rules.items():

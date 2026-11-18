@@ -22,7 +22,9 @@ class SectionRule:
     slow_from_m: float = -1.0    # 서행 시작 (미션 시작 기준, 음수 = 서행 없음)
     slow_to_m: float = -1.0      # 서행 끝
     slow_line_after_m: float = -1.0  # 이 거리 뒤에 처음 보이는 정지선에서 서행 시작 (음수 = 안 씀).
-                                     # 선을 놓치면 slow_from_m 에서 시작. 끝은 똑같이 slow_to_m
+                                     # 선을 놓치면 slow_from_m~slow_to_m 거리 서행으로 대신한다
+    slow_line_len_m: float = -1.0    # >= 0: 앞바퀴가 그 선에 닿는 순간부터 이 길이만큼 서행 (선 기준).
+                                     # 음수: 예전 방식 (선이 '보이는' 순간부터 slow_to_m 까지)
 
 
 class LinePassDetector:
@@ -83,7 +85,9 @@ class SectionTracker:
         self._done_reason = ''
         self._slow_line_used = False
         rule = self.rules.get(mission)
-        if rule and rule.slow_from_m >= 0.0 and rule.slow_to_m > rule.slow_from_m:
+        # 선 기준 서행을 쓰는 미션은 거리 서행을 '선을 못 봤을 때'만 쓴다 (update 에서 추가)
+        if (rule and rule.slow_from_m >= 0.0 and rule.slow_to_m > rule.slow_from_m
+                and rule.slow_line_after_m < 0.0):
             self._slow_zones.append((s + rule.slow_from_m, s + rule.slow_to_m))
 
     def update(self, s: float, active: Optional[str],
@@ -94,12 +98,19 @@ class SectionTracker:
         if active != self.active:
             self._enter(active, s)
         rule = self.rules.get(active)
-        if (rule is not None and new_line is not None and not self._slow_line_used
-                and rule.slow_line_after_m >= 0.0 and rule.slow_to_m >= 0.0
-                and new_line - self.start_s >= rule.slow_line_after_m
-                and s < self.start_s + rule.slow_to_m):
-            self._slow_line_used = True               # 서행 표시 선이 보인 순간부터 서행
-            self._slow_zones.append((s, self.start_s + rule.slow_to_m))
+        if rule is not None and rule.slow_line_after_m >= 0.0 and not self._slow_line_used:
+            if (new_line is not None and new_line - self.start_s >= rule.slow_line_after_m
+                    and s < self.start_s + max(rule.slow_to_m, 0.0)):
+                self._slow_line_used = True
+                if rule.slow_line_len_m >= 0.0:       # 앞바퀴가 선에 닿는 순간부터 정해진 길이만큼
+                    self._slow_zones.append((new_line, new_line + rule.slow_line_len_m))
+                else:                                 # 예전 방식: 선이 보인 순간부터 slow_to 까지
+                    self._slow_zones.append((s, self.start_s + rule.slow_to_m))
+            elif (rule.slow_from_m >= 0.0 and rule.slow_to_m > rule.slow_from_m
+                  and s >= self.start_s + rule.slow_from_m):
+                self._slow_line_used = True           # 선을 못 봄 -> 거리 서행으로 대신
+                self._slow_zones.append((self.start_s + rule.slow_from_m,
+                                         self.start_s + rule.slow_to_m))
         self._slow_zones = [z for z in self._slow_zones if s <= z[1]]
         out = SectionOutput(slow=any(a <= s <= b for a, b in self._slow_zones),
                             travelled_m=s - self.start_s, line_s=new_line)

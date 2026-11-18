@@ -72,6 +72,9 @@ class MissionManagerNode(Node):
             'auto_start_mission_nodes': True,
             'start_mission': 'M5',                  # 테스트할 때 M3 등으로 바로 시작
             'm4_parking': 'claude',                 # M4 주차 노드: claude | line (M4_PARKING_NODE)
+            # 이 미션 전에는 YOLO 이벤트를 무시 (M5 방지턱 서행은 section_node 정지선/거리로만,
+            # M3 는 m3_trigger: sign_or_line 이라 표지판 없이 정지선으로 선다). YOLO 노드는 처음부터 켜서 예열.
+            'yolo_from_mission': 'M7',
             'odom_topic': '/odom',
             'odom_timeout_sec': 0.5,
             'stop_line_timeout_sec': 0.5,           # 정지선 거리 메시지가 이보다 오래되면 없음 처리
@@ -123,6 +126,10 @@ class MissionManagerNode(Node):
         if start not in MISSION_ORDER:
             raise ValueError(f'start_mission 은 {MISSION_ORDER} 중 하나')
         self._index = MISSION_ORDER.index(start)
+        yolo_from = str(p('yolo_from_mission')).strip().upper()
+        if yolo_from not in MISSION_ORDER:
+            raise ValueError(f'yolo_from_mission 은 {MISSION_ORDER} 중 하나')
+        self._yolo_from_index = MISSION_ORDER.index(yolo_from)
         parking = str(p('m4_parking')).strip().lower()
         if parking not in M4_PARKING_NODE:
             raise ValueError(f'm4_parking 은 {tuple(M4_PARKING_NODE)} 중 하나')
@@ -290,6 +297,8 @@ class MissionManagerNode(Node):
 
     def _yolo_callback(self, msg):
         event = msg.data
+        if MISSION_ORDER.index(self._active) < self._yolo_from_index:
+            return  # yolo_from_mission(기본 M7) 전에는 YOLO 결과를 쓰지 않는다
         if (self._active == 'M5' and event == 'slow_sign'
                 and not self._m5_section_slow_done):
             self._slow = True

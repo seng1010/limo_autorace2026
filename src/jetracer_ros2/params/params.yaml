@@ -126,9 +126,15 @@ section_node:
     # M5 서행(방지턱): 출발선 -> 첫 코너 지나 지그재그 앞 정지선
     m5_line_after_m: 8.6              # 지그재그 앞 선(9.31) - 0.7
     m5_timeout_m: 9.6                 # 그 선을 놓쳤을 때
-    m5_slow_line_after_m: 0.8         # 출발 후 0.8 m 뒤 처음 보이는 선(서행 표시 선, 1.52 m)에서 서행 시작
-    m5_slow_from_m: 1.7               # 그 선을 놓쳤을 때 서행 시작
-    m5_slow_to_m: 5.0                 # 서행 끝 (출발선 기준). 대회장에서 방지턱 끝 + 여유로 조정
+    # M5 서행 방식 (launch 의 slow:=line|distance 가 이 값을 덮어씀)
+    #   line     : 출발 후 m5_slow_line_after_m 뒤 처음 보이는 정지선에 **앞바퀴가 닿는 순간** 서행,
+    #              그 선부터 m5_slow_line_len_m 만큼 간 뒤 원래 속도. 1.45 m 까지 선을 못 보면 아래 거리 서행으로 대신
+    #   distance : 선은 안 보고 출발선 기준 m5_slow_from_m ~ m5_slow_to_m 에서만 서행
+    m5_slow_mode: 'line'
+    m5_slow_line_after_m: 0.8         # 출발 후 0.8 m 뒤에 나오는 첫 선만 서행 시작 선으로 인정
+    m5_slow_line_len_m: 0.15          # line 모드: 선에 닿은 뒤 이만큼 서행 [m]
+    m5_slow_from_m: 1.45              # distance 모드 서행 시작 (출발선 기준) / line 모드에서 선을 못 봤을 때
+    m5_slow_to_m: 1.60                # distance 모드 서행 끝 -> 원래 속도
     # M6 서행 유도선(지그재그): 횡단보도 정지선이 0.8 m 안에 들어오기 전에 M3 로 넘겨야 함
     m6_line_after_m: -1.0
     m6_timeout_m: 1.0
