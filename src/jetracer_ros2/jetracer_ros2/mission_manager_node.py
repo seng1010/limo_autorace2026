@@ -43,7 +43,15 @@ DYNAMIC_NODE = {
     # 장애물 하나를 지나면 M7 을 끝내고, 막히면 차를 세워서 7대 구간에는 맞지 않아 켜지 않는다 (11/15)
     'M8': 'mission_cone_avoid_node',
     'M1': 'mission_traffic_light_node',
-    'M4': 'claude_parking_managed',   # claude 브랜치: 빈 칸을 라이다로 찾아 후진 주차 (기존 시간제 주차로 되돌리려면 'parking_line_detection_managed')
+    'M4': 'claude_parking_managed',   # m4_parking 파라미터로 바꿈 (아래 M4_PARKING_NODE)
+}
+# M4 주차 노드 선택 (all_in_node.launch.py 의 park:=claude|line)
+#   claude : claude_parking.py - 빈 칸을 라이다로 찾아 후진 주차 (claude 브랜치 기본)
+#   line   : parking_line_detection.py - 빈 칸 판정 후 칸별 우회전 위치까지 후진 -> 시간제 우회전 주차
+#            (m5-parking-changed 에서 실차로 1/2/3번 칸 맞춤)
+M4_PARKING_NODE = {
+    'claude': 'claude_parking_managed',
+    'line': 'parking_line_detection_managed',
 }
 
 
@@ -63,6 +71,7 @@ class MissionManagerNode(Node):
             'command_timeout_sec': 0.40,
             'auto_start_mission_nodes': True,
             'start_mission': 'M5',                  # 테스트할 때 M3 등으로 바로 시작
+            'm4_parking': 'claude',                 # M4 주차 노드: claude | line (M4_PARKING_NODE)
             'odom_topic': '/odom',
             'odom_timeout_sec': 0.5,
             'stop_line_timeout_sec': 0.5,           # 정지선 거리 메시지가 이보다 오래되면 없음 처리
@@ -114,6 +123,11 @@ class MissionManagerNode(Node):
         if start not in MISSION_ORDER:
             raise ValueError(f'start_mission 은 {MISSION_ORDER} 중 하나')
         self._index = MISSION_ORDER.index(start)
+        parking = str(p('m4_parking')).strip().lower()
+        if parking not in M4_PARKING_NODE:
+            raise ValueError(f'm4_parking 은 {tuple(M4_PARKING_NODE)} 중 하나')
+        self._dynamic_node = dict(DYNAMIC_NODE, M4=M4_PARKING_NODE[parking])
+        self.get_logger().info(f'M4 주차 노드: {self._dynamic_node["M4"]} (m4_parking={parking})')
         self._active = start
         self._active_sent_ns = 0
         self._lane_cmd = Twist()
@@ -408,7 +422,7 @@ class MissionManagerNode(Node):
             self._start_process('mission_cone_avoid_node')
         self.lane_mode_pub.publish(String(data='center'))
         self.active_pub.publish(String(data=mission))
-        process = DYNAMIC_NODE.get(mission)
+        process = self._dynamic_node.get(mission)
         if process and self.get_parameter('auto_start_mission_nodes').value:
             self._start_process(process)
         if mission == 'M4':
@@ -419,7 +433,7 @@ class MissionManagerNode(Node):
             self.get_logger().info(f'2026 mission manager ready; starting {mission}')
 
     def _leave_mission(self, mission):
-        process = DYNAMIC_NODE.get(mission)
+        process = self._dynamic_node.get(mission)
         if process:
             self._stop_process(process)
         self._publish(Twist())
