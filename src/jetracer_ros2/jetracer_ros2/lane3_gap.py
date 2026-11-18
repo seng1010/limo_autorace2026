@@ -17,12 +17,13 @@
   python3 lane3_gap.py drive --topic inference/cmd_vel     매니저와 함께 (simple_lane 대신 이걸 켠다. mission/active = M7 에서 켜짐)
   인자는 simple_lane.py 와 같다. 이 파일은 simple_lane 을 불러서 3차선 부분만 바꿔 끼운다.
 
-버전 claude-v6 (11/18): 실차에서 확인된 11/17 버전(LIMO 의 ~/lane3_gap_ok_1117.py) + 송도·대회장 bag 에서 나온 문제 수정.
-  다른 팀원(다른 도구)의 lane3 수정과 섞지 않은 독립 버전. 터미널 "[3차선G] claude-v6 시작" 으로 구분한다.
+버전 claude-v7 (11/18): 실차에서 확인된 11/17 버전(LIMO 의 ~/lane3_gap_ok_1117.py) + 송도·대회장 bag 에서 나온 문제 수정.
+  다른 팀원(다른 도구)의 lane3 수정과 섞지 않은 독립 버전. 터미널 "[3차선G] claude-v7 시작" 으로 구분한다.
   바뀐 것: 표지판 오인 차단(SIGN_EST_MAX_H, SIGN_GATE_*) / 흰 점선으로 방향(THW_*) / 입구 사선에서 안 섬(ENTRY_SOFT_M) /
           후진하면서 차 펴기(REV_STEER_*) / 뒤에 둔 차 기억(MEM_KEEP) / 최대 거리는 앞으로 간 거리로 /
           끝까지 막히면 선은 무시하고 장애물만 피해 빠져나감(DEAD_*) / 방지턱 구간 코너 조향 끔(M5_LATCH_OFF) /
-          기본 주행 코너: 바깥 선이 정면에서 사라질 때까지 고정 조향 유지(CORNER_HOLD, HOLD_*)
+          기본 주행 코너: 바깥 선이 정면에서 사라질 때까지 고정 조향 유지(CORNER_HOLD, HOLD_*) /
+          기본 주행 직선: 한쪽 선에 붙는 것 고침(CENTER_FIX, CENTER_*)
 
 터미널 줄:  3차선G <상태> 목표 +0.32 m, 갈 수 있는 거리 1.8 (좌 2.2 중 0.9 우 0.4) 표지판 A 섬 1.6 m | 사유
 """
@@ -36,7 +37,7 @@ from collections import deque
 import cv2
 import numpy as np
 
-VERSION = 'claude-v6'
+VERSION = 'claude-v7'
 
 try:
     import three_lane as T               # 같은 폴더의 파일 (LineFitter, SignVote 만 빌려 쓴다)
@@ -113,6 +114,14 @@ CORNER_HOLD = True       # False 면 끔 (기본 주행 원래대로)
 HOLD_TILT = math.radians(17.0)    # 선 기울기가 이 이상 남아 있고
 HOLD_CROSS = 1.20                 #   바깥 선이 정면 이 거리 [m] 안에서 가로지르면 계속 꺾는다. 코너에서 아직 밀리면 HOLD_TILT ↓, 안쪽으로 말리면 ↑
 HOLD_EXTRA = math.radians(35.0)   # 그래도 turn_deg 에 odom 으로 이만큼 더 돌면 푼다 (실제 약 29도)
+# --- 직선에서 한쪽 선에 붙는 것 (기본 주행에 덧씌움) ---
+# 대회장 bag 출발 직선: 왼쪽 선만 보고 가는데, 기본 주행은 차로 폭을 0.43 m(연습 트랙 값)로 알고 있어 선에서 21.5 cm 를 가운데로 본다
+#   (대회장 차로는 선 가운데끼리 0.52 m). 게다가 자기가 4~5 cm 치우친 것을 알면서도 조향을 1도만 내고 그대로 간다
+#   (조향 1도는 차가 실제로 안 움직이는 크기) -> 실제로는 가운데에서 8~9 cm 왼쪽으로 달렸다.
+CENTER_FIX = True        # False 면 끔 (기본 주행 원래대로)
+CENTER_SHIFT = 0.045     # 한쪽 선만 보고 갈 때 그 선에서 이만큼 더 떨어져서 간다 [m] ((0.52 - 0.43) / 2). 그래도 보이는 선 쪽으로 붙으면 ↑ (0.07), 반대쪽으로 가면 ↓ (0.02)
+CENTER_KI = 0.12         # 직선에서 치우침이 남아 있으면 조향을 조금씩 더한다 [rad/(m·s)]. 좌우로 흔들리면 ↓ (0.06), 가운데로 너무 늦게 오면 ↑
+CENTER_I_MAX = math.radians(2.5)     # 그렇게 더하는 조향의 한도
 M5_LATCH_OFF = (0.5, 5.6)    # M5 시작 후 이 거리 [m] 구간에서는 기본 주행의 코너 고정 조향을 끈다 (방지턱)
                              #   대회장: 방지턱의 노란 줄무늬에 올라선 순간 최대 조향이 4초 걸려 차로를 벗어났다 (출발 후 3.8 m).
                              #   첫 코너는 출발 후 약 7.4 m 라 이 구간에는 코너가 없다. 방지턱을 옮기면 이 값을 고칠 것
@@ -915,7 +924,23 @@ def _patch_corner(SL):
 
     def command(self, result, tune, now, camera_ok=True):
         self._g_res = result
-        return orig_command(self, result, tune, now, camera_ok)
+        v, angle, state, why = orig_command(self, result, tune, now, camera_ok)
+        if not CENTER_FIX:
+            return v, angle, state, why
+        acc = getattr(self, '_g_i', 0.0)
+        dt = min(0.2, max(0.0, now - getattr(self, '_g_it', now)))
+        self._g_it = now
+        lat = result.get('lateral') if result else None
+        straight = (state == 'TRACK' and not self.locked and getattr(self, 'mode', '') != 'CURVE'
+                    and lat is not None and abs(lat) < 0.20 and abs(angle) < math.radians(6.0))
+        if straight:
+            src = result.get('source')
+            err = lat + (CENTER_SHIFT if src == 'left_only' else (-CENTER_SHIFT if src == 'right_only' else 0.0))
+            acc = max(-CENTER_I_MAX, min(CENTER_I_MAX, acc + CENTER_KI * err * dt))
+        else:
+            acc *= 0.97                                   # 코너·정지·선 놓침: 서서히 뺀다
+        self._g_i = acc
+        return v, angle - acc, state, why
 
     def _lock_done(self, now, yaw_limit):
         if not orig_done(self, now, yaw_limit):
@@ -947,7 +972,7 @@ def main():
     _patch_corner(SL)
     if 'l3simple' in sys.argv:
         sys.argv.remove('l3simple')
-    print(f'[3차선G] lane3_gap.py {VERSION}: 3차선 + 갈림길 + 방지턱 + 코너 고정 조향 연장 (simple_lane.py 파일은 그대로)')
+    print(f'[3차선G] lane3_gap.py {VERSION}: 3차선 + 갈림길 + 방지턱 + 코너 고정 조향 연장 + 직선 가운데 맞추기 (simple_lane.py 파일은 그대로)')
     SL.main()
 
 
