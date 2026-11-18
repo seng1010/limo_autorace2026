@@ -1,5 +1,4 @@
-"""
-T자 주차 기본 주행 테스트 노드 (시간 기반, 라이다/정지선 없음).
+"""T자 주차 기본 주행 테스트 노드 (시간 기반, 라이다/정지선 없음).
 
 정지선 위에 리모를 세워 두고 실행하면 아래 순서로 움직인 뒤 멈춘다.
   1) forward : forward_sec(a) 초 동안 직진
@@ -18,7 +17,6 @@ mission manager 없이 /cmd_vel 로 바로 내보낸다 (다른 주행 노드는
   - 실행 후 start_delay_sec 초 기다렸다가 출발한다 (손 뗄 시간)
   - wait_enter:=true 로 실행하면 터미널에서 Enter를 눌러야 출발한다
   - Ctrl+C 를 누르면 즉시 정지
-
 """
 
 import os
@@ -39,11 +37,11 @@ TICK_SEC = 0.05  # 20 Hz
 
 DEFAULTS = {
     'output_topic': '/cmd_vel',
-    'forward_sec': 1.5,       # a: 정지선에서 직진 시간 [s]
-    'turn_sec': 2.5,          # b: 우회전 시간 [s]
-    'enter_sec': 1.5,         # c: 칸 안으로 직진 시간 [s]
-    'speed': 0.10,            # 직진 속도 [m/s]
-    'turn_speed': 0.08,       # 우회전 중 속도 [m/s]
+    'forward_sec': 1.7,       # a: 정지선에서 직진 시간 [s]
+    'turn_sec': 1.8,          # b: 우회전 시간 [s]
+    'enter_sec': 0.1,         # c: 칸 안으로 직진 시간 [s]
+    'speed': 0.50,            # 직진 속도 [m/s]
+    'turn_speed': 0.5,       # 우회전 중 속도 [m/s]
     'turn_steer_rad': 0.45,   # 우회전 조향각 크기 [rad] (최대 약 0.488 = 28도)
     'start_delay_sec': 2.0,   # 실행 후 출발까지 대기 [s]
     'wait_enter': False,      # True면 Enter를 눌러야 출발

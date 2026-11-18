@@ -837,3 +837,88 @@ def test_shipped_m1_two_line_stop_and_parking_dwell_profile():
                     'm1_max_approach_distance_m: 0.0', 'm1_skip_lines: 1',
                     'm1_slow_speed: 0.15', 'm4_full_stop_sec: 0.5'):
         assert setting in params
+
+
+
+# 실측 우측 P30 구간 (test_parking_logic.LOGS 와 같은 기록): (빈 칸, [(시작 m, 끝 m, P30)])
+_OPEN, _CAR = 4.0, .55
+_PARKING_LOGS = {
+    'slot1': (1, [(0.0, 0.925, _OPEN), (0.925, 1.189, _CAR)]),
+    'slot2_run1': (2, [(0.0, 0.430, _OPEN), (0.430, 0.695, _CAR),
+                       (0.695, 1.337, _OPEN), (1.337, 1.378, _CAR)]),
+    'slot2_run2': (2, [(0.0, 0.472, _OPEN), (0.472, 0.735, _CAR),
+                       (0.735, 1.364, _OPEN), (1.364, 1.687, _CAR), (1.687, 1.925, _OPEN)]),
+    'slot3': (3, [(0.0, 0.412, _OPEN), (0.412, 0.421, _CAR), (0.421, 0.431, _OPEN),
+                  (0.431, 0.628, _CAR), (0.628, 0.638, _OPEN), (0.638, 0.842, _CAR),
+                  (0.842, 0.902, _OPEN), (0.902, 1.159, _CAR), (1.159, 1.919, _OPEN)]),
+}
+
+
+def _run_standalone_scan_and_park(modules, monkeypatch, segments, **overrides):
+    """정지선(0 m)에서 SCAN -> (TO_TURN | RETURN) -> PARKING 을 1차원 odom/P30 으로 흉내낸다."""
+    clock = [0.]
+    monkeypatch.setattr(modules.parking.time, 'monotonic', lambda: clock[0])
+    Node.overrides = dict(overrides)
+    p = modules.parking.ParkingMissionNode()
+    def p30(x):
+        return next((v for a, b, v in segments if a <= x < b), _CAR)
+    x, track = 0., []
+    p._state, p._state_start = 'STOP_WAIT', 0.
+    for _ in range(2000):
+        p._odom_pose, p._odom_at = (x, 0., 0.), clock[0]
+        p._scan_p30, p._scan_at = p30(x), clock[0]
+        p._scan_seq += 1
+        state_before = p._state
+        p._tick()
+        if p._state == 'DONE':
+            break
+        v = p.cmd_pub.messages[-1].linear.x
+        track.append((state_before, p._state, x, v))
+        x += v * .05
+        clock[0] += .05
+    return p, track
+
+
+@pytest.mark.parametrize('name', sorted(_PARKING_LOGS))
+def test_parking_turns_at_slot_turn_start_without_returning_to_stop_line(
+        modules, monkeypatch, name):
+    slot, segments = _PARKING_LOGS[name]
+    p, track = _run_standalone_scan_and_park(modules, monkeypatch, segments)
+    assert p._state == 'DONE' and p.slot == slot
+    assert [ph[0] for ph in p.parking_phases] == ['turn', 'enter']
+    target = p.turn_start_m_by_slot[slot]
+    reversed_m = sum(-v * .05 for *_, v in track if v < 0)
+    assert reversed_m <= max(0., p.classifier.confirm_at - target) + .02  # 판정 위치 -> 목표만
+    after_scan = [x for before, after, x, _ in track if before != 'SCAN' and after != 'SCAN'
+                  and before != 'STOP_WAIT']
+    assert min(after_scan) >= target - .02  # 판정 뒤 정지선까지 돌아가지 않음
+    turn_at = next(x for before, after, x, _ in track if after == 'PARKING')
+    assert turn_at == pytest.approx(p.turn_start_m_by_slot[slot], abs=.02)
+    assert p.cmd_pub.messages[-1].linear.x == 0.
+
+
+def test_parking_reverses_to_turn_start_only_when_decided_too_late(modules, monkeypatch):
+    slot, segments = _PARKING_LOGS['slot2_run1']
+    p, track = _run_standalone_scan_and_park(
+        modules, monkeypatch, segments, slot_min_open_m=.30,
+        slot1_max_confirm_m=.87, slot2_max_confirm_m=1.25)  # 예전 확정 방식: ~1.0 m 에서 판정
+    assert p._state == 'DONE' and p.slot == 2
+    assert 'RETURN' in {after for _, after, *_ in track}
+    assert min(x for _, after, x, _ in track if after == 'RETURN') == pytest.approx(
+        p.turn_start_m_by_slot[2], abs=.02)
+    assert [ph[0] for ph in p.parking_phases] == ['turn', 'enter']
+
+
+def test_parking_can_still_return_to_stop_line_when_alignment_disabled(modules, monkeypatch):
+    slot, segments = _PARKING_LOGS['slot2_run1']
+    p, track = _run_standalone_scan_and_park(
+        modules, monkeypatch, segments, align_to_turn_start=False)
+    assert p._state == 'DONE' and p.slot == 2
+    assert [ph[0] for ph in p.parking_phases] == ['forward', 'turn', 'enter']
+    assert min(x for _, after, x, _ in track if after == 'RETURN') <= .01
+
+
+def test_plain_overrides_accept_parameter_names_with_digits(modules):
+    args = modules.parking._plain_overrides(
+        ['parking_line_detection', 'slot1_turn_start_m:=0.38', 'scan_only:=true', 'nope:=1'])
+    assert args == ['-p', 'slot1_turn_start_m:=0.38', '-p', 'scan_only:=true']

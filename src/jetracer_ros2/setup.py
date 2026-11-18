@@ -41,6 +41,7 @@ setup(
             'mission_parking_node = jetracer_ros2.mission_parking_node:main',
             'parking_line_detection = jetracer_ros2.parking_line_detection:main',
             'parking_line_detection_managed = jetracer_ros2.parking_line_detection:managed_main',
+            'parking_test_node = jetracer_ros2.parking_test_node:main',
             'debug_autorace_node = jetracer_ros2.debug_autorace_node:main',
         ],
     },
