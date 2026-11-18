@@ -219,6 +219,9 @@ mission_manager_node:
     # 전체 주행에서도 M2에서 M8 단독 launch와 같은 입구 감시를 사용한다.
     # M2 진입 즉시 콘 제어로 바꾸지 않음: 55cm 사전검사, 45cm/전방 위험 시 보호접근.
     m8_entry_arm_after_m: -1.0
+    # 안전장치: M2(갈림길) 시작 후 이 거리 [m] 안에 라바콘 구간(M8)으로 안 넘어가면 강제로 M8 (음수 = 끄기)
+    # 정상 전환 때 매니저 로그 'M2 -> M8: ... (M2 주행 X.XX m)' 의 X.XX + 0.3 정도로 설정
+    m2_force_m8_after_m: -1.0
     m8_entry_arm_near_line_m: 0.45
     m8_entry_precheck_m: 0.55
 

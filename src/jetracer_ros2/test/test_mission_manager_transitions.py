@@ -944,3 +944,41 @@ def test_all_in_node_launch_passes_park_choice_to_manager():
     launch = (Path(__file__).parents[1] / 'launch/all_in_node.launch.py').read_text()
     assert "'park', default_value='claude'" in launch
     assert "['m4_parking:=', LaunchConfiguration('park')]" in launch
+
+
+def test_m2_distance_fallback_forces_m8(modules):
+    n = owner(modules, 'M2', m2_force_m8_after_m=1.0)
+    lane(n)
+    step(n, speed=.2)
+    n._control_tick()                     # M2 시작 위치 기록
+    n._odom.s += .9
+    step(n, speed=.2)
+    n._control_tick()
+    assert n._active == 'M2'
+    n._odom.s += .15
+    step(n, speed=.2)
+    n._control_tick()
+    assert n._active == 'M8'
+    assert 'mission_cone_avoid_node' in n.started
+
+
+def test_m2_distance_fallback_is_off_by_default(modules):
+    n = owner(modules, 'M2')
+    lane(n)
+    step(n, speed=.2)
+    n._control_tick()
+    n._odom.s += 10.
+    step(n, speed=.2)
+    n._control_tick()
+    assert n._active == 'M2'
+
+
+def test_m2_distance_fallback_ignores_other_missions(modules):
+    n = owner(modules, 'M7', m2_force_m8_after_m=0.5)
+    lane(n)
+    step(n, speed=.2)
+    n._control_tick()
+    n._odom.s += 2.
+    step(n, speed=.2)
+    n._control_tick()
+    assert n._active == 'M7'
