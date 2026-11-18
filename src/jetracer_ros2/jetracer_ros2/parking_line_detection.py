@@ -5,7 +5,9 @@
                  (정지선이 아직 안 보이면 approach_speed 로 탐색 주행)
   2) STOP_WAIT : 정지선 도달 후 settle_sec 동안 완전 정지 (차체 흔들림 안정화)
   2-1) SCAN    : scan_speed 로 직진하며 우측 LiDAR(P30)+odom 으로 빈 칸(1/2/3) 판정
-  2-2) RETURN  : 정지선(odom 0 m)까지 직진 후진 -> 판정된 칸에 맞춰 forward 시간 선택
+  2-2) RETURN  : 판정된 칸의 우회전 시작 위치(slotN_turn_start_m, odom)까지만 후진
+                 -> 3) FORWARD 생략하고 바로 4) TURN
+                 (align_to_turn_start=false 면 기존처럼 정지선(0 m)까지 후진 후 3) 부터)
                  (slot_scan_enabled=false 면 2-1/2-2 생략, 기존처럼 2번 칸 기준)
   3) FORWARD   : forward_sec 동안 직진 (a)  [1번/3번 칸은 slot1_*/slot3_* 값 사용]
   4) TURN      : turn_sec 동안 우회전 (b)
@@ -65,6 +67,15 @@ DEFAULTS = {
     'slot3_forward_sec': 2.64,  # a: 1.7 + 0.94
     'slot3_turn_sec': 1.8,      # b
     'slot3_enter_sec': 0.1,     # c
+    # ===== 우회전 시작 위치 (정지선 0 m 기준 odom 거리) =====
+    # 판정 후 정지선까지 돌아가지 않고 이 위치까지만 후진한 뒤 바로 turn -> enter.
+    # 판정은 우회전 시작점을 지나서 나기 때문에 (1번 ~0.75 m, 2번 ~1.0 m, 3번 ~1.46 m) 후진이 필요함.
+    # 초기값 = 기존 forward 시간 x speed(0.5 m/s) 어림값. 가속 구간 때문에 실제는 조금 짧을 수 있음.
+    # 실측: align_to_turn_start:=false 로 돌리면 forward 가 끝날 때 'forward 끝 odom 거리' 로그가 찍힘.
+    'align_to_turn_start': True,  # False: 기존처럼 정지선까지 후진 후 forward 부터
+    'slot1_turn_start_m': 0.38,   # 0.76 s x 0.5
+    'slot2_turn_start_m': 0.85,   # 1.7 s x 0.5
+    'slot3_turn_start_m': 1.32,   # 2.64 s x 0.5
     # ==========================================================
     'output_topic': '/cmd_vel',
     'approach_speed': 0.25,     # 정지선 접근 속도 [m/s] (너무 빠르면 정지선 지나침)
@@ -141,6 +152,14 @@ class ParkingMissionNode(Node):
             3: (p['slot3_forward_sec'], p['slot3_turn_sec'], p['slot3_enter_sec']),
         }
         self._steer = steer
+        self.align_to_turn_start = bool(p['align_to_turn_start'])
+        self.turn_start_m_by_slot = {
+            1: float(p['slot1_turn_start_m']),
+            2: float(p['slot2_turn_start_m']),
+            3: float(p['slot3_turn_start_m']),
+        }
+        self._return_target = 0.0   # RETURN 목표 위치 [m] (정지선 0 m 기준)
+        self._return_dir = -1.0     # -1 후진 / +1 전진
 
         # 정지선 정지 이후 실행할 주차 단계들 (칸 판정 후 _set_slot_phases 로 교체)
         self._set_slot_phases(2)
@@ -236,6 +255,20 @@ class ParkingMissionNode(Node):
         f, t, e = (ph[1] for ph in self.parking_phases)
         self.get_logger().info(
             f'>>> {slot}번 칸 주차 ({reason}): forward {f:.2f}s / turn {t:.2f}s / enter {e:.2f}s')
+
+    def _start_return(self, now):
+        """판정 위치에서 우회전 시작 위치(또는 정지선)로 되돌아가기 시작."""
+        if self.align_to_turn_start:
+            self._return_target = self.turn_start_m_by_slot[self.slot]
+        else:
+            self._return_target = 0.0
+        d = self._travel() if self._odom_pose is not None and self._origin is not None else None
+        self._return_dir = 1.0 if d is not None and d < self._return_target else -1.0
+        self._set_state('RETURN', now)
+        where = f'{d:+.3f}m' if d is not None else '?'
+        self.get_logger().info(
+            f'{where} -> {self._return_target:+.3f}m 로 '
+            f'{"전진" if self._return_dir > 0 else "후진"}')
 
     def _start_parking(self, now):
         self._phase_index = 0
@@ -346,7 +379,7 @@ class ParkingMissionNode(Node):
                 self.stop()
                 if self._sensor_gave_up(now):
                     self._choose_slot(None, now, '센서 끊김 - 기본 칸')
-                    self._set_state('RETURN', now)
+                    self._start_return(now)
                 return
             d = self._travel()
             if self._scan_seq != self._scan_seen_seq:
@@ -361,12 +394,12 @@ class ParkingMissionNode(Node):
                             f'scan_only: 판정 결과 {result if result else "없음"}번 칸, 정지')
                         self._set_state('DONE', now)
                         return
-                    self._set_state('RETURN', now)
+                    self._start_return(now)
                     return
             self._publish_cmd(float(self.p['scan_speed']), 0.0)
             return
 
-        # 2-2. 정지선(0 m)까지 직진 후진 -> 기존 시퀀스와 같은 출발점
+        # 2-2. 우회전 시작 위치(align_to_turn_start) 또는 정지선(0 m)까지 직진 후진
         if self._state == 'RETURN':
             if not self._sensors_fresh(now, need_scan=False):
                 self.stop()
@@ -374,11 +407,18 @@ class ParkingMissionNode(Node):
                     self.get_logger().warn('odom 끊김 - 현재 위치에서 주차 시작')
                     self._start_parking(now)
                 return
-            if self._travel() <= 0.0:
+            d = self._travel()
+            if self._return_dir * (self._return_target - d) <= 0.0:
                 self.stop()
+                if self.align_to_turn_start:
+                    # 이미 우회전 시작 위치 -> forward 단계 생략
+                    self.parking_phases = [
+                        ph for ph in self.parking_phases if ph[0] != 'forward']
+                    self.get_logger().info(
+                        f'우회전 시작 위치 도착 ({d:+.3f}m, 목표 {self._return_target:+.3f}m)')
                 self._set_state('RETURN_WAIT', now)
                 return
-            self._publish_cmd(-abs(float(self.p['return_speed'])), 0.0)
+            self._publish_cmd(self._return_dir * abs(float(self.p['return_speed'])), 0.0)
             return
 
         if self._state == 'RETURN_WAIT':
@@ -392,6 +432,12 @@ class ParkingMissionNode(Node):
             while (self._phase_index < len(self.parking_phases)
                    and now - self._state_start >= self.parking_phases[self._phase_index][1]):
                 elapsed_phase = self.parking_phases[self._phase_index][1]
+                if (self.parking_phases[self._phase_index][0] == 'forward'
+                        and self._origin is not None and self._odom_pose is not None):
+                    # slotN_turn_start_m 실측용
+                    self.get_logger().info(
+                        f'forward 끝 odom 거리: {self._travel():+.3f}m '
+                        f'({self.slot}번 칸 slot{self.slot}_turn_start_m 참고)')
                 self._phase_index += 1
                 self._state_start += elapsed_phase
                 if self._phase_index < len(self.parking_phases):
