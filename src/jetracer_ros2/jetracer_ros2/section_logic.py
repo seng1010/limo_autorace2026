@@ -23,7 +23,7 @@ class SectionRule:
     slow_to_m: float = -1.0      # 서행 끝
     slow_line_after_m: float = -1.0  # 이 거리 뒤에 처음 보이는 정지선에서 서행 시작 (음수 = 안 씀).
                                      # 선을 놓치면 slow_from_m~slow_to_m 거리 서행으로 대신한다
-    slow_line_len_m: float = -1.0    # >= 0: 앞바퀴가 그 선에 닿는 순간부터 이 길이만큼 서행 (선 기준).
+    slow_line_len_m: float = -1.0    # >= 0: 앞바퀴가 그 선에 닿는 순간부터 서행. 끝 = max(선 + 이 길이, slow_to_m)
                                      # 음수: 예전 방식 (선이 '보이는' 순간부터 slow_to_m 까지)
 
 
@@ -102,8 +102,9 @@ class SectionTracker:
             if (new_line is not None and new_line - self.start_s >= rule.slow_line_after_m
                     and s < self.start_s + max(rule.slow_to_m, 0.0)):
                 self._slow_line_used = True
-                if rule.slow_line_len_m >= 0.0:       # 앞바퀴가 선에 닿는 순간부터 정해진 길이만큼
-                    self._slow_zones.append((new_line, new_line + rule.slow_line_len_m))
+                if rule.slow_line_len_m >= 0.0:       # 앞바퀴가 선에 닿는 순간부터 (최소 len, slow_to 까지)
+                    end = max(new_line + rule.slow_line_len_m, self.start_s + rule.slow_to_m)
+                    self._slow_zones.append((new_line, end))
                 else:                                 # 예전 방식: 선이 보인 순간부터 slow_to 까지
                     self._slow_zones.append((s, self.start_s + rule.slow_to_m))
             elif (rule.slow_from_m >= 0.0 and rule.slow_to_m > rule.slow_from_m
