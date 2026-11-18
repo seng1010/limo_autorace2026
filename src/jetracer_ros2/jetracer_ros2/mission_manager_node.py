@@ -75,6 +75,9 @@ class MissionManagerNode(Node):
             # 이 미션 전에는 YOLO 이벤트를 무시 (M5 방지턱 서행은 section_node 정지선/거리로만,
             # M3 는 m3_trigger: sign_or_line 이라 표지판 없이 정지선으로 선다). YOLO 노드는 처음부터 켜서 예열.
             'yolo_from_mission': 'M7',
+            # M5 서행 구간(section_node)에서는 차선을 안 보고 서행 속도로 직진, 서행이 끝나면 차선 추종
+            # (방지턱 노란 줄무늬를 차선으로 잘못 보는 것 방지)
+            'm5_slow_straight': True,
             'odom_topic': '/odom',
             'odom_timeout_sec': 0.5,
             'stop_line_timeout_sec': 0.5,           # 정지선 거리 메시지가 이보다 오래되면 없음 처리
@@ -685,6 +688,14 @@ class MissionManagerNode(Node):
             if speed_limit == 0.0:
                 self._publish(Twist())
                 return
+        if (self._active == 'M5' and self.get_parameter('m5_slow_straight').value
+                and self._section_limit is not None
+                and (now - self._section_limit_ns) / 1e9 <= 1.0):
+            straight = Twist()
+            straight.linear.x = float(self._section_limit)
+            self._debug(f'slow_straight v={straight.linear.x:.2f}')
+            self._publish(straight)
+            return
         source = ('cone' if self._active == 'M8' else
                   'parking' if self._active == 'M4' and self._m4_state == 'parking' else 'lane')
         age = (now - self._last_cmd_ns[source]) / 1e9 if self._last_cmd_ns[source] else float('inf')

@@ -7,7 +7,7 @@ from test_mission_manager_transitions import modules, owner, lane, step, event
 
 
 def test_m5_real_section_end_releases_sign_latch_without_changing_curvature(modules):
-    n = owner(modules, 'M5', yolo_from_mission='M5')
+    n = owner(modules, 'M5', yolo_from_mission='M5', m5_slow_straight=False)
     section = SectionTracker({'M5': SectionRule(slow_from_m=1.7, slow_to_m=5.)},
                              LinePassDetector())
     section.update(0., 'M5', None)
@@ -93,3 +93,29 @@ def test_yolo_is_used_from_m7(modules):
 def test_bad_yolo_from_mission_is_rejected(modules):
     with pytest.raises(ValueError):
         owner(modules, 'M5', yolo_from_mission='M9')
+
+
+def test_m5_slow_zone_drives_straight_then_resumes_lane(modules):
+    n = owner(modules, 'M5')
+    n._speed_limit_callback(NS(data=.15))       # 서행 구간 시작
+    step(n)
+    cmd = n.cmd_pub.messages[-1]
+    assert cmd.linear.x == pytest.approx(.15) and cmd.angular.z == 0.   # 차선 조향 무시, 직진
+    n._speed_limit_callback(NS(data=-1.))       # 서행 끝
+    step(n)
+    cmd = n.cmd_pub.messages[-1]
+    assert cmd.linear.x == pytest.approx(.25) and cmd.angular.z != 0.   # 다시 차선 추종
+
+
+def test_m5_slow_straight_can_be_disabled(modules):
+    n = owner(modules, 'M5', m5_slow_straight=False)
+    n._speed_limit_callback(NS(data=.15))
+    step(n)
+    assert n.cmd_pub.messages[-1].angular.z != 0.
+
+
+def test_slow_straight_is_m5_only(modules):
+    n = owner(modules, 'M6')
+    n._speed_limit_callback(NS(data=.15))
+    step(n)
+    assert n.cmd_pub.messages[-1].angular.z != 0.
