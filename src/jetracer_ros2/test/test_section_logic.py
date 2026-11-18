@@ -162,3 +162,12 @@ def test_distance_mode_ignores_lines():
     rule = SectionRule(line_after_m=8.6, timeout_m=9.6, slow_from_m=1.45, slow_to_m=1.60)
     slow = _slow_map({'M5': rule}, lines=(1.2,))
     assert not slow[1.25] and slow[1.46] and slow[1.59] and not slow[1.61]
+
+
+def test_line_mode_slows_until_slow_to_when_it_is_farther():
+    rule = SectionRule(line_after_m=8.6, timeout_m=9.6, slow_line_after_m=0.8,
+                       slow_line_len_m=0.15, slow_from_m=1.45, slow_to_m=3.0)
+    seen = _slow_map({'M5': rule}, lines=(1.52,), total_m=4.0)
+    assert not seen[1.5] and seen[1.53] and seen[2.99] and not seen[3.01]
+    missed = _slow_map({'M5': rule}, lines=(), total_m=4.0)
+    assert not missed[1.44] and missed[1.46] and missed[2.99] and not missed[3.01]
