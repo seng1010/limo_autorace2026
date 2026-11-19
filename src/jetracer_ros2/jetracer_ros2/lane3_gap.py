@@ -102,6 +102,8 @@ ENTRY_SOFT_M = 1.0       # 시작 후 이 거리까지는: 노란 선 때문에�
                          #   (입구의 45도 사선을 벽으로 보고 후진을 반복했다 - 송도·대회장 둘 다)
 REV_STEER_GAIN = 1.2     # 후진할 때 차를 도로와 나란히 펴는 조향 (도로 기준 방향 x 이 값). 곧게만 후진하면 같은 자리로 되돌아왔다
 REV_STEER_MAX = math.radians(20.0)
+DEAD_MODE = False        # 11/20 끔: 아래 '선 무시' 탈출을 쓰지 않는다. 3차선의 노란 선은 전부 바깥 경계라 무시하면 그대로 차로 밖으로 나갔다
+                         #   (11/19 19:37: 왼쪽 앞에서 막힌 뒤 오른쪽 노란 선을 넘어 나감). 끄면 후진을 다 쓴 뒤 그 자리에 서 있는다. True 면 전과 같다
 DEAD_SEC = 3.0           # 후진을 다 쓰고도(또는 뒤가 막혀 후진을 못 하고) 이만큼 서 있으면: 노란 선·가상 벽은 무시하고
 DEAD_M_OBS = 0.02        #   장애물만 이 여유로 피해 빠져나간다 (선 -1점이 그 자리에 계속 서 있는 것보다 낫다)
 DEAD_RUN_M = 0.60        #   그렇게 이 거리만큼 나아가면 다시 원래 규칙
@@ -731,7 +733,7 @@ class GapCore:
                 if now - self.block_since >= FORK_WAIT_SEC:
                     self.wall_off = True
                     self.message = '[3차선G] 표지판 쪽이 계속 막힘 -> 반대쪽도 허용'
-            if (self.dead_at is None and now - self.stop_since >= DEAD_SEC
+            if (DEAD_MODE and self.dead_at is None and now - self.stop_since >= DEAD_SEC
                     and (self.rev_count >= REVERSE_MAX or self.back_room <= 0.15)):
                 self.dead_at = self.sP
                 self.message = '[3차선G] 후진으로도 안 풀림 -> 노란 선은 무시하고 장애물만 피해서 빠져나감'
