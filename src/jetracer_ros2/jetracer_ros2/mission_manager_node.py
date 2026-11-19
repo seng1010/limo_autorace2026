@@ -68,6 +68,10 @@ class MissionManagerNode(Node):
             'active_mission_topic': 'mission/active',
             'lane_mode_topic': 'mission/lane_mode',
             'normal_speed': 0.25,
+            # M5 출발 직후 ~ m5_start_until_m 까지만 이 속도로 (차선 명령의 곡률은 그대로 두고 속도만 올림).
+            # 음수 = 끄기. 서행 구간(section_node)이 시작되면 서행이 우선
+            'm5_start_speed': -1.0,
+            'm5_start_until_m': 1.45,
             'slow_speed': 0.12,
             'command_timeout_sec': 0.40,
             'auto_start_mission_nodes': True,
@@ -400,6 +404,7 @@ class MissionManagerNode(Node):
 
     def _enter_mission(self, mission, initial=False):
         self._mission_enter_ns = self.get_clock().now().nanoseconds
+        self._m5_start_s = None           # M5 출발 위치 (m5_start_speed 구간 계산용)
         self._slow = False
         self._m5_section_slow_seen = False
         self._m5_section_slow_done = False
@@ -701,7 +706,12 @@ class MissionManagerNode(Node):
             self._publish(Twist())
             return
         command = getattr(self, f'_{source}_cmd')
-        if source == 'lane':
+        boost = self._m5_start_speed(now) if source == 'lane' else None
+        if (boost is not None and speed_limit is None and not self._slow
+                and not (self._section_limit is not None
+                         and (now - self._section_limit_ns) / 1e9 <= 1.0)):
+            command = self._set_speed(command, boost)
+        elif source == 'lane':
             target = (self.get_parameter('slow_speed').value
                       if self._slow else self.get_parameter('normal_speed').value)
             if speed_limit is not None:
@@ -710,6 +720,28 @@ class MissionManagerNode(Node):
                 target = min(target, self._section_limit)
             command = self._limit_speed(command, target)
         self._publish(command)
+
+    def _m5_start_speed(self, now):
+        """M5 출발 후 m5_start_until_m 전이면 m5_start_speed, 아니면 None."""
+        speed = self.get_parameter('m5_start_speed').value
+        if self._active != 'M5' or speed <= 0.0 or not self._odom_fresh(now):
+            return None
+        if self._m5_start_s is None:
+            self._m5_start_s = self._odom.s
+        if self._odom.s - self._m5_start_s >= self.get_parameter('m5_start_until_m').value:
+            return None
+        return speed
+
+    @staticmethod
+    def _set_speed(command, speed):
+        """전진 명령의 속도를 speed 로 바꾸고, 같은 곡률이 되게 각속도도 같은 비율로 바꾼다."""
+        if command.linear.x <= 0.0:
+            return command
+        scale = speed / command.linear.x
+        output = Twist()
+        output.linear.x = speed
+        output.angular.z = command.angular.z * scale
+        return output
 
     @staticmethod
     def _limit_speed(command, limit):
