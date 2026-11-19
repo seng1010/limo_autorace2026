@@ -41,7 +41,7 @@ class SectionNode(Node):
             'line_refractory_m': 0.30,
             'stop_line_timeout_sec': 0.5,
             'event_period_sec': 0.5,
-            'm5_slow_mode': 'line',   # line: 정지선에 닿으면 서행 (못 보면 거리로 대신) / distance: 거리로만
+            'm5_slow_mode': 'distance',   # line: 정지선에 닿으면 서행 (못 보면 거리로 대신) / distance: 거리로만
         }
         for mission in RULE_MISSIONS:
             for field in SectionRule.__dataclass_fields__:

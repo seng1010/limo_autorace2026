@@ -12,7 +12,7 @@ from launch_ros.actions import Node
 #   ros2 launch jetracer_ros2 all_in_node.launch.py start:=M7     그 미션부터 시작 (재출발·한 미션만 시험)
 #     start 는 M5 M6 M3 M7 M2 M8 M1 M4 중 하나. 차는 그 미션의 시작 지점에 놓는다.
 #   ros2 launch jetracer_ros2 all_in_node.launch.py park:=line     M4 주차를 parking_line_detection 으로
-#   ros2 launch jetracer_ros2 all_in_node.launch.py slow:=distance M5 서행을 거리(1.45~1.60 m)로만 (기본 line)
+#   ros2 launch jetracer_ros2 all_in_node.launch.py slow:=line M5 서행을 정지선 기준으로 (기본 distance: 1.45~3.5 m)
 #     park:=claude (기본) claude_parking  /  park:=line  빈 칸 판정 후 칸별 우회전 위치까지 후진 주차
 #
 # 차선 주행 (race 브랜치):
@@ -41,8 +41,8 @@ def generate_launch_description():
             'section', default_value='true',
             description='false: 구간 전환 노드(section_node)를 켜지 않음'),
         DeclareLaunchArgument(
-            'slow', default_value='line', choices=['line', 'distance'],
-            description='M5 서행: line (정지선에 닿으면 서행, 못 보면 거리로) / distance (1.45~1.60 m 거리로만)'),
+            'slow', default_value='distance', choices=['line', 'distance'],
+            description='M5 서행: line (정지선에 닿으면 서행, 못 보면 거리로) / distance (1.45~3.5 m 거리로만)'),
         DeclareLaunchArgument(
             'park', default_value='claude',
             description='M4 주차 노드: claude (claude_parking, 기본) / line (parking_line_detection, 칸별 실차 튜닝)'),
