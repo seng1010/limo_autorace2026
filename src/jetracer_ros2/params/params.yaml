@@ -215,6 +215,16 @@ mission_manager_node:
     m8_entry_arm_after_m: -1.0
     m8_entry_arm_near_line_m: 0.45
     m8_entry_precheck_m: 0.55
+    # M8 강제 탈출 (출구 선·출구 차선 확인이 끝내 안 될 때 M1 로 넘김). 0 이하 = 끔
+    #   거리 = M8 에 들어온 뒤 odom 이동거리. 콘 명령이 0 이면 매니저가 정지시키므로 차가 서면 거리는 안 는다
+    #   -> 거리 조건(idle, max) + 서 있을 때 조건(stuck) + 시간 조건(timeout) 을 같이 둔다
+    #   도면 기준 콘 구간(입구 선~출구 선) 직선 약 2.1 m, M8 진입은 입구 선 앞 최대 0.45 m. 실차 로그로 조정
+    m8_force_exit_after_m: 2.0        # [idle] 이 거리 이상 갔고 (출구 선 직전. 도면상 입구~출구 직선 약 2.1 m)
+    m8_force_exit_idle_sec: 1.0       #        콘 노드가 이 시간 동안 v>0 명령을 안 내면 M1
+    m8_force_exit_max_m: 4.0          # [max] 콘 명령과 무관하게 이 거리를 넘으면 M1
+    m8_force_exit_stuck_min_m: 1.5    # [stuck] 콘 구간 절반 이상 들어왔고
+    m8_force_exit_stuck_sec: 3.0      #         콘 명령 없이 이 시간 동안 서 있으면 M1 (콘 구간 안에서 넘어갈 수 있음)
+    m8_force_exit_timeout_sec: 60.0   # [timeout] M8 에 들어온 뒤 이 시간이 지나면 무조건 M1 (콘 속도 0.10 m/s 면 구간 통과 약 30 s)
 
 mission_traffic_light_node:
   ros__parameters:

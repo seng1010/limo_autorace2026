@@ -294,8 +294,8 @@ def test_visual_watch_leaves_race_in_control_until_a_near_line_is_confirmed(owne
     for dist in (.55, .55, .55, .44, -1., .44):
         assert observe(dist) is False
     assert owner.output == []
-    assert observe(.43, .01) is False
-    assert observe(.42, .01) is True
+    # 2 consistent frames (M8_LINE_CONFIRM_FRAMES) confirm the near line.
+    assert observe(.43, .01) is True
     assert owner.m8._m8_phase_sent == 'approach'
     assert owner.m8._m8_entry.line_s == pytest.approx(.44)
     assert owner.m8._exit_check_enabled
@@ -771,3 +771,104 @@ def test_exit_observer_remains_available_after_map_based_preparation(owner, monk
         observer.update(np.zeros((480,640,3),np.uint8),NS(stamp=NS(sec=10,nanosec=0)))
     assert len(observer.exit.messages)==2
     assert not observer.entry.messages and not observer.partial.messages
+
+
+FORCE = dict(m8_force_exit_after_m=2.4, m8_force_exit_idle_sec=1.0, m8_force_exit_max_m=4.0,
+             m8_force_exit_stuck_min_m=1.5, m8_force_exit_stuck_sec=3.0,
+             m8_force_exit_timeout_sec=60.0)
+
+
+def force_tick(n, dt=.10, move=0.):
+    n.now += int(dt*1e9)
+    n._odom_ns = n.now
+    n._odom.s += move
+    n.m8.tick(n.now)
+
+
+def test_force_exit_disabled_by_default(owner):
+    for _ in range(80):
+        force_tick(owner, move=.10)
+    assert owner._active == 'M8'
+
+
+def test_force_exit_after_distance_and_cone_idle(owner):
+    owner.params.update(FORCE)
+    force_tick(owner)                       # M8 진입 위치 기록
+    for _ in range(20):                     # 2.0 m, 콘 명령 계속 v>0
+        proposal(owner)
+        force_tick(owner, move=.10)
+    assert owner._active == 'M8'
+    for _ in range(5):                      # 2.5 m 까지, 콘 명령 계속 v>0 -> 안 넘어감
+        proposal(owner)
+        force_tick(owner, move=.10)
+    assert owner._active == 'M8'
+    for _ in range(8):                      # 콘 명령 끊긴 지 0.9 s -> 아직
+        force_tick(owner)
+    assert owner._active == 'M8'
+    force_tick(owner); force_tick(owner)    # 1.0 s 넘김 -> M1
+    assert owner._active == 'M1'
+
+
+def test_force_exit_not_before_stuck_distance_even_if_cones_idle(owner):
+    owner.params.update(FORCE)
+    force_tick(owner)
+    for _ in range(50):                     # 1.0 m 만 가고 5 s 동안 콘 명령 없음 -> stuck 최소거리 1.5 m 미만
+        force_tick(owner, move=.02)
+    assert owner._active == 'M8'
+
+
+def test_force_exit_when_stopped_without_cone_path(owner):
+    owner.params.update(FORCE)
+    force_tick(owner)
+    for _ in range(17):                     # 1.7 m, 콘 명령 계속 v>0
+        proposal(owner)
+        force_tick(owner, move=.10)
+    for _ in range(28):                     # 콘 명령 끊기고 차는 서 있음 (거리 안 늚), 2.9 s
+        force_tick(owner)
+    assert owner._active == 'M8'
+    force_tick(owner); force_tick(owner)    # 3 s 넘김 -> M1
+    assert owner._active == 'M1'
+
+
+def test_force_exit_timeout_even_at_entry(owner):
+    owner.params.update(FORCE)
+    force_tick(owner)
+    for _ in range(598):                    # 입구에서 거의 못 감, 콘 명령은 계속 들어옴
+        proposal(owner)
+        force_tick(owner, move=.001)
+    assert owner._active == 'M8'
+    for _ in range(3):
+        proposal(owner)
+        force_tick(owner)
+    assert owner._active == 'M1'
+
+
+def test_force_exit_at_max_distance_even_with_cone_command(owner):
+    owner.params.update(FORCE)
+    force_tick(owner)
+    for _ in range(39):
+        proposal(owner)
+        force_tick(owner, move=.10)
+    assert owner._active == 'M8'
+    proposal(owner)
+    force_tick(owner, move=.10)
+    proposal(owner)
+    force_tick(owner)
+    assert owner._active == 'M1'
+
+
+def test_force_exit_reason_rules():
+    from jetracer_ros2.m8_entry import m8_force_exit_reason
+    def r(d, idle, t=0.):
+        return m8_force_exit_reason(d, idle, t, after_m=2.4, idle_sec=1.0, max_m=4.0,
+                                    stuck_min_m=1.5, stuck_sec=3.0, timeout_sec=60.)
+    assert r(2.5, 1.2).startswith('idle')
+    assert r(2.3, 2.0) is None
+    assert r(2.3, 3.0).startswith('stuck')
+    assert r(1.4, 99.) is None
+    assert r(3.0, 0.5) is None
+    assert r(4.0, 0.0).startswith('max')
+    assert r(0.1, 0.0, 60.).startswith('timeout')
+    assert r(float('nan'), 9.0) is None
+    off = dict(after_m=-1., idle_sec=-1., max_m=-1., stuck_min_m=-1., stuck_sec=-1., timeout_sec=-1.)
+    assert m8_force_exit_reason(9., 99., 999., **off) is None

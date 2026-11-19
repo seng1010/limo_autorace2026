@@ -5,6 +5,7 @@ MIN_M8_SPEED = .10
 # This is still the tested upper bound of the current cone planner.
 MAX_M8_SPEED = .10
 M8_COMMAND_TIMEOUT = .25
+M8_LINE_CONFIRM_FRAMES = 2   # M8 입구 선(전체·일부) 확정에 필요한 연속 프레임 (11/19: 3 -> 2)
 # Spend at most 6.5 cm / 0.65 s of the 10 cm recovery budget under command.
 # Leave 3.5 cm nominal reserve for observation, scheduling and deceleration.
 M8_RECOVERY_CUTOFF_M = .065
@@ -55,7 +56,7 @@ def _observe_line(observations, s, distance, now):
         if dt > .25 or abs(line - observations[0][1]) > .08:
             observations.clear()
     observations.append((now, line))
-    if len(observations) >= 3:
+    if len(observations) >= M8_LINE_CONFIRM_FRAMES:
         anchor = sorted(x[1] for x in observations)[1]
         observations.clear()
         return anchor
@@ -231,6 +232,36 @@ class M8PartialEntryGate:
             self.confirmed = None
             return None
         return line
+
+
+def m8_force_exit_reason(travelled, cone_idle_sec, elapsed_sec, *, after_m, idle_sec, max_m,
+                         stuck_min_m, stuck_sec, timeout_sec):
+    """Fallback M8 -> M1 handover when the normal exit evidence never completes.
+
+    travelled: odom path [m] since the manager entered M8
+    cone_idle_sec: time since the last cone command with v > 0 (the manager
+        publishes a stop while the cone planner offers no path, so the car
+        stands still and travelled stops growing)
+    elapsed_sec: time since the manager entered M8
+    Rules (any value <= 0 disables that rule):
+      max      travelled >= max_m
+      idle     travelled >= after_m and cone_idle_sec >= idle_sec
+      stuck    travelled >= stuck_min_m and cone_idle_sec >= stuck_sec
+               (car stopped with no cone path; distance no longer grows)
+      timeout  elapsed_sec >= timeout_sec
+    Returns a reason string or None.
+    """
+    if not all(map(math.isfinite, (travelled, elapsed_sec))) or math.isnan(cone_idle_sec):
+        return None
+    if max_m > 0 and travelled >= max_m:
+        return f'max: travelled {travelled:.2f} m >= {max_m:.2f} m'
+    if after_m > 0 and idle_sec > 0 and travelled >= after_m and cone_idle_sec >= idle_sec:
+        return f'idle: travelled {travelled:.2f} m, no cone command {cone_idle_sec:.1f} s'
+    if stuck_min_m > 0 and stuck_sec > 0 and travelled >= stuck_min_m and cone_idle_sec >= stuck_sec:
+        return f'stuck: travelled {travelled:.2f} m, no cone command {cone_idle_sec:.1f} s'
+    if timeout_sec > 0 and elapsed_sec >= timeout_sec:
+        return f'timeout: {elapsed_sec:.1f} s in M8 (travelled {travelled:.2f} m)'
+    return None
 
 
 class M8ExitGate:

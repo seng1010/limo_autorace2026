@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import pytest
 
-from jetracer_ros2.m8_entry import M8PartialEntryGate
+from jetracer_ros2.m8_entry import M8_LINE_CONFIRM_FRAMES, M8PartialEntryGate
 from jetracer_ros2.m8_observers import detect_m8_entry_candidates, detect_m8_stop_line
 
 
@@ -62,8 +62,9 @@ def test_full_detection_remains_the_only_source_when_available():
 
 def confirmed_gate():
     g=M8PartialEntryGate()
-    for i in range(3):
-        assert g.observe(i*.01,.45-i*.01,10+i*.04)==(i==2)
+    n=M8_LINE_CONFIRM_FRAMES
+    for i in range(n):
+        assert g.observe(i*.01,.45-i*.01,10+i*.04)==(i==n-1)
     return g
 
 
@@ -71,8 +72,9 @@ def test_partial_requires_unique_consistent_frames():
     g=M8PartialEntryGate()
     for _ in range(4):g.observe(0.,.4,10.)
     assert g.anchor(0.,10.1) is None
-    for i,d in enumerate([.4,-1.,.4,.2,.4]):g.observe(0.,d,10.1+i*.04)
-    assert g.anchor(0.,10.3) is None
+    # Start after the 0.25 s window so the earlier single frame cannot pair up.
+    for i,d in enumerate([.4,-1.,.4,.2,.4]):g.observe(0.,d,10.4+i*.04)
+    assert g.anchor(0.,10.6) is None
 
 
 @pytest.mark.parametrize('s,now',[(.03,10.9),(.221,10.1),(.0,10.1),(.03,float('nan'))])

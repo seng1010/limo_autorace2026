@@ -13,7 +13,7 @@ from jetracer_ros2.m8_entry import (
     M8_EXIT_CHECK_TOPIC, M8_EXIT_COMMAND_TOPIC, M8_EXIT_LANE_EVIDENCE_TOPIC,
     M8_EXIT_LINE_TOPIC, M8_EXIT_PROGRESS_TOPIC, M8_PHASE_TOPIC, M8_PARTIAL_ENTRY_TOPIC, M8_RECOVERY_COMMAND_TOPIC,
     MIN_M8_SPEED, M8EntryGate, M8ExitGate, M8PartialEntryGate, M8RecoveryBudget,
-    m8_entry_policy, m8_phase, select_m8_command)
+    m8_entry_policy, m8_force_exit_reason, m8_phase, select_m8_command)
 
 M8_REVERSE_SPEED = -.02
 
@@ -31,6 +31,13 @@ class M8Control:
             'm8_exit_min_gap_m': 0.60,
             'm8_exit_pass_margin_m': 0.30,
             'm8_exit_settle_m': 0.15,
+            # 강제 탈출 (출구 선·출구 차선을 끝내 못 볼 때 M1 로 넘김). 0 이하 = 끔
+            'm8_force_exit_after_m': -1.0,
+            'm8_force_exit_idle_sec': -1.0,
+            'm8_force_exit_max_m': -1.0,
+            'm8_force_exit_stuck_min_m': -1.0,
+            'm8_force_exit_stuck_sec': -1.0,
+            'm8_force_exit_timeout_sec': -1.0,
         }
         for name,value in defaults.items():
             node.declare_parameter(name,value)
@@ -70,6 +77,9 @@ class M8Control:
                 and 0 < self._m8_entry.search_limit <= 1.0 and 0 < self._m8_approach_speed <= .10):
             raise ValueError('Invalid M8 entry parameters')
         self._m2_start_s = None
+        self._m8_enter_s = None        # 매니저가 M8 에 들어온 순간의 odom 누적거리
+        self._cone_go_ns = 0           # 마지막으로 v > 0 콘 명령을 받은 시각
+        self._m8_enter_ns = 0          # 매니저가 M8 에 들어온 시각
         self._m8_arm_requested = False
         self._m8_last_output = ''
         self._m8_entry_state = 'off'
@@ -218,6 +228,8 @@ class M8Control:
         self._cone_rx_ns = self.node.get_clock().now().nanoseconds
         self._cone_stamp_ns = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
         self._cone_cmd = msg.twist.linear.x, msg.twist.angular.z
+        if self._cone_cmd[0] > 0:
+            self._cone_go_ns = self._cone_rx_ns
         if self._entry_source() and self._m8_entry.started_s is not None and self._cone_cmd[0] > 0:
             self.node._control_tick()
         elif self.node._active == 'M8':
@@ -344,6 +356,8 @@ class M8Control:
             self.node._publish(Twist())
             self.node._debug('source=stop reason=operator_stop v=0.000')
             return
+        if self._force_exit(now):
+            return
         age = (now-self._cone_stamp_ns)/1e9 if self._cone_stamp_ns > 0 else float('inf')
         (v, omega), reason = select_m8_command(self._cone_cmd, age, self._m8_operator_stop)
         source = 'cone' if v > 0 else 'stop'
@@ -405,6 +419,26 @@ class M8Control:
                     f'v={v:.3f} omega={omega:+.3f}')
 
 
+    def _force_exit(self, now):
+        """정상 탈출 판단(출구 선/콘 통과 + 출구 차선)이 끝나지 않을 때 거리·콘 명령으로 M1 에 넘긴다."""
+        n = self.node
+        if n._active != 'M8' or self._m8_enter_s is None or not self._odom_fresh(now):
+            return False
+        p = lambda k: n.get_parameter(k).value
+        travelled = n._odom.s - self._m8_enter_s
+        idle = (now - self._cone_go_ns) / 1e9 if self._cone_go_ns else float('inf')
+        elapsed = (now - self._m8_enter_ns) / 1e9 if self._m8_enter_ns else 0.0
+        reason = m8_force_exit_reason(
+            travelled, idle, elapsed,
+            after_m=p('m8_force_exit_after_m'), idle_sec=p('m8_force_exit_idle_sec'),
+            max_m=p('m8_force_exit_max_m'), stuck_min_m=p('m8_force_exit_stuck_min_m'),
+            stuck_sec=p('m8_force_exit_stuck_sec'), timeout_sec=p('m8_force_exit_timeout_sec'))
+        if reason is None:
+            return False
+        n.get_logger().warn(f'M8 forced exit -> M1: {reason}')
+        n._advance(f'M8 forced exit: {reason}')
+        return True
+
     def discard_commands(self):
         """매니저 비상정지/해제 시 명령만 폐기. 통로·출구·이동거리 판단은 보존."""
         self._cone_cmd = self._exit_lane_cmd = self._recovery_offer = None
@@ -440,6 +474,8 @@ class M8Control:
             self._m8_post_reverse_ns=0
             self._m2_start_s=None
         if mission == 'M8':
+            self._m8_enter_s = None
+            self._m8_enter_ns = self._cone_go_ns = self.node.get_clock().now().nanoseconds
             self._set_exit_check(False)
             self._m8_exit.reset(self._m8_entry.line_s)
             self._m8_last_output=''
@@ -459,6 +495,8 @@ class M8Control:
                 self._m2_start_s=n._odom.s
             elif n._active=='M8' and self._m8_entry.started_s is None:
                 self._m8_entry.arm(n._odom.s)
+            if n._active=='M8' and self._m8_enter_s is None:
+                self._m8_enter_s=n._odom.s
         if n._active=='M8':
             self._publish_m8_control(now)
             return True
