@@ -290,9 +290,8 @@ class MissionManagerNode(Node):
 
     def _yolo_callback(self, msg):
         event = msg.data
-        if (self._active == 'M5' and event == 'slow_sign'
-                and not self._m5_section_slow_done):
-            self._slow = True
+        # M5 서행은 section_node 의 거리(출발선 기준 m5_slow_from_m ~ m5_slow_to_m)로만 한다.
+        # YOLO 서행 표지판으로 일찍 서행을 켜지 않는다.
         if event == 'pedestrian':
             # M3 직전(M6 구간)에서 먼저 보일 수 있어서 미션과 상관없이 위치를 기억
             self._last_pedestrian_s = self._odom.s
