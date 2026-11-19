@@ -70,6 +70,11 @@ stop_line_node:
     detect_white: true
     white_lightness_min: 75          
     white_saturation_max: 90
+    # M1 에서만 쓰는 흰선 밝기 기준 (음수 = white_lightness_min 그대로).
+    # 11/19 bag: 천천히 선·신호등 정지선 L 65~80 (M4 시작선 90~100) -> 75 로는 둘 다 놓쳐
+    # 2.4 m 뒤 M4 시작선에서 섬. 65 로 bag 재생하면 네 선이 순서대로 잡힘.
+    # 미션은 /mission_manager/debug/state 로 앎. M8 출구 선은 매니저 m1_count_after_turn_deg 로 제외
+    m1_white_lightness_min: 65
     detect_yellow: false
     yellow_hue_min: 15                # HLS hue (0~180)
     yellow_hue_max: 35
@@ -120,21 +125,23 @@ section_node:
     # 11/15 02:31 실차 1회 기록 (출발선 기준 누적): 서행 표시 선 1.52 / 지그재그 앞 선 9.31 /
     #   횡단보도 정지선 11.27 / 그다음 선 13.45 m. 아래 값은 이 기록에 맞춘 것 (1회라 여유를 둠)
     odom_topic: '/odom'
-    slow_speed: 0.15                  # 서행 속도 [m/s] (규정: 기본 속도의 1/2 수준, 최대 0.2 이하. 기본 0.30 의 절반)
+    slow_speed: 0.15                  # 공통 서행 속도 [m/s] (미션별 mN_slow_speed 가 없을 때). 규정: 최대 0.2 이하
     line_min_frames: 2
     line_refractory_m: 0.30
     # M5 서행(방지턱): 출발선 -> 첫 코너 지나 지그재그 앞 정지선
     m5_line_after_m: 8.6              # 지그재그 앞 선(9.31) - 0.7
     m5_timeout_m: 9.6                 # 그 선을 놓쳤을 때
-    m5_slow_line_after_m: 0.8         # 출발 후 0.8 m 뒤 처음 보이는 선(서행 표시 선, 1.52 m)에서 서행 시작
-    m5_slow_from_m: 1.7               # 그 선을 놓쳤을 때 서행 시작
-    m5_slow_to_m: 5.0                 # 서행 끝 (출발선 기준). 대회장에서 방지턱 끝 + 여유로 조정
+    m5_slow_line_after_m: -1.0        # 선 인식 안 씀: 서행 표시 선을 보든 말든 아래 거리로만 서행
+    m5_slow_from_m: 1.45              # 서행 시작 (출발선 기준)
+    m5_slow_to_m: 3.0                 # 서행 끝 (출발선 기준) -> 원래 속도
+    m5_slow_speed: 0.20               # M5 서행 속도 (음수 = 위 공통 slow_speed)
     # M6 서행 유도선(지그재그): 횡단보도 정지선이 0.8 m 안에 들어오기 전에 M3 로 넘겨야 함
     m6_line_after_m: -1.0
     m6_timeout_m: 1.0
     m6_slow_from_m: 0.0
     m6_slow_line_after_m: -1.0
     m6_slow_to_m: 2.0                 # 횡단보도 정지선(M6 시작 후 1.96 m)까지 서행 유지
+    m6_slow_speed: 0.15               # M6 지그재그 서행 속도
     # M2 갈림길, M8 라바콘: 3차선 미션을 붙인 뒤 설정 (지금은 꺼 둠)
     m2_line_after_m: -1.0
     m2_timeout_m: -1.0
@@ -157,6 +164,8 @@ mission_manager_node:
     active_mission_topic: 'mission/active'
     lane_mode_topic: 'mission/lane_mode'
     normal_speed: 0.30                # 평소 속도 상한 (11/14 코너 검증 때와 같은 0.30)
+    m5_start_speed: 0.50              # M5 출발 ~ m5_start_until_m 만 이 속도 (차선 곡률 유지, 음수 = 끄기)
+    m5_start_until_m: 1.45            # = section_node m5_slow_from_m (서행 시작)
     slow_speed: 0.12
     command_timeout_sec: 0.40
     auto_start_mission_nodes: true
@@ -201,6 +210,10 @@ mission_manager_node:
     # 그래서 정지선을 slow_after_lines 개 지나면 서행을 시작한다 (음수 = 서행 안 함)
     m1_slow_speed: 0.15
     m1_slow_after_lines: 1
+    m1_count_after_turn_deg: 60.0     # M8(콘 직선) 진행 방향에서 이만큼 돈 뒤부터 M1 정지선을 셈.
+                                      # 코너 90도. 19:29 bag 콘 지그재그 최대 41도 -> 여유 두고 60
+                                      # 콘 출구 선(코너 앞)은 안 세고 천천히 선(코너 뒤)부터 셈. 0 = 끄기
+                                      # M8 을 거치지 않고 M1 부터 시작하면 기준이 없어 바로 셈 (예전 동작)
     m3_hold_sec: 3.5                  # 완전정지 확인 후 대기 (규정 3초 이상)
     m3_done_distance_m: 0.50          # 출발 후 이만큼 가면 M3 완료 -> M7
     m3_lost_line_revert_m: 0.30       # 정지 전에 이보다 멀리서 선을 놓치면 잘못 본 선 -> 계속 주행
@@ -212,7 +225,7 @@ mission_manager_node:
     m4_skip_crosswalk_end: true       # M1 출발 후 첫 새 선(횡단보도 끝)은 통과, 다음 선에서 주차 준비
     # 전체 주행에서도 M2에서 M8 단독 launch와 같은 입구 감시를 사용한다.
     # M2 진입 즉시 콘 제어로 바꾸지 않음: 55cm 사전검사, 45cm/전방 위험 시 보호접근.
-    m8_entry_arm_after_m: 4.9
+    m8_entry_arm_after_m: -1.0       # 가벽/거리만으로 M2 종료를 준비하지 않는다.
     m8_entry_arm_near_line_m: 0.45
     m8_entry_precheck_m: 0.55
     # M8 강제 탈출 (출구 선·출구 차선 확인이 끝내 안 될 때 M1 로 넘김). 0 이하 = 끔

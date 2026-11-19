@@ -16,9 +16,9 @@ M1 (신호등) 판단은 ``m1_traffic_light.TrafficLightMission`` 이 하고, �
 import math
 import json
 import os
-import signal
 import subprocess
 import sys
+import time
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
@@ -27,8 +27,9 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
 
+from jetracer_ros2 import process_tree
 from jetracer_ros2.m8_control import M8Control
-from jetracer_ros2.m1_traffic_light import M1Config, TrafficLightMission
+from jetracer_ros2.m1_traffic_light import CornerLineGate, M1Config, TrafficLightMission
 from jetracer_ros2.m3_pedestrian import M3Config, PedestrianStopMission
 from jetracer_ros2.stop_approach import (
     FullStopDetector, StopApproachConfig, StopApproachController)
@@ -67,6 +68,10 @@ class MissionManagerNode(Node):
             'active_mission_topic': 'mission/active',
             'lane_mode_topic': 'mission/lane_mode',
             'normal_speed': 0.25,
+            # M5 출발 직후 ~ m5_start_until_m 까지만 이 속도로 (차선 명령의 곡률은 그대로 두고 속도만 올림).
+            # 음수 = 끄기. 서행 구간(section_node)이 시작되면 서행이 우선
+            'm5_start_speed': -1.0,
+            'm5_start_until_m': 1.45,
             'slow_speed': 0.12,
             'command_timeout_sec': 0.40,
             'auto_start_mission_nodes': True,
@@ -104,6 +109,7 @@ class MissionManagerNode(Node):
             'm3_stop_offset_m': -1.0,
             'm1_slow_speed': 0.15,
             'm1_slow_after_lines': 1,
+            'm1_count_after_turn_deg': 60.0,        # M8 진행 방향에서 이만큼 돈 뒤부터 M1 정지선을 셈 (0 = 끄기)
             'm3_hold_sec': 3.5,
             'm3_done_distance_m': 0.50,
             'm4_line_arm_distance_m': 0.80,
@@ -144,7 +150,7 @@ class MissionManagerNode(Node):
         self._last_light_s = None         # 신호등(아무 색)을 마지막으로 본 odom 위치
         self._obstacle_seen = False
         self._processes = {}
-        self._stopping = []               # 끄는 중인 미션 노드 (process, 시작 시각 ns)
+        self._stopping = []               # 끄는 중인 미션 노드 (process_tree.StoppingProcess)
         self._stop_line_m = None
         self._stop_line_ns = 0
         self._odom = OdomPathIntegrator()
@@ -185,6 +191,8 @@ class MissionManagerNode(Node):
                      slow_after_lines=p('m1_slow_after_lines')),
             make_approach('m1_stop_offset_m'),
             FullStopDetector(p('full_stop_speed'), p('full_stop_sec')))
+        self._m1_gate = CornerLineGate(p('m1_count_after_turn_deg'))
+        self._yaw = None
         self._mission_last_state = ''
         self._m4_approach = make_approach('m4_stop_offset_m')
         self._m4_full_stop = FullStopDetector(p('full_stop_speed'), p('m4_full_stop_sec'))
@@ -290,9 +298,8 @@ class MissionManagerNode(Node):
 
     def _yolo_callback(self, msg):
         event = msg.data
-        if (self._active == 'M5' and event == 'slow_sign'
-                and not self._m5_section_slow_done):
-            self._slow = True
+        # M5 서행은 section_node 의 거리(출발선 기준 m5_slow_from_m ~ m5_slow_to_m)로만 한다.
+        # YOLO 서행 표지판으로 일찍 서행을 켜지 않는다.
         if event == 'pedestrian':
             # M3 직전(M6 구간)에서 먼저 보일 수 있어서 미션과 상관없이 위치를 기억
             self._last_pedestrian_s = self._odom.s
@@ -308,6 +315,9 @@ class MissionManagerNode(Node):
             return
         self._odom_speed = speed
         self._odom.update(pose.x, pose.y, self._odom_speed)
+        self._yaw = _yaw_of(getattr(msg.pose.pose, 'orientation', None))
+        if self._active == 'M8':
+            self._m1_gate.add_reference(self._yaw)
         self._odom_ns = self.get_clock().now().nanoseconds
 
     def _speed_limit_callback(self, msg):
@@ -394,6 +404,7 @@ class MissionManagerNode(Node):
 
     def _enter_mission(self, mission, initial=False):
         self._mission_enter_ns = self.get_clock().now().nanoseconds
+        self._m5_start_s = None           # M5 출발 위치 (m5_start_speed 구간 계산용)
         self._slow = False
         self._m5_section_slow_seen = False
         self._m5_section_slow_done = False
@@ -405,8 +416,15 @@ class MissionManagerNode(Node):
         self._mission_last_state = ''
         if mission == 'M3':
             self._m3.reset()
+        if mission == 'M8':
+            self._m1_gate.clear_reference()
         if mission == 'M1':
             self._m1.reset()
+            self._m1_gate.start()
+            if not self._m1_gate.open:
+                self.get_logger().info(
+                    f'M1 정지선 세기 보류: M8 진행 방향 {self._m1_gate.reference_deg:.0f}도 기준 '
+                    f'{self._m1_gate.min_turn_deg:.0f}도 돈 뒤부터 (콘 출구 선 제외)')
             self._parking_line_gate = None
             self._parking_exit_s = self._parking_target_s = None
             self._parking_line_rx_ns = 0
@@ -538,7 +556,12 @@ class MissionManagerNode(Node):
         stop_line = self._fresh_stop_line(now_ns)
         speed = self._measured_speed(now_ns)
         light = self._fresh_traffic(now_ns)
-        decision = self._m1.update(now_ns / 1e9, stop_line, speed, self._odom.s,
+        was_open = self._m1_gate.open
+        m1_line = stop_line if self._m1_gate.allow(self._yaw) else None
+        if self._m1_gate.open and not was_open:
+            self.get_logger().info(
+                f'M1 정지선 세기 시작: M8 방향에서 {self._m1_gate.turn_deg(self._yaw):.0f}도 돎')
+        decision = self._m1.update(now_ns / 1e9, m1_line, speed, self._odom.s,
                                    light, last_light_s=self._last_light_s)
         if (decision.state in ('go', 'done', 'passing') and self._odom_fresh(now_ns)
                 and self.get_parameter('m4_skip_crosswalk_end').value):
@@ -683,7 +706,12 @@ class MissionManagerNode(Node):
             self._publish(Twist())
             return
         command = getattr(self, f'_{source}_cmd')
-        if source == 'lane':
+        boost = self._m5_start_speed(now) if source == 'lane' else None
+        if (boost is not None and speed_limit is None and not self._slow
+                and not (self._section_limit is not None
+                         and (now - self._section_limit_ns) / 1e9 <= 1.0)):
+            command = self._set_speed(command, boost)
+        elif source == 'lane':
             target = (self.get_parameter('slow_speed').value
                       if self._slow else self.get_parameter('normal_speed').value)
             if speed_limit is not None:
@@ -692,6 +720,28 @@ class MissionManagerNode(Node):
                 target = min(target, self._section_limit)
             command = self._limit_speed(command, target)
         self._publish(command)
+
+    def _m5_start_speed(self, now):
+        """M5 출발 후 m5_start_until_m 전이면 m5_start_speed, 아니면 None."""
+        speed = self.get_parameter('m5_start_speed').value
+        if self._active != 'M5' or speed <= 0.0 or not self._odom_fresh(now):
+            return None
+        if self._m5_start_s is None:
+            self._m5_start_s = self._odom.s
+        if self._odom.s - self._m5_start_s >= self.get_parameter('m5_start_until_m').value:
+            return None
+        return speed
+
+    @staticmethod
+    def _set_speed(command, speed):
+        """전진 명령의 속도를 speed 로 바꾸고, 같은 곡률이 되게 각속도도 같은 비율로 바꾼다."""
+        if command.linear.x <= 0.0:
+            return command
+        scale = speed / command.linear.x
+        output = Twist()
+        output.linear.x = speed
+        output.angular.z = command.angular.z * scale
+        return output
 
     @staticmethod
     def _limit_speed(command, limit):
@@ -706,34 +756,32 @@ class MissionManagerNode(Node):
     def _start_process(self, name):
         if name in self._processes and self._processes[name].poll() is None:
             return
+        leftover = process_tree.other_instances(name)
+        if leftover:
+            # 이전 주행에서 안 꺼진 고아일 수 있다. 사람이 따로 띄운 시험 노드일 수도 있어 끄지는 않는다
+            self.get_logger().warn(
+                f'{name} 가 이미 떠 있음 (pid {leftover}) - 같은 토픽에 두 개가 발행할 수 있음. '
+                f'이전 주행 고아면 `pkill -f {name}` 후 다시 시작')
         self._processes[name] = subprocess.Popen(['ros2', 'run', 'jetracer_ros2', name])
         self.get_logger().info(f'started {name}')
 
     def _stop_process(self, name, wait=False):
+        """그 미션을 떠날 때만 부른다 (_leave_mission, 종료). `ros2 run` 래퍼와 실제 노드(자식)를 같이 끈다."""
         process = self._processes.pop(name, None)
         if process is None or process.poll() is not None:
             return
-        process.send_signal(signal.SIGINT)
+        stopping = process_tree.StoppingProcess(process, time.monotonic())  # 벽시계 (sim time 무관)
+        self.get_logger().info(f'stopping {name} (pid {process.pid}, 노드 {stopping.children})')
         if not wait:
             # 여기서 끝나길 기다리면 그동안 /cmd_vel 이 끊겨 차가 선다 (11/15 실차: M7->M2 에서 확인).
             # 주행 중에는 기다리지 않고 _reap_processes 에서 나중에 확인한다
-            self._stopping.append((process, self.get_clock().now().nanoseconds))
+            self._stopping.append(stopping)
             return
-        try:
-            process.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            process.terminate()
+        process_tree.wait_all([stopping], time.monotonic)
 
     def _reap_processes(self, now_ns):
-        alive = []
-        for process, since in self._stopping:
-            if process.poll() is not None:
-                continue
-            if (now_ns - since) / 1e9 > 2.0:
-                process.terminate()
-                continue
-            alive.append((process, since))
-        self._stopping = alive
+        now = time.monotonic()
+        self._stopping = [item for item in self._stopping if not item.step(now)]
 
     def destroy_node(self):
         # Ctrl+C 로 이미 통신이 내려간 뒤면 정지 명령 발행이 실패하므로 무시한다
@@ -742,12 +790,24 @@ class MissionManagerNode(Node):
                 self.cmd_pub.publish(Twist())
         except Exception:  # noqa: BLE001
             pass
+        stopping = list(self._stopping)
         for name in list(self._processes):
-            self._stop_process(name, wait=True)
-        for process, _ in self._stopping:
+            process = self._processes.pop(name)
             if process.poll() is None:
-                process.terminate()
+                stopping.append(process_tree.StoppingProcess(process, time.monotonic()))
+        process_tree.wait_all(stopping, time.monotonic)
         return super().destroy_node()
+
+
+def _yaw_of(q):
+    """쿼터니언 -> yaw [rad]. 없거나 이상하면 None."""
+    try:
+        x, y, z, w = float(q.x), float(q.y), float(q.z), float(q.w)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (x, y, z, w)) or (x, y, z, w) == (0., 0., 0., 0.):
+        return None
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def main(args=None):

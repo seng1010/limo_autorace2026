@@ -944,3 +944,53 @@ def test_all_in_node_launch_passes_park_choice_to_manager():
     launch = (Path(__file__).parents[1] / 'launch/all_in_node.launch.py').read_text()
     assert "'park', default_value='claude'" in launch
     assert "['m4_parking:=', LaunchConfiguration('park')]" in launch
+
+
+def _odom(n, x, y, yaw_deg, speed=.10):
+    import math
+    half = math.radians(yaw_deg) / 2
+    n._odom_callback(NS(pose=NS(pose=NS(position=NS(x=x, y=y),
+                                        orientation=NS(x=0., y=0., z=math.sin(half), w=math.cos(half)))),
+                        twist=NS(twist=NS(linear=NS(x=speed)))))
+    n._odom_ns = n.now
+
+
+def test_m8_exit_line_before_corner_is_not_counted_as_m1_line(modules):
+    """19:29 bag 재생: M1 이 콘 출구 선 앞에서 시작하면 출구 선을 첫 선으로 세어 천천히 선에서 섬.
+    M8 진행 방향에서 60도 돌기 전 선은 M1 이 보지 않아야 한다."""
+    n = owner(modules, 'M8', m1_trigger='light_or_line')
+    x = 0.
+    for i in range(60):                       # 콘 직선 (yaw 0 근처 지그재그)
+        x += .005
+        _odom(n, x, 0., 20. * ((i % 4) - 1.5) / 1.5)
+    n._transition_to('M1', 'test forced exit before exit line')
+    assert n._active == 'M1' and not n._m1_gate.open
+    for _ in range(6):                        # 코너 전 출구 선이 보임
+        x += .01
+        _odom(n, x, 0., -5.)
+        step(n, line=.40, speed=.10, refresh_odom=False)
+    assert n._m1.lines_seen == 0
+    _odom(n, x, -.1, -75.)                    # 코너
+    step(n, refresh_odom=False)
+    assert n._m1_gate.open
+    for _ in range(3):                        # 코너 뒤 천천히 선
+        _odom(n, x, -.2, -90.)
+        step(n, line=.40, speed=.10, refresh_odom=False)
+    assert n._m1.lines_seen == 1
+
+
+def test_m1_without_m8_reference_counts_lines_as_before(modules):
+    n = owner(modules, 'M1', m1_trigger='light_or_line')
+    assert n._m1_gate.open
+    step(n, line=.40, speed=.10)
+    step(n, line=.40, speed=.10)
+    assert n._m1.lines_seen == 1
+
+
+def test_odom_without_orientation_keeps_gate_open(modules):
+    n = owner(modules, 'M8')
+    for i in range(40):
+        n._odom_callback(NS(pose=NS(pose=NS(position=NS(x=i * .01, y=0.))),
+                            twist=NS(twist=NS(linear=NS(x=.1)))))
+    n._transition_to('M1', 'test')
+    assert n._m1_gate.open

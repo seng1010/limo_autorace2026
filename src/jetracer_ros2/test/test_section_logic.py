@@ -134,3 +134,20 @@ def test_line_before_window_does_not_start_slow():
     log = drive(SectionTracker(rules), manager(('M5',)), lines=(0.3,), total_m=3.0)
     slow = {s: out.slow for s, _, out in log}
     assert not slow[0.5] and not slow[1.5] and slow[1.8]
+
+
+def test_per_mission_slow_speed():
+    """M5 서행 0.20, M6 서행 0.15 처럼 미션마다 서행 속도를 따로 낸다 (음수 = 공통값)."""
+    t = SectionTracker({'M5': SectionRule(slow_from_m=1.45, slow_to_m=3.0, slow_speed=.20),
+                        'M6': SectionRule(slow_from_m=0.0, slow_to_m=2.0, slow_speed=.15),
+                        'M2': SectionRule(slow_from_m=0.0, slow_to_m=1.0)},
+                       LinePassDetector())
+    t.update(0.0, 'M5', None)
+    assert t.update(1.0, 'M5', None).slow_speed == -1.0
+    out = t.update(2.0, 'M5', None)
+    assert out.slow and out.slow_speed == .20
+    t.update(5.0, 'M5', None)
+    out = t.update(5.5, 'M6', None)
+    assert out.slow and out.slow_speed == .15
+    out = t.update(10.0, 'M2', None)
+    assert out.slow and out.slow_speed == -1.0
