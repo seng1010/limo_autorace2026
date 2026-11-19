@@ -70,6 +70,11 @@ stop_line_node:
     detect_white: true
     white_lightness_min: 75          
     white_saturation_max: 90
+    # M1 에서만 쓰는 흰선 밝기 기준 (음수 = white_lightness_min 그대로).
+    # 11/19 bag: 천천히 선·신호등 정지선 L 65~80 (M4 시작선 90~100) -> 75 로는 둘 다 놓쳐
+    # 2.4 m 뒤 M4 시작선에서 섬. 65 로 bag 재생하면 네 선이 순서대로 잡힘.
+    # 미션은 /mission_manager/debug/state 로 앎. M8 출구 선은 매니저 m1_count_after_turn_deg 로 제외
+    m1_white_lightness_min: 65
     detect_yellow: false
     yellow_hue_min: 15                # HLS hue (0~180)
     yellow_hue_max: 35
@@ -201,6 +206,10 @@ mission_manager_node:
     # 그래서 정지선을 slow_after_lines 개 지나면 서행을 시작한다 (음수 = 서행 안 함)
     m1_slow_speed: 0.15
     m1_slow_after_lines: 1
+    m1_count_after_turn_deg: 60.0     # M8(콘 직선) 진행 방향에서 이만큼 돈 뒤부터 M1 정지선을 셈.
+                                      # 코너 90도. 19:29 bag 콘 지그재그 최대 41도 -> 여유 두고 60
+                                      # 콘 출구 선(코너 앞)은 안 세고 천천히 선(코너 뒤)부터 셈. 0 = 끄기
+                                      # M8 을 거치지 않고 M1 부터 시작하면 기준이 없어 바로 셈 (예전 동작)
     m3_hold_sec: 3.5                  # 완전정지 확인 후 대기 (규정 3초 이상)
     m3_done_distance_m: 0.50          # 출발 후 이만큼 가면 M3 완료 -> M7
     m3_lost_line_revert_m: 0.30       # 정지 전에 이보다 멀리서 선을 놓치면 잘못 본 선 -> 계속 주행
