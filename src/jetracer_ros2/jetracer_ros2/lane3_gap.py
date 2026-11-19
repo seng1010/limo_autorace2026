@@ -92,6 +92,9 @@ V_REVERSE = 0.10
 ARM_AFTER_M = 1.4        # 매니저: M7 시작 후 이만큼 간 뒤부터 (그 전은 코너)
 ENTRY_FRAMES = 3         # 흰 점선이 연속 이만큼 보이면 시작
 ENTRY_WAIT_M = 1.2       # 그래도 못 보면 ARM_AFTER_M + 이 거리에서 그냥 시작
+ENTRY_STILL_SEC = 1.0    # 11/20: 3차선 입구에서 이만큼 제자리면 기다리지 않는다. 0 이하면 끔(전과 같다).
+                         #   11/19: 입구에서 기본 주행이 '선 없음'으로 서면 흰 점선도 거리(ENTRY_WAIT_M)도 영영 안 채워져 그대로 서 있었다.
+                         #   (a) 준비 상태(ARM_AFTER_M 지남)에서 제자리 -> 그냥 시작  (b) 켜진 뒤 '입구: 기본 주행에 맡김'인데 제자리 -> 맡기지 않고 막힘 처리(후진)
 # --- 11/18: 송도 bag(1117_053209)과 대회장 bag(1117_194426)으로 넣은 것 ---
 SIGN_EST_MAX_H = 60.0    # 섬 위치는 상자 높이가 이 값 이하(약 0.9 m 보다 멀리)일 때 본 것으로만 처음 잡는다.
                          #   대회장: 장애물 LIMO 를 높이 128 px 짜리 'a' 로 3번 연속 잘못 봐서 0.3 m 앞에 섬을 세우고 A 로 확정했다.
@@ -309,6 +312,7 @@ class GapCore:
         self.message = ''
         self.give_up = False
         self.dead_at = None          # 마지막 수단(선 무시)을 켠 자리
+        self._still_at, self._still_t = 0.0, None     # 마지막으로 움직인 때 (오간 거리, 시각)
         self.sign_txt = ''
         self.clr = (9.0, 9.0)
         self.free3 = (0.0, 0.0, 0.0)
@@ -534,6 +538,9 @@ class GapCore:
     # ----- 한 프레임 -----
     def step_obs(self, obs, pose, scan, goal, now):
         self._advance(pose, now)
+        if self._still_t is None or self.travel - self._still_at > 0.01:
+            self._still_at, self._still_t = self.travel, now
+        still = ENTRY_STILL_SEC > 0.0 and now - self._still_t >= ENTRY_STILL_SEC
         self._camera_heading(obs)
         lx, ly, lidar = self._lidar_points(scan)
         yrx, yry, yex, yey = self._yellow_points(obs)
@@ -712,7 +719,7 @@ class GapCore:
             if (g < min(0.02, o0 - 0.02)).any():     # 이미 옆에 붙어 있는 것(지나치는 중)은 더 가까워질 때만
                 stop = f'정면 {GUARD_DIST:.2f} m 안에 장애물'
         if (stop.startswith('갈 길 없음') and self.sP < ENTRY_SOFT_M and self.rev_count == 0 and o0 >= 0.15
-                and self.isl is None):
+                and self.isl is None and not still):        # 제자리면(기본 주행도 서 있음) 맡기지 않는다 -> 아래 막힘 처리
             fx, fy = self._arc(0.0, 0.80)
             if (self._look(g_obs, fx, fy) - BODY_R).min() >= 0.10:
                 # 입구: 장애물은 없고 노란 선(사선)만 걸린다 -> 서지 않고 기본 주행(노란 선 사이 주행)에 이 프레임을 맡긴다
@@ -806,6 +813,8 @@ class GapSupervisor:
         self.arm_travel = 0.0
         self._pose = None
         self._white = self._both = 0
+        self._still_at, self._still_t = 0.0, None     # 마지막으로 움직인 때 (odom 누적 거리, 시각)
+        self._still_start = False
         self._fork_end = 0.0
         self.message = ''
         self.side_taken = None
@@ -891,6 +900,8 @@ class GapSupervisor:
                 self._odo += step
         if pose is not None:
             self._pose = pose
+        if self._still_t is None or self._odo - self._still_at > 0.01:
+            self._still_at, self._still_t = self._odo, now
         if self.mode in ('off', 'done'):
             return None
         if self.mode == 'fork':                 # 갈림길 차로 ~ 합류: 기본 주행이 몰고, latch 만 꺼 둔다
@@ -905,8 +916,11 @@ class GapSupervisor:
                     return None
                 white = bool(obs) and any(r <= 0.3 and n >= 40 and abs(u) < 0.6 for u, n, r in obs['lines'])
                 self._white = self._white + 1 if white else 0
-                if self._white < ENTRY_FRAMES and self.arm_travel < ARM_AFTER_M + ENTRY_WAIT_M:
+                still = ENTRY_STILL_SEC > 0.0 and now - self._still_t >= ENTRY_STILL_SEC
+                if self._white < ENTRY_FRAMES and self.arm_travel < ARM_AFTER_M + ENTRY_WAIT_M and not still:
                     return None
+                if still and self._white < ENTRY_FRAMES and self.arm_travel < ARM_AFTER_M + ENTRY_WAIT_M:
+                    self._still_start = True
             elif scan is None:
                 return dict(v=0.0, steer=0.0, state='LANE3', reason='3차선G: 라이다(/scan) 기다리는 중', note='L3G wait scan')
             self.mode = 'on'
@@ -918,7 +932,9 @@ class GapSupervisor:
             else:
                 psi0 = 0.0
             self.core.start(psi0, pose)
-            self.message = f"[3차선G] {VERSION} 시작 (도로 방향 {math.degrees(-self.core.psi):+.0f}도)"
+            self.message = (f"[3차선G] {VERSION} 시작 (도로 방향 {math.degrees(-self.core.psi):+.0f}도)"
+                            + (f' - 입구에서 {ENTRY_STILL_SEC:.0f}초 제자리라 시작' if self._still_start else ''))
+            self._still_start = False
         core = self.core
         if scan is None and core.v > 0.0:
             core.v = 0.0
