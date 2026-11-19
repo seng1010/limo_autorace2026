@@ -24,6 +24,7 @@ trigger
   'light_or_line'  : 신호등 없이 정지선만 보여도 판단 (YOLO 없이 테스트할 때)
 """
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -186,3 +187,73 @@ class TrafficLightMission:
         if self.state == 'skipped':
             return M1Decision(done=True, skipped=True, state='skipped')
         return self._decide(self.state)
+
+
+class CornerLineGate:
+    """M8 -> M1 직후 콘 구간 출구 선을 M1 정지선으로 세지 않게 막는다.
+
+    트랙: 콘 구간 출구 선은 왼쪽 직선(콘과 같은 방향), M1 의 선들(천천히 선, 신호등 정지선,
+    횡단보도 끝선)은 그 뒤 오른쪽 90도 코너를 돈 위쪽 직선에 있다.
+    M8 강제 탈출(idle·stuck·timeout)이 출구 선 앞에서 일어나면 M1 이 출구 선을 첫 선으로 세어
+    천천히 선에서 서 버린다 (19:29 bag 재생: M1 시작을 출구 선 앞으로 당기면 그렇게 됨).
+
+    그래서 M8 동안의 진행 방향(odom yaw 중앙값)을 기준으로 잡고, 차가 그 기준에서
+    min_turn_deg 이상 돌기 전까지는 M1 이 정지선을 보지 않게 한다. 한 번 돌면 계속 연다.
+    - M1 이 코너 뒤에서 시작해도(늦은 탈출) 이미 돌아 있으므로 바로 연다
+    - M8 기준이 없으면(start:=M1 시험, yaw 없음) 막지 않는다 = 예전 동작
+    - M8 동안 yaw 가 거의 안 변했으면(min_spread_deg 미만) odom 방향을 못 믿는 것으로 보고
+      막지 않는다. 방향값이 고장 나 고정이면 영원히 안 열려 M1 을 통째로 놓치기 때문
+      (19:29 bag: M8 동안 yaw 62 ~ -33 도로 변함)
+    """
+
+    def __init__(self, min_turn_deg: float = 60.0, min_samples: int = 20,
+                 min_spread_deg: float = 2.0):
+        self.min_turn_deg = float(min_turn_deg)
+        self.min_samples = int(min_samples)
+        self.min_spread_deg = float(min_spread_deg)
+        self._sin: list = []
+        self._cos: list = []
+        self.reference_deg: Optional[float] = None
+        self.open = True
+
+    def clear_reference(self) -> None:
+        self._sin.clear()
+        self._cos.clear()
+
+    def add_reference(self, yaw_rad: Optional[float]) -> None:
+        if yaw_rad is None or not math.isfinite(yaw_rad):
+            return
+        self._sin.append(math.sin(yaw_rad))
+        self._cos.append(math.cos(yaw_rad))
+
+    def start(self) -> None:
+        """M1 시작 때 한 번. 기준이 있으면 닫고 시작한다."""
+        self.reference_deg = None
+        if self.min_turn_deg > 0 and len(self._sin) >= self.min_samples:
+            reference = math.atan2(_median(self._sin), _median(self._cos))
+            spread = max(abs(math.degrees(math.atan2(math.sin(math.atan2(sn, cs) - reference),
+                                                     math.cos(math.atan2(sn, cs) - reference))))
+                         for sn, cs in zip(self._sin, self._cos))
+            if spread >= self.min_spread_deg:
+                self.reference_deg = math.degrees(reference)
+        self.open = self.reference_deg is None
+        self.clear_reference()
+
+    def turn_deg(self, yaw_rad: Optional[float]) -> Optional[float]:
+        if self.reference_deg is None or yaw_rad is None or not math.isfinite(yaw_rad):
+            return None
+        return abs((math.degrees(yaw_rad) - self.reference_deg + 180.0) % 360.0 - 180.0)
+
+    def allow(self, yaw_rad: Optional[float]) -> bool:
+        """True 면 M1 이 정지선을 봐도 된다. yaw 를 모르면 닫힌 상태 유지."""
+        if not self.open:
+            turned = self.turn_deg(yaw_rad)
+            if turned is not None and turned >= self.min_turn_deg:
+                self.open = True
+        return self.open
+
+
+def _median(values):
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else 0.5 * (ordered[mid - 1] + ordered[mid])

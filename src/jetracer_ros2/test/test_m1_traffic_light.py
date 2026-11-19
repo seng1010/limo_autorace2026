@@ -282,3 +282,64 @@ def test_stop_offset_stops_before_line():
     log = _simulate(mission, lambda t: 'red' if t < 20.0 else 'green')
     held = [d for _, state, d, _ in log if state == 'hold']
     assert held and 0.0 < held[0] <= 0.05        # 선 앞 5cm 안에서, 넘지 않음
+
+
+# --------------------------------------------------------------------------- #
+# CornerLineGate: M8 콘 출구 선을 M1 정지선으로 세지 않기 (11/19 19:29 bag 재생 근거)
+# --------------------------------------------------------------------------- #
+import math as _math
+
+from jetracer_ros2.m1_traffic_light import CornerLineGate
+
+
+def _gate_with_reference(deg, samples=40, spread=0.0, **kwargs):
+    gate = CornerLineGate(**kwargs)
+    for i in range(samples):
+        wobble = spread * _math.sin(i)          # 콘 사이 지그재그 흉내
+        gate.add_reference(_math.radians(deg + wobble))
+    gate.start()
+    return gate
+
+
+def test_corner_gate_without_m8_reference_is_open():
+    gate = CornerLineGate()
+    gate.start()                                 # start:=M1 시험 등 M8 을 안 거침
+    assert gate.open and gate.allow(None)
+
+
+def test_corner_gate_closed_on_cone_straight_and_opens_after_corner():
+    gate = _gate_with_reference(-8, spread=30)   # 19:29 bag: 콘 구간 yaw -33~+8, 중앙값 약 -8
+    assert not gate.open
+    for yaw in (-8, -17, -33, 10):               # 출구 선 근처 (코너 전)
+        assert not gate.allow(_math.radians(yaw))
+    assert not gate.allow(_math.radians(-55))    # 47도: 아직 (콘 지그재그 최대 41도 + 여유)
+    assert gate.allow(_math.radians(-75))        # 코너 도는 중 67도
+    assert gate.allow(_math.radians(-8))         # 한 번 열리면 계속 (차선 흔들림에 다시 안 닫힘)
+
+
+def test_corner_gate_handles_angle_wrap():
+    gate = _gate_with_reference(170, spread=10)
+    assert not gate.allow(_math.radians(-150))   # 40도
+    assert gate.allow(_math.radians(-120))       # 70도
+
+
+def test_corner_gate_unknown_yaw_keeps_closed():
+    gate = _gate_with_reference(0, spread=10)
+    assert not gate.allow(None) and not gate.allow(float('nan'))
+
+
+def test_corner_gate_disabled_or_too_few_samples_is_open():
+    assert _gate_with_reference(0, spread=10, min_turn_deg=0).open
+    assert _gate_with_reference(0, spread=10, samples=5).open
+
+
+def test_corner_gate_frozen_yaw_is_not_trusted():
+    """방향값이 고정(고장)이면 막지 않는다 — 막으면 영원히 안 열려 M1 을 놓친다."""
+    assert _gate_with_reference(0, spread=0).open
+    assert not _gate_with_reference(0, spread=10).open
+
+
+def test_corner_gate_reference_is_cleared_for_next_m8():
+    gate = _gate_with_reference(0, spread=10)
+    gate.start()                                 # 샘플 없이 다시 시작 = 기준 없음
+    assert gate.open

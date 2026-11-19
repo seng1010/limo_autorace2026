@@ -7,6 +7,12 @@
   /stop_line/debug/compressed          디버그 이미지 (거리, 출처, 행 비율 표시)
   /stop_line/debug/row_ratio  Float32  정지선 아래 가장자리 행 비율 (보정용, 없으면 -1.0)
 
+M1 전용 밝기 기준
+  m1_white_lightness_min >= 0 이면 매니저 미션이 M1 일 때만 흰색 밝기 기준을 이 값으로 바꾼다.
+  (11/19 경기장: 천천히 선·횡단보도 앞 선 L 65~80, 다른 구간 선은 90 이상 -> 전역 75 로는 M1 선을 놓침)
+  미션은 section_node 와 같이 /mission_manager/debug/state 첫 단어로 안다 (20 Hz, 늦게 켜져도 받음).
+  M8 입구·출구 관측(M8StopLineObserver)은 항상 기본 설정을 쓴다.
+
 거리 계산
   - lut_rows / lut_distances_m 이 2개 이상이면 보정표 사용 (scripts/calibrate_stop_line.py)
   - 2개 미만이면 보정 전: 예전 식 (1 - 하단 비율) * distance_scale_m
@@ -15,6 +21,7 @@
 
 import os
 import sys
+from dataclasses import replace
 
 import cv2
 import numpy as np
@@ -24,7 +31,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 
 from jetracer_ros2.stop_line_detector import (
     BlindZoneTracker, OdomPathIntegrator, RowDistanceModel, StopLineConfig, detect_stop_line)
@@ -58,6 +65,7 @@ class StopLineNode(Node):
             'blind_pass_margin_m': 0.10,
             'blind_jump_tolerance_m': 0.15,
             'publish_debug': True,
+            'm1_white_lightness_min': -1,    # M1 에서만 쓸 흰색 밝기 기준 (음수 = 기본값 그대로)
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -65,6 +73,8 @@ class StopLineNode(Node):
 
         self.config = StopLineConfig(**{
             field: p(field) for field in StopLineConfig.__dataclass_fields__})
+        self.m1_config = m1_line_config(self.config, int(p('m1_white_lightness_min')))
+        self._mission = None
         reference = str(p('reference_wheel')).strip().lower()
         if reference not in ('front', 'rear'):
             raise ValueError("reference_wheel 은 'front' 또는 'rear'")
@@ -81,7 +91,9 @@ class StopLineNode(Node):
             f'정지선 거리 기준: {reference} 바퀴, '
             + ('보정표 사용' if self.model.calibrated
                           else '보정 전 (distance_scale_m 선형식)')
-            + (', odom 사각지대 추적 ON' if self.use_odom else ''))
+            + (', odom 사각지대 추적 ON' if self.use_odom else '')
+            + (f', M1 흰선 밝기 {self.m1_config.white_lightness_min}'
+               f' (기본 {self.config.white_lightness_min})' if self.m1_config else ''))
 
         from jetracer_ros2.m8_observers import M8StopLineObserver
         self.m8_observer = M8StopLineObserver(self, self.model, self.config)
@@ -93,6 +105,21 @@ class StopLineNode(Node):
             CompressedImage, p('image_topic'), self._image_callback, qos_profile_sensor_data)
         if self.use_odom:
             self.create_subscription(Odometry, p('odom_topic'), self._odom_callback, 20)
+        if self.m1_config:
+            self.create_subscription(
+                String, '/mission_manager/debug/state', self._manager_callback, 10)
+
+    def _manager_callback(self, msg):
+        word = msg.data.split(' ', 1)[0]
+        if word != self._mission and word.startswith('M') and word[1:].isdigit():
+            if 'M1' in (word, self._mission):
+                level = self.m1_config.white_lightness_min if word == 'M1' \
+                    else self.config.white_lightness_min
+                self.get_logger().info(f'{word}: 흰선 밝기 기준 {level}')
+            self._mission = word
+
+    def _line_config(self):
+        return self.m1_config if (self.m1_config and self._mission == 'M1') else self.config
 
     def _odom_callback(self, msg):
         pose = msg.pose.pose.position
@@ -108,7 +135,7 @@ class StopLineNode(Node):
         if image is None:
             return
         self.m8_observer.update(image, msg.header)
-        detection = detect_stop_line(image, self.config)
+        detection = detect_stop_line(image, self._line_config())
         visual = self.model.distance(detection.row_ratio) if detection else None
         distance = self.tracker.update(visual) if self.use_odom else visual
         self._publish(distance)
@@ -126,6 +153,7 @@ class StopLineNode(Node):
             cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 3)
         source = self.tracker.source if self.use_odom else ('visual' if detection else 'none')
         text = (f'{distance:.3f} m ({source})' if distance is not None else 'no line')
+        text += f'  L>={self._line_config().white_lightness_min}'
         if detection:
             text += f'  row={detection.row_ratio:.3f}'
         cv2.putText(debug, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
@@ -133,6 +161,13 @@ class StopLineNode(Node):
         if ok:
             self.debug_pub.publish(
                 CompressedImage(header=msg.header, format='jpeg', data=encoded.tobytes()))
+
+
+def m1_line_config(base, lightness_min):
+    """M1 에서만 쓸 설정. 음수면 None (= 기본 설정 그대로)."""
+    if lightness_min < 0:
+        return None
+    return replace(base, white_lightness_min=lightness_min)
 
 
 def main(args=None):
