@@ -37,7 +37,7 @@ from collections import deque
 import cv2
 import numpy as np
 
-VERSION = 'claude-v7'
+VERSION = 'claude-v8'
 
 try:
     import three_lane as T               # 같은 폴더의 파일 (LineFitter, SignVote 만 빌려 쓴다)
