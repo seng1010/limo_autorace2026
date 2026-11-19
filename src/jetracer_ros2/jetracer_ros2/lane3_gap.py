@@ -157,8 +157,45 @@ SIDE_BIAS = 0.04                       # 똑같으면 표지판 쪽(모르면 DE
 LANE_HALF = 0.2675
 
 
+# --- 흰 점선 (11/20). three_lane.py 는 고치지 않고 여기서 덧씌운다 ---
+# three_lane.LineFitter 는 흰색을 V>=150 으로만 본다. 11/19 저녁 경기장(노출 350~400)의 3차선 입구 점선은 V 100~150 이라
+#   거의 안 잡혔다 (V>=150 / >=100 인 픽셀: 341/2127, 728/3034, 856/2834, 154/2125. 바닥은 V 15~19).
+#   -> 점선을 못 봐 3차선 로직이 늦게 켜지고(그 사이 기본 주행은 '선 없음' 정지), 도로 방향을 0 으로 잡고 시작해 같은 자리에서 막혔다.
+# 100 으로 낮추면 흰 LIMO 차체·사람 다리(흰 바지)도 잡힌다 (19:03 bag: 방향이 12도 넘게 튄 프레임 18 %)
+#   -> 라이다에 잡힌 물체보다 앞쪽 바닥의 흰색만 쓴다 (bag 7구간에서 튄 프레임 0 %).
+WHITE_V_MIN = 100            # 3차선 흰 점선 밝기 기준 (HSV V). 150 이면 전과 같다
+WHITE_LIDAR_MARGIN = 0.15    # 라이다 물체보다 이만큼 [m] 앞쪽 바닥의 흰색만 쓴다. 음수면 거르지 않는다
+
+
+def _floor_before_lidar(fit, scan):
+    """BEV 칸마다: 그 방향으로 라이다에 잡힌 가장 가까운 물체보다 WHITE_LIDAR_MARGIN 넘게 앞(=바닥)이면 True."""
+    r = np.asarray(scan[0], dtype=np.float32).copy()
+    r[~np.isfinite(r) | (r < max(scan[3], 0.12))] = 99.0
+    idx = np.round((fit._bev_a - scan[1]) / scan[2]).astype(int)
+    inside = (idx >= 0) & (idx < r.size)                     # 라이다가 안 보는 방향은 거르지 않는다
+    near = np.minimum.reduce([r[np.clip(idx + k, 0, r.size - 1)] for k in (-2, -1, 0, 1, 2)])    # 좌우 2줄(약 2도)까지
+    return ~inside | (fit._bev_r < near - WHITE_LIDAR_MARGIN)
+
+
+def _masks(fit, image, tune=None):
+    """three_lane.LineFitter.masks 와 같다. 흰색 기준만 WHITE_V_MIN 이고, 라이다 물체 뒤(위)의 흰색은 버린다."""
+    tune = tune or {}
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    yellow = cv2.inRange(hsv, (tune.get('h_min', 15), max(60, tune.get('s_min', 40)), max(70, tune.get('v_min', 60))),
+                         (tune.get('h_max', 40), 255, 255))
+    white = cv2.inRange(hsv, (0, 0, WHITE_V_MIN), (179, 60, 255))
+    warp = lambda m: cv2.warpPerspective(m, fit.i2b, (fit.w, fit.h), flags=cv2.INTER_NEAREST)  # noqa: E731
+    fit.yellow, fit.white = fit._thin(warp(yellow)), fit._thin(warp(white), fit._glare_kernel)
+    if WHITE_LIDAR_MARGIN >= 0.0 and fit.scan is not None:
+        try:
+            fit.white = np.where(_floor_before_lidar(fit, fit.scan), fit.white, 0).astype(np.uint8)
+        except Exception:                                    # 라이다 값이 이상하면 거르지 않은 흰색을 그대로 쓴다
+            pass
+    return fit.yellow, fit.white
+
+
 def make_fitter():
-    """three_lane.LineFitter 를 만들되, 카메라 바닥 보정만 고친 값으로 바꾼다."""
+    """three_lane.LineFitter 를 만들되, 카메라 바닥 보정을 고친 값으로 바꾸고 흰 점선 기준을 덧씌운다."""
     fit = T.LineFitter()
     if USE_BEV_FIX:
         src = np.float32(T.BEV_SRC).reshape(4, 2)
@@ -167,6 +204,11 @@ def make_fitter():
         i2g = cv2.getPerspectiveTransform(src, np.float32(BEV_GROUND_FIX).reshape(4, 2))
         g2b = np.array([[1 / T.RES, 0, T.XW / T.RES], [0, -1 / T.RES, T.F1 / T.RES], [0, 0, 1.0]])
         fit.i2b = g2b @ i2g
+    fit.scan = None                                          # GapSupervisor.step 이 프레임마다 넣는다 (ranges, angle_min, angle_increment, range_min)
+    py, px = np.mgrid[0:fit.h, 0:fit.w]
+    bx, bf = -T.XW + (px + 0.5) * T.RES, T.F1 - (py + 0.5) * T.RES       # BEV 칸마다 오른쪽 / 앞 [m]
+    fit._bev_r, fit._bev_a = np.hypot(bf, bx), np.arctan2(-bx, bf)      # 라이다에서 본 거리 / 각(왼쪽 +). 라이다 위치는 LIDAR_AHEAD(0) 가정 그대로
+    fit.masks = lambda image, tune=None: _masks(fit, image, tune)
     return fit
 
 
@@ -830,6 +872,7 @@ class GapSupervisor:
     def step(self, image, pose, scan, both_yellow, tune=None):
         if self.mode in ('armed', 'on') and (self.forced or self.arm_travel >= ARM_AFTER_M - 0.05):
             prior = -self.core.psi if self.mode == 'on' else None
+            self.fitter.scan = scan
             obs = self.fitter.fit(image, prior, tune)
             if obs:
                 obs['thw'] = white_heading(getattr(self.fitter, 'white', None))
