@@ -85,3 +85,11 @@ def test_entry_switch_off_hands_over_forever(monkeypatch):
     monkeypatch.setattr(G, 'ENTRY_STILL_SEC', 0.0)
     _, states = _core_states(0.0, 60)
     assert set(states) == {'pass'}
+
+
+def test_entry_block_switch_off_keeps_only_the_armed_start(monkeypatch):
+    monkeypatch.setattr(G, 'ENTRY_STILL_BLOCK', False)
+    _, states = _core_states(0.0, 60)
+    assert set(states) == {'pass'}                                    # (b) 꺼짐: 맡긴 채로 둔다
+    sup, _ = _armed_supervisor_stopped_at(G.ARM_AFTER_M + 0.5, 1.3)
+    assert sup.mode == 'on'                                           # (a) 는 그대로

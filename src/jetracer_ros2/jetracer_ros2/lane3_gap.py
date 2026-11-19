@@ -37,7 +37,7 @@ from collections import deque
 import cv2
 import numpy as np
 
-VERSION = 'claude-v8'
+VERSION = 'claude-v9'
 
 try:
     import three_lane as T               # 같은 폴더의 파일 (LineFitter, SignVote 만 빌려 쓴다)
@@ -95,6 +95,8 @@ ENTRY_WAIT_M = 1.2       # 그래도 못 보면 ARM_AFTER_M + 이 거리에서 �
 ENTRY_STILL_SEC = 1.0    # 11/20: 3차선 입구에서 이만큼 제자리면 기다리지 않는다. 0 이하면 끔(전과 같다).
                          #   11/19: 입구에서 기본 주행이 '선 없음'으로 서면 흰 점선도 거리(ENTRY_WAIT_M)도 영영 안 채워져 그대로 서 있었다.
                          #   (a) 준비 상태(ARM_AFTER_M 지남)에서 제자리 -> 그냥 시작  (b) 켜진 뒤 '입구: 기본 주행에 맡김'인데 제자리 -> 맡기지 않고 막힘 처리(후진)
+ENTRY_STILL_BLOCK = True # (b)만 끄려면 False (a 는 그대로). 끄면 켜진 뒤 '기본 주행에 맡김'으로 서 있을 때 그대로 서 있는다(전과 같다).
+                         #   11/19 bag 재생(흰 점선 100): 입구 5번 중 2번(18:53, 19:03)이 이 상태로 서 있었다 -> 켜 둔다
 # --- 11/18: 송도 bag(1117_053209)과 대회장 bag(1117_194426)으로 넣은 것 ---
 SIGN_EST_MAX_H = 60.0    # 섬 위치는 상자 높이가 이 값 이하(약 0.9 m 보다 멀리)일 때 본 것으로만 처음 잡는다.
                          #   대회장: 장애물 LIMO 를 높이 128 px 짜리 'a' 로 3번 연속 잘못 봐서 0.3 m 앞에 섬을 세우고 A 로 확정했다.
@@ -105,6 +107,17 @@ ENTRY_SOFT_M = 1.0       # 시작 후 이 거리까지는: 노란 선 때문에�
                          #   (입구의 45도 사선을 벽으로 보고 후진을 반복했다 - 송도·대회장 둘 다)
 REV_STEER_GAIN = 1.2     # 후진할 때 차를 도로와 나란히 펴는 조향 (도로 기준 방향 x 이 값). 곧게만 후진하면 같은 자리로 되돌아왔다
 REV_STEER_MAX = math.radians(20.0)
+# --- 11/20: 같은 자리에서 또 막히면, 후진하면서 차 앞을 열린 쪽으로 돌린다 (첫 번째 후진은 전과 같다) ---
+#   가로로 놓인 LIMO 처럼 곧게 물러났다 다시 와도 같은 자리에서 막히는 배치용 (11/19: 0.82 / 0.82 / 0.81 m 에서 3번).
+#   실차 미검증. REV_AIM_DEG = 0.0 이면 전과 똑같다.
+REV_AIM_DEG = 18.0          # 후진으로 만들 각 [도] (도로 기준, 열린 쪽으로). 흰 점선 방향을 받아들이는 범위(THW_ACCEPT 25도)보다 작게 둔다
+REV_AIM_FROM = 2            # 같은 자리에서 몇 번째 후진부터 쓸지
+REV_AIM_STRAIGHT_M = 0.20   # 처음 이만큼은 곧게 물러난다 (거리만으로 길이 나오면 차를 돌리지 않는다. 각은 후진 끝에서 만들어야 이득이다)
+REV_AIM_SIDE_DIFF = 0.30    # 막히기 전 0.1~0.7 m 구간의 좌/우 '갈 수 있는 거리' 평균 차가 이 이상일 때만 열린 쪽을 정한다 (못 정하면 전과 같은 후진)
+REV_AIM_GO_FRAMES = 3       # 후진 중 열린 쪽으로 '막혔던 자리보다 0.6 m 넘게 가는 길'이 이만큼 연속 보이면 후진을 끝내고 바로 출발
+REV_AIM_GAIN = 3.0          # 각을 만들 때 조향 = 각 오차 x 이 값 (최대 REV_STEER_MAX)
+REV_AIM_PREF = 0.43         # 후진 뒤 처음 고를 줄: 열린 쪽으로 이만큼 옆 [m] (그 줄이 갈 만할 때만 고른다)
+REV_AIM_ISLAND_M = 0.8      # 갈림길 섬이 이 거리 안이면 쓰지 않는다 (표지판 쪽 처리 구간)
 DEAD_MODE = False        # 11/20 끔: 아래 '선 무시' 탈출을 쓰지 않는다. 3차선의 노란 선은 전부 바깥 경계라 무시하면 그대로 차로 밖으로 나갔다
                          #   (11/19 19:37: 왼쪽 앞에서 막힌 뒤 오른쪽 노란 선을 넘어 나감). 끄면 후진을 다 쓴 뒤 그 자리에 서 있는다. True 면 전과 같다
 DEAD_SEC = 3.0           # 후진을 다 쓰고도(또는 뒤가 막혀 후진을 못 하고) 이만큼 서 있으면: 노란 선·가상 벽은 무시하고
@@ -313,6 +326,10 @@ class GapCore:
         self.give_up = False
         self.dead_at = None          # 마지막 수단(선 무시)을 켠 자리
         self._still_at, self._still_t = 0.0, None     # 마지막으로 움직인 때 (오간 거리, 시각)
+        self.side_hist = deque(maxlen=150)   # 전진 판단 때마다 (sP, 왼쪽 줄들 / 오른쪽 줄들로 갈 수 있는 거리)
+        self.aim = 0                 # 이번 후진에서 차 앞을 돌릴 쪽: +1 왼쪽, -1 오른쪽, 0 = 전과 같은 후진
+        self.rev_start = 0.0         # 이번 후진을 시작할 때의 rev_left
+        self.aim_ok = 0
         self.sign_txt = ''
         self.clr = (9.0, 9.0)
         self.free3 = (0.0, 0.0, 0.0)
@@ -637,9 +654,26 @@ class GapCore:
             if behind < 0.03 or self.back_room <= 0.02:
                 self.rev_left = 0.0
             else:
+                done = self.rev_start - self.rev_left             # 이번 후진에서 지금까지 물러난 거리
+                if self.aim:
+                    # 물러난 만큼 길이 열렸나: 열린 쪽 줄로, 막혔던 자리보다 0.6 m 넘게 갈 수 있으면(보통·좁게 여유) 바로 출발
+                    ax, ay = self._rollout(CAND, LOOK_CHANGE, HMAX)
+                    open_k = CAND * self.aim > 0.05                 # 열린 쪽 줄들
+                    reach = float(self._free(g_obs, g_line, ax, ay, M_OBS_COMFORT, min(o0 - M_OBS_COMFORT, l0c))[open_k].max())
+                    if reach < done + MIN_GO:
+                        reach = float(self._free(g_obs, g_line, ax, ay, M_OBS, min(o0 - M_OBS, l0c))[open_k].max())
+                    self.aim_ok = self.aim_ok + 1 if (done >= 0.15 and reach >= done + MIN_GO) else 0
+            if self.rev_left > 0.0 and self.aim and self.aim_ok >= REV_AIM_GO_FRAMES:
+                self.rev_left = 0.0
+                self.message = f"[3차선G] 후진 {done:.2f} m 에서 {'왼쪽' if self.aim > 0 else '오른쪽'}으로 길이 보임 -> 출발"
+            if self.rev_left > 0.0:
                 # 물러나면서 차를 도로와 나란히 편다 (도로보다 오른쪽을 보고 있으면 오른쪽으로 꺾고 후진 -> 차 앞이 왼쪽으로 돈다).
                 # 그 호를 따라 차체가 장애물·노란 선에 더 가까워지면 곧게 물러난다
                 rs = float(np.clip(REV_STEER_GAIN * self.psi, -REV_STEER_MAX, REV_STEER_MAX))
+                if self.aim:
+                    # 같은 자리에서 또 막힘: 처음에는 곧게, 그 뒤에는 차 앞이 열린 쪽으로 REV_AIM_DEG 가 되게 (나란히 = 0 대신 목표 각만 바꾼 것)
+                    rs = 0.0 if done < REV_AIM_STRAIGHT_M else float(np.clip(
+                        REV_AIM_GAIN * (self.psi - self.aim * math.radians(REV_AIM_DEG)), -REV_STEER_MAX, REV_STEER_MAX))
                 if abs(rs) > math.radians(2.0):
                     rx, ry = self._arc_rev(rs)
                     if ((self._look(g_obs, rx, ry) - BODY_R).min() < min(0.03, o0 - 0.01)
@@ -648,7 +682,14 @@ class GapCore:
                 else:
                     rs = 0.0
                 self.v, self.steer = -V_REVERSE, rs
-                return self._out('REVERSE', f'후진 {self.rev_left:.2f} m 남음', 0.0, 0.0, to_isl)
+                return self._out('REVERSE', f'후진 {self.rev_left:.2f} m 남음'
+                                 + (f" ({'왼쪽' if self.aim > 0 else '오른쪽'}으로 각 만드는 중)" if self.aim else ''), 0.0, 0.0, to_isl)
+        if self.aim and self.tgt is None:
+            # 각을 만든 후진이 끝났다: 처음 고를 줄을 열린 쪽으로 (그 줄이 갈 만할 때만 뽑힌다)
+            self.tgt = self.latP + self.aim * REV_AIM_PREF
+            if self.isl is None:                                  # 섬(갈림길)이 잡혀 있으면 가고 싶은 줄은 표지판 쪽 그대로
+                pref = self.aim * REV_AIM_PREF
+        self.aim = 0
 
         # 후보 줄마다 갈 수 있는 거리
         prev = pref if self.tgt is None else self.tgt - self.latP
@@ -687,6 +728,8 @@ class GapCore:
         dk, fk = float(d[k]), float(free[k])
         self.tgt = self.latP + dk
         self.free3 = (float(free[10:15].max()), float(free[5:10].max()), float(free[0:5].max()))
+        if not self.side_hist or abs(self.sP - self.side_hist[-1][0]) > 0.005:      # 서 있는 동안은 쌓지 않는다
+            self.side_hist.append((self.sP, self.free3[0], self.free3[2]))
 
         # 조향·속도
         th_rel = -self.psi
@@ -719,7 +762,7 @@ class GapCore:
             if (g < min(0.02, o0 - 0.02)).any():     # 이미 옆에 붙어 있는 것(지나치는 중)은 더 가까워질 때만
                 stop = f'정면 {GUARD_DIST:.2f} m 안에 장애물'
         if (stop.startswith('갈 길 없음') and self.sP < ENTRY_SOFT_M and self.rev_count == 0 and o0 >= 0.15
-                and self.isl is None and not still):        # 제자리면(기본 주행도 서 있음) 맡기지 않는다 -> 아래 막힘 처리
+                and self.isl is None and not (still and ENTRY_STILL_BLOCK)):     # 제자리면(기본 주행도 서 있음) 맡기지 않는다 -> 아래 막힘 처리
             fx, fy = self._arc(0.0, 0.80)
             if (self._look(g_obs, fx, fy) - BODY_R).min() >= 0.10:
                 # 입구: 장애물은 없고 노란 선(사선)만 걸린다 -> 서지 않고 기본 주행(노란 선 사이 주행)에 이 프레임을 맡긴다
@@ -750,9 +793,13 @@ class GapCore:
                 self.s_stuck = max(self.s_stuck, self.sP)
                 self.rev_count += 1
                 self.rev_left = min(REVERSE_M, self.back_room)
+                self.rev_start, self.aim, self.aim_ok = self.rev_left, 0, 0
+                if REV_AIM_DEG > 0.0 and self.rev_count >= REV_AIM_FROM and (to_isl is None or to_isl > REV_AIM_ISLAND_M):
+                    self.aim = self._open_side()
                 self.stop_since = None
                 self.tgt = None
-                self.message = f'[3차선G] 막힘 -> 후진 {self.rev_left:.2f} m ({self.rev_count}번째)'
+                self.message = (f'[3차선G] 막힘 -> 후진 {self.rev_left:.2f} m ({self.rev_count}번째)'
+                                + (f" - 차 앞을 열린 쪽({'왼쪽' if self.aim > 0 else '오른쪽'})으로 돌린다" if self.aim else ''))
             return self._out('BLOCKED', stop, dk, fk, to_isl)
         self.stop_since = self.block_since = None
         if self.dead_at is not None and self.sP > self.dead_at + DEAD_RUN_M:
@@ -761,6 +808,16 @@ class GapCore:
         if self.isl is not None and self.side_taken is None and to_isl < -0.5:
             self.side_taken = 0 if self.latP > self.isl[1] else 2
         return self._out(state, f'{reason} {level}'.strip(), dk, fk, to_isl)
+
+    def _open_side(self):
+        """막히기 전 0.1~0.7 m 구간에서 좌/우 어느 쪽 줄이 더 멀리 갈 수 있었나: +1 왼쪽, -1 오른쪽, 0 = 못 정함."""
+        h = [(a, b) for s, a, b in self.side_hist if self.sP - 0.70 <= s <= self.sP - 0.10]
+        if len(h) < 5:
+            return 0
+        left, right = float(np.mean([a for a, _ in h])), float(np.mean([b for _, b in h]))
+        if abs(left - right) < REV_AIM_SIDE_DIFF:
+            return 0
+        return 1 if left > right else -1
 
     def _arc_rev(self, steer, dist=0.20):
         """지금 조향으로 dist 만큼 후진할 때 차체 원 가운데들: (걸음, 원 개수)."""
