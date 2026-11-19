@@ -68,7 +68,7 @@ stop_line_node:
     roi_top_ratio: 0.58
     # 정지선 색: 흰색 (트랙 확인). 옆 차선은 노란색이라 흰색만 검출해야 차선이 안 섞임
     detect_white: true
-    white_lightness_min: 145          
+    white_lightness_min: 75          
     white_saturation_max: 90
     detect_yellow: false
     yellow_hue_min: 15                # HLS hue (0~180)
@@ -212,7 +212,7 @@ mission_manager_node:
     m4_skip_crosswalk_end: true       # M1 출발 후 첫 새 선(횡단보도 끝)은 통과, 다음 선에서 주차 준비
     # 전체 주행에서도 M2에서 M8 단독 launch와 같은 입구 감시를 사용한다.
     # M2 진입 즉시 콘 제어로 바꾸지 않음: 55cm 사전검사, 45cm/전방 위험 시 보호접근.
-    m8_entry_arm_after_m: -1.0
+    m8_entry_arm_after_m: 4.9
     m8_entry_arm_near_line_m: 0.45
     m8_entry_precheck_m: 0.55
     # M8 강제 탈출 (출구 선·출구 차선 확인이 끝내 안 될 때 M1 로 넘김). 0 이하 = 끔
