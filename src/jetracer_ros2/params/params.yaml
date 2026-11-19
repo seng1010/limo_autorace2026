@@ -120,7 +120,7 @@ section_node:
     # 11/15 02:31 실차 1회 기록 (출발선 기준 누적): 서행 표시 선 1.52 / 지그재그 앞 선 9.31 /
     #   횡단보도 정지선 11.27 / 그다음 선 13.45 m. 아래 값은 이 기록에 맞춘 것 (1회라 여유를 둠)
     odom_topic: '/odom'
-    slow_speed: 0.20                  # 서행 속도 [m/s] (규정: 기본 속도의 1/2 수준, 최대 0.2 이하. 규정 상한 그대로라 여유 없음)
+    slow_speed: 0.15                  # 공통 서행 속도 [m/s] (미션별 mN_slow_speed 가 없을 때). 규정: 최대 0.2 이하
     line_min_frames: 2
     line_refractory_m: 0.30
     # M5 서행(방지턱): 출발선 -> 첫 코너 지나 지그재그 앞 정지선
@@ -129,12 +129,14 @@ section_node:
     m5_slow_line_after_m: -1.0        # 선 인식 안 씀: 서행 표시 선을 보든 말든 아래 거리로만 서행
     m5_slow_from_m: 1.45              # 서행 시작 (출발선 기준)
     m5_slow_to_m: 3.0                 # 서행 끝 (출발선 기준) -> 원래 속도
+    m5_slow_speed: 0.20               # M5 서행 속도 (음수 = 위 공통 slow_speed)
     # M6 서행 유도선(지그재그): 횡단보도 정지선이 0.8 m 안에 들어오기 전에 M3 로 넘겨야 함
     m6_line_after_m: -1.0
     m6_timeout_m: 1.0
     m6_slow_from_m: 0.0
     m6_slow_line_after_m: -1.0
     m6_slow_to_m: 2.0                 # 횡단보도 정지선(M6 시작 후 1.96 m)까지 서행 유지
+    m6_slow_speed: 0.15               # M6 지그재그 서행 속도
     # M2 갈림길, M8 라바콘: 3차선 미션을 붙인 뒤 설정 (지금은 꺼 둠)
     m2_line_after_m: -1.0
     m2_timeout_m: -1.0
@@ -156,7 +158,9 @@ mission_manager_node:
     mission_event_topic: 'mission/event'
     active_mission_topic: 'mission/active'
     lane_mode_topic: 'mission/lane_mode'
-    normal_speed: 0.50                # 평소 속도 상한. 실제 속도는 simple_lane 의 vmax_cm(~/simple_lane_tune_v9.json)도 50 이어야 남
+    normal_speed: 0.30                # 평소 속도 상한 (11/14 코너 검증 때와 같은 0.30)
+    m5_start_speed: 0.50              # M5 출발 ~ m5_start_until_m 만 이 속도 (차선 곡률 유지, 음수 = 끄기)
+    m5_start_until_m: 1.45            # = section_node m5_slow_from_m (서행 시작)
     slow_speed: 0.12
     command_timeout_sec: 0.40
     auto_start_mission_nodes: true

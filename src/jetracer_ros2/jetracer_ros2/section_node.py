@@ -107,8 +107,9 @@ class SectionNode(Node):
             self._slow = out.slow
             self.get_logger().info(f'서행 {"시작" if out.slow else "끝"} '
                                    f'({self._active} 시작 후 {out.travelled_m:.2f} m)')
-        self.speed_pub.publish(Float32(
-            data=float(self.get_parameter('slow_speed').value) if out.slow else -1.0))
+        slow_speed = (out.slow_speed if out.slow_speed > 0.0
+                      else float(self.get_parameter('slow_speed').value))
+        self.speed_pub.publish(Float32(data=slow_speed if out.slow else -1.0))
         if out.event:
             period = self.get_parameter('event_period_sec').value
             if out.event != self._last_event or (now - self._last_event_ns) / 1e9 >= period:

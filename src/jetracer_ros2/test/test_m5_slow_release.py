@@ -66,3 +66,26 @@ def test_next_mission_releases_m5_lifecycle_state(modules):
     event(n, 'M5_DONE')
     assert n._active == 'M6'
     assert not n._m5_section_slow_done and not n._m5_section_slow_seen
+
+
+def test_m5_start_boost_until_slow_zone_then_normal(modules):
+    """M5 출발 ~ 1.45 m 만 0.5 (곡률 유지), 서행 구간은 서행, 그 뒤는 원래 속도."""
+    n = owner(modules, 'M5', m5_start_speed=.5, m5_start_until_m=1.45)
+    section = SectionTracker({'M5': SectionRule(slow_from_m=1.45, slow_to_m=3.0)},
+                             LinePassDetector())
+    for distance in (0., 0.5, 1.4, 1.45, 2.0, 3.01, 4.0):
+        n._odom.s = distance
+        out = section.update(distance, 'M5', None)
+        n._speed_limit_callback(NS(data=.2 if out.slow else -1.))
+        step(n)
+        cmd = n.cmd_pub.messages[-1]
+        expected = .5 if distance < 1.45 else .2 if out.slow else .25
+        assert cmd.linear.x == pytest.approx(expected)
+        assert cmd.angular.z/cmd.linear.x == pytest.approx(.10/.25)
+
+
+@pytest.mark.parametrize('mission', ['M6', 'M3', 'M2', 'M1'])
+def test_m5_start_boost_not_used_in_other_missions(modules, mission):
+    n = owner(modules, mission, m5_start_speed=.5)
+    step(n)
+    assert n.cmd_pub.messages[-1].linear.x <= .25

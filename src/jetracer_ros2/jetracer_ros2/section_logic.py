@@ -23,6 +23,7 @@ class SectionRule:
     slow_to_m: float = -1.0      # 서행 끝
     slow_line_after_m: float = -1.0  # 이 거리 뒤에 처음 보이는 정지선에서 서행 시작 (음수 = 안 씀).
                                      # 선을 놓치면 slow_from_m 에서 시작. 끝은 똑같이 slow_to_m
+    slow_speed: float = -1.0     # 이 미션 서행 구간의 속도 [m/s] (음수 = section_node 공통 slow_speed)
 
 
 class LinePassDetector:
@@ -63,6 +64,7 @@ class SectionOutput:
     reason: str = ''                 # 완료 이유 ('line' / 'timeout')
     travelled_m: float = 0.0         # 지금 미션에서 간 거리
     line_s: Optional[float] = None   # 이번 주기에 새로 확인된 정지선 위치
+    slow_speed: float = -1.0         # 서행 중이면 그 구간의 속도 (음수 = 공통 slow_speed)
 
 
 class SectionTracker:
@@ -74,7 +76,7 @@ class SectionTracker:
         self._done_line_s: Optional[float] = None   # 이 선에 앞바퀴가 닿으면 완료
         self._done_reason = ''
         self._slow_line_used = False
-        self._slow_zones: List[Tuple[float, float]] = []
+        self._slow_zones: List[Tuple[float, float, float]] = []   # (시작, 끝, 속도)
 
     def _enter(self, mission: str, s: float) -> None:
         self.active = mission
@@ -84,7 +86,7 @@ class SectionTracker:
         self._slow_line_used = False
         rule = self.rules.get(mission)
         if rule and rule.slow_from_m >= 0.0 and rule.slow_to_m > rule.slow_from_m:
-            self._slow_zones.append((s + rule.slow_from_m, s + rule.slow_to_m))
+            self._slow_zones.append((s + rule.slow_from_m, s + rule.slow_to_m, rule.slow_speed))
 
     def update(self, s: float, active: Optional[str],
                stop_line_m: Optional[float]) -> SectionOutput:
@@ -99,10 +101,12 @@ class SectionTracker:
                 and new_line - self.start_s >= rule.slow_line_after_m
                 and s < self.start_s + rule.slow_to_m):
             self._slow_line_used = True               # 서행 표시 선이 보인 순간부터 서행
-            self._slow_zones.append((s, self.start_s + rule.slow_to_m))
+            self._slow_zones.append((s, self.start_s + rule.slow_to_m, rule.slow_speed))
         self._slow_zones = [z for z in self._slow_zones if s <= z[1]]
-        out = SectionOutput(slow=any(a <= s <= b for a, b in self._slow_zones),
-                            travelled_m=s - self.start_s, line_s=new_line)
+        active_zones = [z for z in self._slow_zones if z[0] <= s <= z[1]]
+        out = SectionOutput(slow=bool(active_zones),
+                            travelled_m=s - self.start_s, line_s=new_line,
+                            slow_speed=min((z[2] for z in active_zones if z[2] > 0.0), default=-1.0))
         if rule is None:
             return out
         if self._done_reason:                       # 이미 완료 판정 -> 매니저가 넘길 때까지 유지
